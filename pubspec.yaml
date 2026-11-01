@@ -1,0 +1,27 @@
+name: localhost_bridge
+description: A localhost bridge that lets web pages deliver origin-trusted commands to a local Dart app — CORS-ready, hardened origin policies, first-use consent, token layer, strict limits.
+version: 0.1.0
+
+repository: https://github.com/alkhalaftech/localhost_bridge
+issue_tracker: https://github.com/alkhalaftech/localhost_bridge/issues
+homepage: https://alkhalaftech.com
+
+topics:
+  - http-server
+  - localhost
+  - cors
+  - browser
+  - security
+
+environment:
+  sdk: ^3.9.0
+
+# Policy: zero runtime dependencies — nothing outside dart: is imported
+dependencies: {}
+
+
+dev_dependencies:
+  # dev-only runner — never reaches end users.
+  test: ^1.24.0
+  # Dart team's official lints — pana's scoring baseline.
+  lints: ^6.0.0
