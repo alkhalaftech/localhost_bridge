@@ -1,5 +1,7 @@
 # localhost_bridge
 
+[![CI](https://github.com/alkhalaftech/localhost_bridge/actions/workflows/dart.yml/badge.svg)](https://github.com/alkhalaftech/localhost_bridge/actions/workflows/dart.yml) [![pub](https://img.shields.io/pub/v/localhost_bridge.svg)](https://pub.dev/packages/localhost_bridge)
+
 A localhost HTTP bridge that lets web pages deliver origin-trusted
 commands to a local Dart app — CORS-ready, hardened origin policies,
 first-use consent, token layer, strict limits.
@@ -9,7 +11,9 @@ network). A web page the user visits sends commands to it directly from
 the browser. The bridge decides **who may talk** and **how much**; what
 the commands *mean* stays entirely in your handler.
 
-- **Zero runtime dependencies** — pure `dart:io`, one package, no native code.
+- **Zero runtime dependencies** — pure `dart:io`, one package, no native
+  code. (The SDK constraint pub.dev displays is a compatibility range,
+  not a dependency.)
 - Every rejection carries a stable error `code` — the developer contract.
 
 ## Quick start
@@ -86,6 +90,10 @@ program), the `Sec-Fetch-*` headers, and the payload.
   `allowAllHardened`, or a remembered consent, a local program can present
   a listed `Origin` (the header is browser-set, locally forgeable) and
   enter without the secret.
+- **"Trusted" means admitted, not validated.** A `TrustedCommand` is so
+  named because it passed the origin decision on its way in — the name
+  says nothing about the payload's safety. Payload validation is always
+  yours (next bullet).
 - **In every mode, payloads are untrusted.** Your handler must validate
   them (for printers: allow-list the command set; block configuration,
   file-storage and firmware commands) and cap decompressed size.
@@ -114,7 +122,7 @@ because no legitimate `fetch` caller can ever fail those checks.
 
 | `OriginPolicy` field | Effect |
 |---|---|
-| `allowed` | Exact origins (`https://host`), bare hosts (`partner.io`), and `*.example.com` (subdomains only — list the root explicitly). |
+| `allowed` | Exact origins (`https://host`) — matched against the full origin the browser sends, so a non-default port must be written in the entry itself (`https://host:8443`); bare hosts (`partner.io`) — matched against the host name alone, so a bare entry admits the host on **any** port; and `*.example.com` (subdomains only — list the root explicitly). Bare and wildcard entries admit `https` only (plus local `http` under `allowLocalHttp`); full-origin entries carry their scheme. |
 | `allowAllHardened` | Any valid HTTPS origin passes the hardening (origin, fetch-mode, per-origin quota). Loud warning on activation. |
 | `allowLocalHttp` | Dev exception: accept `http://localhost` / `http://127.0.0.1` (allow-all path and bare/wildcard entries). |
 | `onUnknownOrigin` | First-use consent callback (`allowAlways` / `allowOnce` / `reject` / `dismissed`). Non-blocking: the request returns `origin_pending` immediately (CORS-readable, with `Retry-After` exposed) and the page retries after the host answers; `allowOnce` grants exactly one retry within ~30s; `dismissed` closes the question with no decision — nothing is remembered and the origin is asked again on its next request. New questions carry a time budget (10 per 10 minutes) — beyond it the request still gets `origin_pending`, with no new question until stamps age out. Call `dispose()` when done to cancel pending window timers. |
@@ -124,7 +132,47 @@ because no legitimate `fetch` caller can ever fail those checks.
 | `requireFetchMetadata` | On by default. The allow-all and discovery paths refuse requests carrying no `Sec-Fetch-Mode: cors` / `Sec-Fetch-Dest: empty` (`cross_site_blocked`) — closing silent sends from browsers without Fetch Metadata. Headerless non-browser clients on the token layer are unaffected; turn it off only if you serve such clients through the browser paths. |
 | `askTimeout` | Max lifetime of a silent consent window (default 60s); the slot frees only on answer or expiry. |
 
+## ArrivalGuard — an optional host-side tool
+
+`ArrivalGuard` is a standalone metering class the package exports for
+hosts that want their own arrival bookkeeping. It is **not** wired into
+the server: the intake path never calls it, and every protection the
+bridge enforces (origin policy, fetch-mode checks, per-origin quotas,
+token lockout, seat cap) is computed without it. Treat it as a helper you
+call yourself, not as a guard the bridge applies for you.
+
+It answers one question per request: given arrival facts you record, does
+this fingerprint look like a flood or a duplicate loop? The decision comes
+back as a fact for your log — the class never rejects anything.
+
+```dart
+final guard = ArrivalGuard(); // 60 s window, at most 500 live fingerprints
+
+CommandOutcome handle(TrustedCommand cmd) {
+  final decision = guard.decide(ArrivalFacts(
+    elapsedMs: stopwatch.elapsedMilliseconds, // one monotonic clock, yours
+    fingerprint: fingerprintOf(cmd),          // you define the identity
+    maxPerMinute: 120,
+    dupWindowMs: 5000,
+    maxDupPerMinute: 3,
+  ));
+  if (decision is ReviewArrival) {
+    // decision.reason is 'flood' or 'dupLoop'; decision.dups counts
+    // repeats inside the dup window. Your review path decides.
+  }
+  return const CommandOutcome(ok: true);
+}
+```
+
+The decision to keep this class in the public API or remove it is
+deferred to a later release; treat it as provisional.
+
 ## Wire contract (what your page sees)
+
+> **A `504 handler_timeout` is an unknown outcome, not a failure.** The
+> handler may still complete after the seat frees — a blind retry can
+> double-execute the command. Reconcile on `X-Correlation-Id` before any
+> retry (the page-side reference shows the flow).
 
 JSON everywhere: `POST` with `Origin`; responses carry `X-Correlation-Id` (yours echoed back when it matches `[A-Za-z0-9._-]` and is at most 128 chars; anything else is replaced with a generated id) Stable error codes:
 
@@ -151,6 +199,154 @@ Bodies arrive as an array of strings, a bare string, or
 gateways use one). Compressed payloads are delivered as-is —
 decompression is the host's responsibility, by design.
 
+## Page-side reference (JavaScript)
+
+The wire contract above is the real contract; the snippet below is a
+reference pattern for a browser page, not a required client.
+
+```javascript
+const ENDPOINT = 'http://127.0.0.1:9100/'; // the port start() returned
+
+// Explain the Local Network Access permission to the user before the
+// browser raises its own prompt. The query can hang in some embedded
+// contexts, so bound it with a timer instead of awaiting it blind.
+async function loopbackPermissionState() {
+  const timeout = new Promise((resolve) => setTimeout(() => resolve(null), 3000));
+  // Browsers that do not know the permission name reject query() with a
+  // TypeError (or throw it synchronously). Left bare, that rejection
+  // would settle the race below and make this whole function throw
+  // instead of answering — so every failure path folds into `null`,
+  // which the last line reports as 'unknown'.
+  const query = (async () => {
+    try {
+      return await navigator.permissions.query({ name: 'loopback-network' });
+    } catch (permissionError) {
+      return null; // name not recognized here -> report 'unknown'
+    }
+  })();
+  const status = await Promise.race([query, timeout]);
+  return status ? status.state : 'unknown'; // 'granted' | 'prompt' | 'denied' | 'unknown'
+}
+
+async function sendCommand(payload, correlationId, mayRetry = true) {
+  let response;
+  // The request itself may hang with no answer at all (a prompt nobody
+  // answers, an embedded frame that cannot show one), so bound it and
+  // regain control instead of waiting forever.
+  const abort = new AbortController();
+  const giveUp = setTimeout(() => abort.abort(), 15000);
+  try {
+    response = await fetch(ENDPOINT, {
+      method: 'POST',
+      headers: {
+        'Content-Type': 'application/json',
+        'X-Correlation-Id': correlationId,
+      },
+      body: JSON.stringify(payload),
+      // From an HTTPS page, declare the target address space so the
+      // request stays exempt from mixed-content blocking (Chrome 142+).
+      targetAddressSpace: 'loopback',
+      signal: abort.signal,
+    });
+  } catch (networkError) {
+    // A network error does NOT tell you why it happened. It covers both
+    // a policy rejection the browser could not read and the bridge
+    // simply being down — and an aborted timeout lands here too. Treat
+    // it as "no answer", never as a verdict.
+    throw new Error('bridge unreachable — no verdict about the command');
+  } finally {
+    clearTimeout(giveUp);
+  }
+
+  if (response.status === 403 || response.status === 429) {
+    const body = await response.json();
+    if (body.error === 'origin_pending' && mayRetry) {
+      // The consent question is open. Wait exactly what the server
+      // states — Retry-After is in seconds — and retry once.
+      const waitSeconds = Number(response.headers.get('Retry-After')) || 2;
+      await new Promise((resolve) => setTimeout(resolve, waitSeconds * 1000));
+      return sendCommand(payload, correlationId, false);
+    }
+    // Every other rejection lands here. Rate-limit rejections (429, and
+    // budget-shaped 403s) carry an honest Retry-After; this reference
+    // does not auto-retry a rate limit (that would defeat it), so the
+    // wait travels on the error as retryAfterSeconds whenever the
+    // server stated one, and the caller honors it before trying again.
+    const rejection = new Error(`rejected: ${body.error}`);
+    const retryAfterSeconds = Number(response.headers.get('Retry-After'));
+    if (Number.isFinite(retryAfterSeconds) && retryAfterSeconds > 0) {
+      rejection.retryAfterSeconds = retryAfterSeconds;
+    }
+    throw rejection;
+  }
+
+  if (response.status === 504) {
+    // handler_timeout: the handler may still complete in the background.
+    // This is an UNKNOWN outcome, not a failure — reconcile on your
+    // correlation id before any retry, or the command can double-run.
+    throw new Error('outcome unknown — reconcile on X-Correlation-Id');
+  }
+
+  return response.json();
+}
+
+// Call it before your first send, and explain what the prompt means.
+const state = await loopbackPermissionState();
+```
+
+Two properties of the wire are worth designing around. First, a policy
+rejection arrives as an HTTP status with a stable `error` code — but the
+page can read that body only where CORS allows it: admitted origins, the
+consent-question rejection, and quota rejections carrying `Retry-After`
+when the origin qualifies for the echo. Second, everything else surfaces
+as a plain network error that cannot distinguish "the policy said no"
+from "the bridge is not running" — design your state machine so neither
+case reports a command verdict.
+
+If the sending page lives in an `<iframe>`, the embedding page must
+delegate the Local Network Access permission to the frame with
+`allow="loopback-network"` on the iframe tag — without it the frame's
+requests fail regardless of what the user would have granted. A
+sandboxed iframe also needs `allow-same-origin`: without it the frame
+runs on an opaque origin the policy rejects, and in some browsers the
+permission flow hangs instead of prompting.
+
+## Browser support (reviewed 2026-11)
+
+| Browser | Status |
+|---|---|
+| Chrome, Edge (desktop and Android) | works — the browser asks the user for Local Network Access permission |
+| Firefox (desktop 153+, Android 160+) | works — permission prompt as above |
+| Safari (macOS) and every iOS browser | not supported — iOS browsers are all WebKit, and WebKit blocks `http://127.0.0.1` from an `https` page as mixed content, with no Local Network Access prompt to exempt it |
+| Android WebView | no permission prompt of its own — reachability follows the permissions of the app embedding the WebView |
+
+"Works" means the page can send and read a reply after the user grants
+the prompt. The fetch-mode hardening does not depend on any prompt — it
+applies wherever the request arrives.
+
+## Host platforms
+
+| Host platform | Status |
+|---|---|
+| Desktop (Windows, macOS, Linux) | works — the usual loopback server model |
+| Android | works — an in-app loopback server; Chrome and Firefox reach it after the user grants Local Network Access. Any installed app that can open the port can visit it with a forged `Origin` too, so the token layer is the practical requirement, not an optional extra |
+| iOS | no browser path — WebKit blocks `http://127.0.0.1` from `https` pages (mixed content), and iOS suspends in-app sockets when the host app backgrounds |
+
+### When this package fits
+
+The bridge is built for pages driving local commands where a silent or
+replayed send must be stopped by barriers, not by luck: irreversible
+commands (print, pay, open a gate, clear device state) where you want
+origin admission, consent questions, quotas, and deduplication
+discipline around every send. A command that is safe to repeat and
+carries no consequence is fine on a plain local HTTP server — the
+bridge's walls exist for the commands that must not run twice or from
+the wrong page.
+
+Addressing: the server binds IPv4 only, so page code should use
+`127.0.0.1` — a `localhost` name can resolve to `::1` (IPv6), where
+nothing listens in this release.
+
 ## Limits (by design)
 
 - Loopback IPv4 only (`127.0.0.1`); no IPv6 binding in this release.
@@ -174,9 +370,9 @@ decompression is the host's responsibility, by design.
 - Local-network-access permission prompts differ across browsers; the
   fetch-mode layer does not depend on them.
 - Hostile-wire behavior is pinned by contract tests (`wire_contract_test`
-  covers 14 rejection and pass-through cases; `priority_contract_test`
-  replays 300 seeded request rounds) — broader randomized corpora remain
-  on the roadmap.
+  is a single test replaying a fourteen-case corpus across three
+  protection modes; `priority_contract_test` replays 300 seeded request
+  rounds) — broader randomized corpora remain on the roadmap.
 - Why no TLS: a self-signed certificate on loopback trains users to click
   through warnings and buys nothing against the browser adversary model
   above; the transport is loopback-only and never leaves the machine.
@@ -184,7 +380,7 @@ decompression is the host's responsibility, by design.
 ## Documentation
 
 See `example/main.dart` for a complete runnable host (pure Dart, zero
-dependencies). `example/live_check.dart` verifies the browser channel in a
+runtime dependencies). `example/live_check.dart` verifies the browser channel in a
 real browser with one command — `dart run example/live_check.dart` — then
 open the two URLs it prints (expect all checks green via `localhost`, and
 blocked by design via `127.0.0.1`). It serves its check page from loopback

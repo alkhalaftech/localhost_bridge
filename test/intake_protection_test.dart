@@ -335,47 +335,55 @@ void main() {
         },
       );
 
-      test(
-        'fetch metadata: navigate/no-cors rejected, cors and absent pass',
-        () async {
-          final p = IntakeProtection()
-            ..update(policy: const OriginPolicy(allowAllHardened: true));
-          expect(
-            (await p.check(
-              origin: 'https://a.example',
-              fetchMode: 'navigate',
-              fetchDest: 'document',
-            ))!.code,
-            'cross_site_blocked',
-          );
-          expect(
-            (await p.check(
-              origin: 'https://a.example',
-              fetchMode: 'no-cors',
-            ))!.code,
-            'cross_site_blocked',
-          );
-          expect(
-            await p.check(
-              origin: 'https://a.example',
-              fetchMode: 'cors',
-              fetchDest: 'empty',
+      test('fetch metadata: navigate, no-cors, and absent headers rejected — '
+          'cors alone passes', () async {
+        final p = IntakeProtection()
+          ..update(policy: const OriginPolicy(allowAllHardened: true));
+        expect(
+          (await p.check(
+            origin: 'https://a.example',
+            fetchMode: 'navigate',
+            fetchDest: 'document',
+          ))!.code,
+          'cross_site_blocked',
+        );
+        expect(
+          (await p.check(
+            origin: 'https://a.example',
+            fetchMode: 'no-cors',
+          ))!.code,
+          'cross_site_blocked',
+        );
+        expect(
+          await p.check(
+            origin: 'https://a.example',
+            fetchMode: 'cors',
+            fetchDest: 'empty',
+          ),
+          isNull,
+          reason: 'a real fetch header passes',
+        );
+        // Absent Sec-Fetch headers are refused by default: a silent send
+        // (legacy browser, hidden form) never crosses the hardened path.
+        expect(
+          (await p.check(origin: 'https://a.example'))!.code,
+          'cross_site_blocked',
+          reason: 'the default refuses headerless sends',
+        );
+        // The explicit off-switch is what admits headerless clients.
+        final off = IntakeProtection()
+          ..update(
+            policy: const OriginPolicy(
+              allowAllHardened: true,
+              requireFetchMetadata: false,
             ),
-            isNull,
-            reason: 'a real fetch header passes',
           );
-          expect(
-            await p.check(
-              origin: 'https://a.example',
-              fetchMode: 'cors',
-              fetchDest: 'empty',
-            ),
-            isNull,
-            reason:
-                'a missing Sec-Fetch passes - a non-browser client or an old browser',
-          );
-        },
-      );
+        expect(
+          await off.check(origin: 'https://a.example'),
+          isNull,
+          reason: 'requireFetchMetadata: false admits headerless sends',
+        );
+      });
 
       test(
         'per-origin quota: excess gets 429, other origins still pass',
@@ -1043,7 +1051,9 @@ void main() {
               'blocked shape',
         );
         expect(asked, 0, reason: 'no question fired');
-        // والمعطِّل صراحة يستعيد مرور الطلبات بلا الترويسات (توكن أو عميل خام)
+        // and the explicit off-switch restores headerless passage — the
+        // check sends no Sec-Fetch headers at all, which is the case the
+        // switch exists for (a legacy browser or a raw non-browser client).
         final off = IntakeProtection()
           ..update(
             policy: const OriginPolicy(
@@ -1052,13 +1062,9 @@ void main() {
             ),
           );
         expect(
-          await off.check(
-            origin: 'https://legacy.example',
-            fetchMode: 'cors',
-            fetchDest: 'empty',
-          ),
+          await off.check(origin: 'https://legacy.example'),
           isNull,
-          reason: 'turning it off keeps passing headerless clients',
+          reason: 'with the flag off a headerless client passes again',
         );
       },
     );
@@ -1779,6 +1785,58 @@ void main() {
     );
   });
 
+  group('policy numbers are validated at update time, never on the wire', () {
+    test(
+      'a corrupt quota or timeout throws and keeps the previous policy',
+      () async {
+        final p = IntakeProtection(telemetry: _Rec())
+          ..update(
+            policy: const OriginPolicy(
+              allowed: ['https://portal.example'],
+              perOriginPerMinute: 30,
+              askTimeout: Duration(seconds: 60),
+            ),
+          );
+        // A negative allow-all quota sits above every window length, so it
+        // would answer 429 to every request; a zero ask timeout closes every
+        // consent question before any answer can arrive. Both are
+        // configuration mistakes that must surface at update() time.
+        expect(
+          () => p.update(policy: const OriginPolicy(perOriginPerMinute: -1)),
+          throwsArgumentError,
+        );
+        expect(
+          () => p.update(
+            policy: const OriginPolicy(listedPerOriginPerMinute: -1),
+          ),
+          throwsArgumentError,
+        );
+        expect(
+          () => p.update(policy: const OriginPolicy(askTimeout: Duration.zero)),
+          throwsArgumentError,
+        );
+        // No half-apply: the previous policy rules exactly as it stood.
+        expect(p.policy.perOriginPerMinute, 30);
+        expect(p.policy.askTimeout, const Duration(seconds: 60));
+        expect(p.policy.allowed, contains('https://portal.example'));
+        expect(
+          await p.check(
+            origin: 'https://portal.example',
+            fetchMode: 'cors',
+            fetchDest: 'empty',
+          ),
+          isNull,
+          reason: 'the previous allowlist still decides after a failed update',
+        );
+        // And the zero listed quota stays legal: it means unquotaed.
+        p.update(
+          policy: const OriginPolicy(allowed: ['https://portal.example']),
+        );
+        expect(p.policy.listedPerOriginPerMinute, 0);
+      },
+    );
+  });
+
   group('pending-question cap and comment fingerprint guard', () {
     test(
       'cap counts open prompt windows, not waiters — no fourth question',
@@ -1887,6 +1945,28 @@ void main() {
         expect(emitted.last, contains('suppressed'));
       },
     );
+
+    test('logged Origin is stripped of control characters and capped', () {
+      // The Origin header is attacker-controlled input: raw control
+      // characters would forge extra log lines, and an unbounded value
+      // would bloat every throttled line. The log sees a cleaned, capped
+      // form; the counter and the decision still see the real value.
+      final rec = _Rec();
+      final p = IntakeProtection(telemetry: rec, nowMs: () => 0);
+      final hostile = 'https://evil.example/\u0000\u001Fx${'a' * 500}';
+      p.noteRejection('Origin is not on the allowed list', hostile);
+      final line = rec.warns.single;
+      final logged = line.substring(line.indexOf('origin=') + 'origin='.length);
+      expect(logged, isNot(contains('\u0000')));
+      expect(logged, isNot(contains('\u001F')));
+      expect(line, isNot(contains(hostile)));
+      expect(
+        logged.length,
+        lessThanOrEqualTo(200),
+        reason: 'a long origin is capped, never dumped whole into the log',
+      );
+      expect(logged, startsWith('https://evil.example/x'));
+    });
 
     // منح allowOnce غير المستهلكة كانت تبقى للأبد — النسح عند الإدراج
     // يطرد المنتهية فلا ينمو المخطط بلا حد في الجلسات الطويلة

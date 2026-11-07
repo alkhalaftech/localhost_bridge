@@ -5,21 +5,6 @@ import 'dart:math';
 
 import 'bridge_telemetry.dart';
 
-/// Optional protection for the local command intake - host-configured.
-///
-/// The default risk (the allow-all value): a 127.0.0.1 intake accepting POST
-/// from any page the user visits - the browser sends the request even when
-/// CORS blocks reading the reply, so any site could fire its command at once.
-/// - The allowlist: only pages from a host-defined origin list are accepted
-/// (the Origin header is enforced by the browser and cannot be forged by
-/// JavaScript - the right barrier against cross-site pages; local clients
-/// outside the browser are outside the threat model anyway).
-/// - Discovery (onUnknownOrigin): a new origin is put to the host exactly
-/// once - always allow, allow once, or deny - so the list grows on
-/// knowledge, not guessing.
-/// - The token layer: an X-Portal-Token header matching a shared secret - an
-/// integrated client proves itself with it and crosses without browser
-/// headers (server-side integrations, or when origins multiply).
 /// The host's answer to an unknown-origin question. [allowAlways] and
 /// [reject] are remembered for the session, [allowOnce] grants a single
 /// retry window, and [dismissed] closes the question without a decision:
@@ -112,9 +97,22 @@ class IntakeRejection {
   final int? retryAfterMs;
 }
 
-/// Migration of old saved values - 'open' is retired, so reading it is an
-/// unknown value: close + warn (details in [updateFromSaved]).
-
+/// Optional protection for the local command intake - host-configured.
+///
+/// The default risk (the allow-all value): a 127.0.0.1 intake accepting POST
+/// from any page the user visits - the browser sends the request even when
+/// CORS blocks reading the reply, so any site could fire its command at once.
+/// - The allowlist: only pages from a host-defined origin list are accepted
+/// (the Origin header is enforced by the browser and cannot be forged by
+/// JavaScript - the right barrier against cross-site pages; it is no wall
+/// against programs on the same machine, which SECURITY.md documents as a
+/// stated residual).
+/// - Discovery (onUnknownOrigin): a new origin is put to the host exactly
+/// once - always allow, allow once, or deny - so the list grows on
+/// knowledge, not guessing.
+/// - The token layer: an X-Portal-Token header matching a shared secret - an
+/// integrated client proves itself with it and crosses without browser
+/// headers (server-side integrations, or when origins multiply).
 class IntakeProtection {
   /// [nowMs] is an injectable test clock (lock, grant, and quota windows);
   /// the default is an internal monotonic clock owned by the object.
@@ -127,7 +125,8 @@ class IntakeProtection {
 
   int get _now => _nowMs?.call() ?? _clock.elapsedMilliseconds;
 
-  /// Security log seam: the host adapts AppLogger - default mutes, never drops behavior.
+  /// Security log seam: the host adapts its own logger - default mutes,
+  /// never drops behavior.
   final BridgeTelemetry? telemetry;
 
   OriginPolicy _policy = const OriginPolicy();
@@ -247,11 +246,16 @@ class IntakeProtection {
   /// ([_minTokenBytes] UTF-8 bytes) BEFORE anything is applied, so a host
   /// that catches the error keeps its previous protection state untouched.
   /// The error names the offending length, never the token itself.
+  /// The policy's numbers are validated the same way and at the same point:
+  /// a negative quota and a non-positive ask timeout are configuration
+  /// mistakes that must surface at setup, never as mystery rejects or
+  /// instantly-closed questions on the wire.
   void update({OriginPolicy? policy, String? token}) {
     // الحقل المفقود يبقى على حاله: تحديثُ حقلٍ واحدٍ كان يطفئ الطبقة
     // الأخرى بصمت (من ضبط توكنا ثم حدّث القائمة فقد سرّه، والعكس)
     final effectivePolicy = policy ?? _policy;
     final effectiveToken = token ?? _token;
+    _validatePolicyNumbers(effectivePolicy);
     // القصير قابل للتخمين — رفض وقت الإعداد لا تحذير يمر: طبقة أسرار
     // مسرحية أسوأ من غيابها. الفحص قبل _apply كي يكون الرمي بلا أثر
     // جانبي — من يلتقطه يبقى على حالته السابقة لا على طبقة خاملة
@@ -267,9 +271,9 @@ class IntakeProtection {
     }
     _apply(policy: effectivePolicy, token: effectiveToken);
     _warnDeadAllowlistEntries();
-    // حارس طول التوكن: ما تجاوز الحشوة يُقارن ببادئته فقط في
-    // _fixedTimeEquals — تحذير أمني + عدّاد، وبلا أي تغيير لنتيجة
-    // المطابقة (صفر سلك).
+    // حارس طول التوكن: المقارنة الزمنية-الثابتة تغطي التوكن كاملاً في
+    // _fixedTimeEquals (الحلقة تمتد لأطول الطرفين فوق الحشوة الدنيا) —
+    // هنا تحذير وتدقيق فقط بلا أي تغيير لنتيجة المطابقة (صفر سلك).
     final configuredBytes = utf8.encode(_token).length;
     if (configuredBytes > _tokenComparePad) {
       // تحذير إعداد لا رفض طلب — لا يلوث عدّاد المرفوضات
@@ -289,6 +293,39 @@ class IntakeProtection {
         'page reaching this host may send commands (hardened: origin, fetch '
         'mode, per-origin quota)',
         category: BridgeCategory.security,
+      );
+    }
+  }
+
+  /// Rejects non-positive quota values and a non-positive ask timeout at
+  /// update() time, before anything is applied. Each corrupt value would
+  /// otherwise fail every request in its own silent way: a negative
+  /// per-origin quota is above every window length (the request itself
+  /// counts first), so it answers 429 to every request, and a zero ask
+  /// timeout closes every consent question before any answer can arrive.
+  /// Zero [OriginPolicy.listedPerOriginPerMinute] stays legal - it is the
+  /// documented "listed origins are unquotaed" default.
+  void _validatePolicyNumbers(OriginPolicy policy) {
+    if (policy.perOriginPerMinute <= 0) {
+      throw ArgumentError.value(
+        policy.perOriginPerMinute,
+        'policy.perOriginPerMinute',
+        'must be positive - a value below one rejects every request',
+      );
+    }
+    if (policy.listedPerOriginPerMinute < 0) {
+      throw ArgumentError.value(
+        policy.listedPerOriginPerMinute,
+        'policy.listedPerOriginPerMinute',
+        'must not be negative - 0 keeps listed origins unquotaed',
+      );
+    }
+    if (policy.askTimeout <= Duration.zero) {
+      throw ArgumentError.value(
+        policy.askTimeout,
+        'policy.askTimeout',
+        'must be positive - a value at or below zero closes every consent '
+            'question instantly',
       );
     }
   }
@@ -954,9 +991,31 @@ class IntakeProtection {
     _nextRejectionLogMs = now + _rejectionLogPacingMs;
     telemetry?.warn(
       'intake rejected a request (protection active): ${reason ?? ''} '
-      '— origin=${origin ?? 'none'}$suffix',
+      '— origin=${_originForLog(origin) ?? 'none'}$suffix',
       category: BridgeCategory.security,
     );
+  }
+
+  /// The logged form of an Origin header: control characters in the C0
+  /// and C1 ranges are stripped so a hostile value cannot forge extra log
+  /// lines, and the result is capped so a bloated value cannot inflate
+  /// every throttled line. Logging-only: the counter and the admission
+  /// decision still see the real value.
+  static const _maxLoggedOriginChars = 200;
+
+  /// C0 covers U+0000 to U+001F and C1 covers U+007F to U+009F - the
+  /// ranges a hostile header value could use to forge extra log lines.
+  static bool _isControlChar(int rune) =>
+      rune <= 0x1F || rune == 0x7F || (rune >= 0x80 && rune <= 0x9F);
+
+  static String? _originForLog(String? origin) {
+    if (origin == null) return null;
+    final cleaned = String.fromCharCodes(
+      origin.runes.where((r) => !_isControlChar(r)),
+    );
+    return cleaned.length > _maxLoggedOriginChars
+        ? cleaned.substring(0, _maxLoggedOriginChars)
+        : cleaned;
   }
 
   /// Rejection-log throttling: at most one line per second — a flood lives

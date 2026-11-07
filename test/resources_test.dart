@@ -31,7 +31,7 @@ void main() {
             ),
           ),
       );
-      final p = await srv.start(preferredPort: 31897, fallbacks: const [31881]);
+      final p = await srv.start(preferredPort: 0, fallbacks: const [31881]);
       addTearDown(srv.stop);
 
       Future<int> exchange(String raw) async {
@@ -152,7 +152,7 @@ void main() {
             ),
           ),
       );
-      final p = await srv.start(preferredPort: 31899, fallbacks: const [31881]);
+      final p = await srv.start(preferredPort: 0, fallbacks: const [31881]);
       addTearDown(srv.stop);
 
       // JSON صالح محشو أقصى عدد عناصر في ميغابايت حرفيا — القطع الأعمى

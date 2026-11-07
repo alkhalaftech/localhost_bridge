@@ -293,7 +293,7 @@ void main() {
   );
 
   test(
-    'second start throws synchronous StateError, first server stays alive',
+    'second start rejects with StateError, first server stays alive',
     () async {
       final srv = _server(telemetry: const SilentTelemetry());
       final p = await srv.start(preferredPort: 31884, fallbacks: const [31881]);
@@ -303,12 +303,34 @@ void main() {
         () => srv.start(preferredPort: 31884),
         throwsStateError,
         reason:
-            'a double start used to bind a second server and leak the first with no reference',
+            'a double start used to bind a second server and leak the first with no reference; '
+            'the StateError now arrives through the returned future',
       );
       final ok = await _send(srv.port, _post('127.0.0.1:${srv.port}', _alive));
       expect(ok['status'], 200, reason: 'the first keeps serving requests');
     },
   );
+
+  test('double start rejects through the returned future: catchError sees the '
+      'StateError', () async {
+    final srv = _server(telemetry: const SilentTelemetry());
+    final p = await srv.start(preferredPort: 31886, fallbacks: const [31881]);
+    addTearDown(srv.stop);
+    expect(p, greaterThan(0));
+    // The rejection must travel through the returned future: a caller
+    // attaching catchError to the result never sees a synchronous throw,
+    // because there is no result to attach it to.
+    Object? caught;
+    final second = srv.start(preferredPort: 31886).catchError((Object e) {
+      caught = e;
+      return -1;
+    });
+    final port = await second;
+    expect(caught, isA<StateError>());
+    expect(port, -1, reason: 'the rejected start yields no port');
+    final ok = await _send(srv.port, _post('127.0.0.1:${srv.port}', _alive));
+    expect(ok['status'], 200, reason: 'the first server is untouched');
+  });
 
   test(
     'stop waits for in-flight request, response completes, restart works',
@@ -704,7 +726,7 @@ void main() {
         onCommand: (_) async => const CommandOutcome(ok: true),
         protection: _openProtection(),
       );
-      final p = await srv.start(preferredPort: 31897, fallbacks: const [31881]);
+      final p = await srv.start(preferredPort: 0, fallbacks: const [31881]);
       // 5000 قوسا متداخلا: 5000 عنصرا تحت سقف العناصر (10000) وعمق
       // 5000 فوق أي عمق معقول لأمر — قياسان مختلفان للاستغلال
       final body = '[' * 5000 + ']' * 5000;
@@ -749,20 +771,20 @@ void main() {
         onCommand: (_) async => const CommandOutcome(ok: true),
         protection: _openProtection(),
       );
-      final p = await srv.start(preferredPort: 31901, fallbacks: const [31881]);
-      // مفتاح من مجال آخر: ليس من المجموعة الافتراضية — الحزمة محايدة
-      // فلا تفك مفتاح مجال إلا من يضيفه لإعداده بنفسه
-      final domainKey = await _send(
+      final p = await srv.start(preferredPort: 0, fallbacks: const [31881]);
+      // مفتاح مخصص محايد: ليس من المجموعة الافتراضية — الحزمة محايدة
+      // فلا تفك مفتاحاً مخصصاً إلا من يضيفه لإعداده بنفسه
+      final customKey = await _send(
         p,
-        _post('127.0.0.1:$p', '{"tscCode":["QUJD"]}'),
+        _post('127.0.0.1:$p', '{"customItems":["QUJD"]}'),
       );
       expect(
-        domainKey['status'],
+        customKey['status'],
         400,
-        reason: 'the default wrapper set is domain-neutral',
+        reason: 'the default wrapper set stays neutral',
       );
       expect(
-        domainKey['body'],
+        customKey['body'],
         contains('unsupported_payload_shape'),
         reason:
             'an unrecognized wrapper is a known-but-unsupported shape, '
@@ -776,28 +798,25 @@ void main() {
       expect(neutral['status'], 200);
       await srv.stop();
 
-      // ومن يضيف مفتاح مجاله يستعيده حرفيا
+      // ومن يضيف مفتاحه المخصص يستعيده حرفيا
       final adapted = LocalIntakeServer(
         telemetry: const SilentTelemetry(),
         correlationIdGenerator: _counterId,
         onCommand: (_) async => const CommandOutcome(ok: true),
         protection: _openProtection(),
         config: const BridgeConfig(
-          payloadWrapperKeys: {'data', 'payload', 'commands', 'tscCode'},
+          payloadWrapperKeys: {'data', 'payload', 'commands', 'customItems'},
         ),
       );
-      final q = await adapted.start(
-        preferredPort: 31902,
-        fallbacks: const [31881],
-      );
+      final q = await adapted.start(preferredPort: 0, fallbacks: const [31881]);
       final restored = await _send(
         q,
-        _post('127.0.0.1:$q', '{"tscCode":["QUJD"]}'),
+        _post('127.0.0.1:$q', '{"customItems":["QUJD"]}'),
       );
       expect(
         restored['status'],
         200,
-        reason: 'an opted-in domain key unwraps exactly as before',
+        reason: 'an opted-in custom key unwraps exactly as before',
       );
       await adapted.stop();
     },
@@ -815,7 +834,7 @@ void main() {
         protection: _openProtection(),
         config: const BridgeConfig(fallbackErrorCode: 'print_failed'),
       );
-      final p = await srv.start(preferredPort: 31903, fallbacks: const [31881]);
+      final p = await srv.start(preferredPort: 0, fallbacks: const [31881]);
       final r = await _send(p, _post('127.0.0.1:$p', _alive));
       expect(r['status'], 500);
       expect(
@@ -842,7 +861,7 @@ void main() {
           extraHosts: ['127.0.0.1.nip.io', 'localhost', '127.0.0.1'],
         ),
       );
-      await srv.start(preferredPort: 31899, fallbacks: const [31881]);
+      await srv.start(preferredPort: 0, fallbacks: const [31881]);
       expect(
         rec.warns.length,
         1,

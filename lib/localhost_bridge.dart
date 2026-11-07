@@ -1,7 +1,7 @@
 /// localhost_bridge - the trusted passage from a web page to a local program.
 ///
 /// The only export gate: what is not exported here is not public. Exports
-/// stay neutral - no printing code beyond the documented allowlist.
+/// stay neutral - no domain code beyond the documented allowlist.
 library;
 
 export 'src/arrival_guard.dart';

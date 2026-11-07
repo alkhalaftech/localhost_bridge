@@ -1,4 +1,7 @@
-# ما ليس من الحزمة المنشورة — وثائق العمليات الداخلية
+# Generated output and documentation builds are not part of the package.
 docs/
 build/
 doc/
+# Hidden folders (CI configuration for repository checkouts, local tool
+# state) are not part of the package either.
+.*/

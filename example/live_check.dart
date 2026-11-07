@@ -9,7 +9,8 @@ import 'package:localhost_bridge/localhost_bridge.dart';
 
 /// The page served to the browser - it exercises the real CORS machinery
 /// (preflight, admitted reads, readable rejects) and renders a verdict.
-String _checkPage(int bridgePort) => '''
+String _checkPage(int bridgePort) =>
+    '''
 <!DOCTYPE html>
 <html lang="en">
 <head>
@@ -130,13 +131,19 @@ Future<void> main() async {
   });
 
   stdout
-    ..writeln('localhost_bridge live check - one command, a real browser, no dev tools.')
+    ..writeln(
+      'localhost_bridge live check - one command, a real browser, no dev tools.',
+    )
     ..writeln()
     ..writeln('  Bridge under test : http://127.0.0.1:$bridgePort')
     ..writeln('  Check page        : http://localhost:$pagePort')
     ..writeln()
-    ..writeln('  Step 1  open http://localhost:$pagePort  -> expect: ALL CHECKS PASSED (green)')
-    ..writeln('  Step 2  open http://127.0.0.1:$pagePort  -> expect: BLOCKED BY THE BROWSER')
+    ..writeln(
+      '  Step 1  open http://localhost:$pagePort  -> expect: ALL CHECKS PASSED (green)',
+    )
+    ..writeln(
+      '  Step 2  open http://127.0.0.1:$pagePort  -> expect: BLOCKED BY THE BROWSER',
+    )
     ..writeln()
     ..writeln('  Ctrl+C to stop.');
 

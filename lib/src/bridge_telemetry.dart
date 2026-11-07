@@ -1,6 +1,6 @@
 /// The measurement and logging seam.
 ///
-/// The host adapts AppLogger over this interface, keeping the intake latency
+/// The host adapts its own logger over this interface, keeping the intake latency
 /// gauge (via measure), the RSS delta, classification, and stacks alive -
 /// where a plain string typedef would have dropped them all.
 abstract class BridgeTelemetry {

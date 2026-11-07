@@ -2,15 +2,14 @@
 
 ## Reporting a vulnerability
 
-Report privately to the maintainer through the channel listed in
-`pubspec.yaml` (`repository` → Security Advisories / a private issue).
-Note: the package is not published yet (`publish_to: none`) and its
-`repository` field is a placeholder until the single hosting repository is
-finalized — until then, reach the maintainer through the security contact
-of the product this bridge ships in. Do not open a public issue for a
-suspected vulnerability. Include the package version, a minimal
-reproduction, and the affected surface (intake server, protection policy,
-token layer, or the example apps).
+The package is published on pub.dev, and its single source of truth is the
+public repository
+[alkhalaftech/localhost_bridge](https://github.com/alkhalaftech/localhost_bridge).
+That repository has **Private vulnerability reporting** enabled — use it to
+reach the maintainer privately. Do not open a public issue for a suspected
+vulnerability. Include the package version, a minimal reproduction, and the
+affected surface (intake server, protection policy, token layer, or the
+example apps).
 
 ## Supported versions
 
@@ -81,6 +80,14 @@ These are stated plainly so no host builds on a false assumption:
   the cost from "know a public string" to "hold a secret" — and only while
   no origin path accepts: with a non-empty allowlist, allow-all, or a
   remembered consent, that forged listed origin enters without the secret.
+- **Mobile host platforms.** On Android, every installed app can open the
+  port and send any `Origin` it likes — the origin policy is not a
+  barrier there at all, and the token layer is the practical barrier,
+  with the same caveat as above: it holds only while no origin path
+  admits without the secret. On iOS there is no path from a browser at
+  all: every iOS browser is WebKit, which blocks `http://127.0.0.1` from
+  an `https` page as mixed content, and in-app sockets suspend when the
+  host app goes to the background.
 - **Administrator/SYSTEM-level malware.** It can inject into the host
   process, read the token from memory, or print directly through the OS
   spooler without this bridge entirely.

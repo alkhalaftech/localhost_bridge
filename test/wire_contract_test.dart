@@ -1,6 +1,6 @@
-// عقد السلك (§5.5): الأسلاف عبر الخادم كاملاً لا دوال مفردة —
-// replays corpus cases against the package and writes the output for differential comparison التفاضلية
-// (المخرج: tools/bridge-differential/out/new-<date>.json — بنية corpus نفسها).
+// عقد السلك: الأسلاف عبر الخادم كاملاً لا دوال مفردة —
+// replays corpus cases against the package and writes every exchange
+// as a JSON record with the same structure as its corpus case.
 import 'dart:async';
 import 'dart:convert';
 import 'dart:io';
@@ -11,7 +11,7 @@ import 'package:localhost_bridge/localhost_bridge.dart';
 
 import 'support/wire.dart' show bodyJson;
 
-// output goes to the system temp dir (differential tooling was removed).
+// output goes to the system temp dir.
 final _outPath = '${Directory.systemTemp.path}/bridge-wire-new.json';
 const _timeout = Duration(milliseconds: 700);
 const _pMain = 31991, _pSlow = 31992;
@@ -426,7 +426,7 @@ void main() {
         };
         dump['07_concurrency_17']!['modes'] = modes7;
 
-        // شواهد §5.5 لهذا النمط
+        // شواهد هذا النمط الثابتة
         expect(
           dump['01_valid_small']!['modes']![m]!['response']['status'],
           200,
@@ -620,26 +620,27 @@ void main() {
     );
   });
 
-  test('both 413 responses name the 1MB limit, never 0MB', () async {
-    // افتراضي: «1MB» حرفياً — وكلا موقعي الرفض يشترك في _mbLabel
+  test('both 413 responses name the 1 MiB limit, never 0MB', () async {
+    // افتراضي: «1 MiB» حرفياً — وكلا موقعي الرفض يشترك في _mbLabel
     final pr = makeProtection('allowAll');
     srv = make(pr: pr);
     await srv!.start(preferredPort: _pMain, fallbacks: const [31997]);
     final over = await _exchange(
       srv!.port,
+      // الضرب داخل ${...} إلزامي: مجاورة الحرفيات تلتحم قبل *، فيقع الضرب
+      // على سلسلة الطلب كاملة ويتحول الشاهد إلى فيضان يفوق الوعد بملايين
+      // البايتات بدل جسم بمقداره الموعود.
       'POST / HTTP/1.1\r\n'
-              'Host: 127.0.0.1:${srv!.port}\r\n'
-              'Origin: https://agent.test\r\n'
-              'Content-Type: application/json\r\n'
-              'Content-Length: ${1024 * 1024 + 1}\r\n'
-              '\r\n'
-              'x' *
-          (1024 * 1024 + 1),
+      'Host: 127.0.0.1:${srv!.port}\r\n'
+      'Origin: https://agent.test\r\n'
+      'Content-Type: application/json\r\n'
+      'Content-Length: ${1024 * 1024 + 1}\r\n'
+      '\r\n${'x' * (1024 * 1024 + 1)}',
     );
     expect(over['status'], 413);
     expect(
       over['body'],
-      contains('Request body exceeds the allowed limit (1MB)'),
+      contains('Request body exceeds the allowed limit (1 MiB)'),
       reason: 'the early gate (Content-Length)',
     );
     // الحد غير القابل للتقسيم يسقط إلى البايتات — لا 0MB
@@ -651,14 +652,14 @@ void main() {
     addTearDown(odd.stop);
     final overOdd = await _exchange(
       odd.port,
+      // نفس ملاحظة الضرب داخل ${...} أعلاه: بلاها يفيض الطلب فوق وعد
+      // Content-Length.
       'POST / HTTP/1.1\r\n'
-              'Host: 127.0.0.1:${odd.port}\r\n'
-              'Origin: https://agent.test\r\n'
-              'Content-Type: application/json\r\n'
-              'Content-Length: ${1024 * 1024 + 1}\r\n'
-              '\r\n'
-              'x' *
-          (1024 * 1024 + 1),
+      'Host: 127.0.0.1:${odd.port}\r\n'
+      'Origin: https://agent.test\r\n'
+      'Content-Type: application/json\r\n'
+      'Content-Length: ${1024 * 1024 + 1}\r\n'
+      '\r\n${'x' * (1024 * 1024 + 1)}',
     );
     expect(overOdd['status'], 413);
     expect(
@@ -667,6 +668,135 @@ void main() {
       reason: 'a cap under a megabyte is shown in bytes, never 0MB',
     );
   });
+
+  test(
+    '413 drain is bounded: past four bodies the connection is cut',
+    () async {
+      // cap 1KiB => drain budget 4KiB: the client promises 10KiB and sends
+      // 5KiB past the budget on purpose. A sender that never stops must not
+      // hold the server draining forever - the connection has to end for
+      // the client well before the promised body or the request timeout.
+      final small = make(
+        pr: makeProtection('allowAll'),
+        config: const BridgeConfig(maxBodyBytes: 1024),
+      );
+      await small.start(preferredPort: 0);
+      addTearDown(small.stop);
+      final socket = await Socket.connect('127.0.0.1', small.port);
+      addTearDown(socket.destroy);
+      socket.write(
+        'POST / HTTP/1.1\r\n'
+        'Host: 127.0.0.1:${small.port}\r\n'
+        'Origin: https://agent.test\r\n'
+        'Content-Type: application/json\r\n'
+        'Content-Length: 10240\r\n\r\n',
+      );
+      socket.write('x' * 5120);
+      unawaited(socket.flush().catchError((Object _) {}));
+      final ended = Completer<void>();
+      late final StreamSubscription sub;
+      sub = socket.listen(
+        (_) {},
+        onDone: () {
+          if (!ended.isCompleted) ended.complete();
+        },
+        onError: (Object _) {
+          if (!ended.isCompleted) ended.complete();
+        },
+      );
+      // The drain window is two seconds and the request timeout guards the
+      // rest: six seconds is comfortably past the cut and far under the
+      // 30s default an unbounded drain would have waited for.
+      await ended.future.timeout(const Duration(seconds: 6));
+      await sub.cancel();
+    },
+  );
+
+  test(
+    '413 drain cut on the byte-counter path: past four bodies mid-read',
+    () async {
+      // Content-Length under the cap so the early gate stays out: the
+      // byte counter rejects mid-read, and the sender blasts far past the
+      // drain budget - the discard on the same subscription must cut.
+      final small = make(
+        pr: makeProtection('allowAll'),
+        config: const BridgeConfig(maxBodyBytes: 1024),
+      );
+      await small.start(preferredPort: 0);
+      addTearDown(small.stop);
+      final socket = await Socket.connect('127.0.0.1', small.port);
+      addTearDown(socket.destroy);
+      socket.write(
+        'POST / HTTP/1.1\r\n'
+        'Host: 127.0.0.1:${small.port}\r\n'
+        'Origin: https://agent.test\r\n'
+        'Content-Type: application/json\r\n'
+        'Content-Length: 8192\r\n\r\n',
+      );
+      socket.write('x' * 8192);
+      unawaited(socket.flush().catchError((Object _) {}));
+      final ended = Completer<void>();
+      late final StreamSubscription sub;
+      sub = socket.listen(
+        (_) {},
+        onDone: () {
+          if (!ended.isCompleted) ended.complete();
+        },
+        onError: (Object _) {
+          if (!ended.isCompleted) ended.complete();
+        },
+      );
+      await ended.future.timeout(const Duration(seconds: 5));
+      await sub.cancel();
+    },
+  );
+
+  test(
+    '413 drain cut on time: a trickling sender never holds the gate',
+    () async {
+      // Under the size budget on purpose (2 KiB of a promised 3 KiB) with
+      // gaps shorter than every timeout: only the drain window bounds it,
+      // so the connection must end well before the sender gives up.
+      final small = make(
+        pr: makeProtection('allowAll'),
+        config: const BridgeConfig(maxBodyBytes: 1024),
+      );
+      await small.start(preferredPort: 0);
+      addTearDown(small.stop);
+      final socket = await Socket.connect('127.0.0.1', small.port);
+      addTearDown(socket.destroy);
+      socket.write(
+        'POST / HTTP/1.1\r\n'
+        'Host: 127.0.0.1:${small.port}\r\n'
+        'Origin: https://agent.test\r\n'
+        'Content-Type: application/json\r\n'
+        'Content-Length: 3072\r\n\r\n',
+      );
+      final ended = Completer<void>();
+      late final StreamSubscription sub;
+      sub = socket.listen(
+        (_) {},
+        onDone: () {
+          if (!ended.isCompleted) ended.complete();
+        },
+        onError: (Object _) {
+          if (!ended.isCompleted) ended.complete();
+        },
+      );
+      // 8 x 256B with 800ms gaps: sending for ~6.4s, never finishing the
+      // promised body. The gate cut lands around two seconds.
+      for (var i = 0; i < 8; i++) {
+        if (ended.isCompleted) break;
+        socket.write('x' * 256);
+        unawaited(socket.flush().catchError((Object _) {}));
+        await Future<void>.delayed(const Duration(milliseconds: 800));
+      }
+      // Generous margin around the two-second window: an unbounded drain
+      // would still be waiting at six and a half seconds of trickle.
+      await ended.future.timeout(const Duration(seconds: 4));
+      await sub.cancel();
+    },
+  );
 
   test(
     'compressed payloads pass through untouched (host owns decompression)',

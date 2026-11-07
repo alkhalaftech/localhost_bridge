@@ -10,6 +10,27 @@ import 'package:localhost_bridge/localhost_bridge.dart';
 var _idSeq = 0;
 String _counterId() => 'hard-${_idSeq++}';
 
+/// Theil-Sen estimator: the median of all pairwise slopes. The witness
+/// reads the RSS of the whole test process, and other files' isolates
+/// allocate and free concurrently, so any two raw points can jump tens of
+/// MB on a burst with no leak at all. A median needs a majority of the
+/// samples to bend before it moves, which is why the leak guard is a
+/// robust slope over many samples instead of deltas between three of
+/// them.
+double _theilSenSlope(List<int> ys, List<double> xs) {
+  final slopes = <double>[];
+  for (var i = 0; i < ys.length; i++) {
+    for (var j = i + 1; j < ys.length; j++) {
+      slopes.add((ys[j] - ys[i]) / (xs[j] - xs[i]));
+    }
+  }
+  slopes.sort();
+  final mid = slopes.length ~/ 2;
+  return slopes.length.isOdd
+      ? slopes[mid]
+      : (slopes[mid - 1] + slopes[mid]) / 2;
+}
+
 class _Rec extends BridgeTelemetry {
   final warns = <String>[];
   @override
@@ -180,7 +201,7 @@ void main() {
     timeout: const Timeout(Duration(seconds: 20)),
     () async {
       final srv = makeServer();
-      final p = await srv.start(preferredPort: 31901, fallbacks: const [31881]);
+      final p = await srv.start(preferredPort: 0, fallbacks: const [31881]);
       addTearDown(srv.stop);
 
       final navigate = await send(
@@ -216,7 +237,7 @@ void main() {
     timeout: const Timeout(Duration(seconds: 20)),
     () async {
       final srv = makeServer();
-      final p = await srv.start(preferredPort: 31902, fallbacks: const [31881]);
+      final p = await srv.start(preferredPort: 0, fallbacks: const [31881]);
       addTearDown(srv.stop);
       final r = await send(
         p,
@@ -236,14 +257,54 @@ void main() {
   );
 
   test(
-    'missing Sec-Fetch headers pass — non-browser or old browser',
+    'missing Sec-Fetch headers: rejected by default, pass with '
+    'requireFetchMetadata off',
     timeout: const Timeout(Duration(seconds: 20)),
     () async {
+      // The default refuses headerless sends: a legacy browser or a hidden
+      // form would otherwise fire silently through the hardened allow-all
+      // path. The explicit off-switch is the only way a headerless client
+      // crosses it.
       final srv = makeServer();
-      final p = await srv.start(preferredPort: 31903, fallbacks: const [31881]);
+      final p = await srv.start(preferredPort: 0, fallbacks: const [31881]);
       addTearDown(srv.stop);
-      final r = await send(p, post(p, origin: 'https://any.example'));
-      expect(r['status'], 200);
+      final missing = await send(
+        p,
+        post(
+          p,
+          origin: 'https://any.example',
+          fetchMode: null,
+          fetchDest: null,
+        ),
+      );
+      expect(missing['status'], 403);
+      expect(missing['body'], contains('cross_site_blocked'));
+
+      final off = makeServer(
+        policy: const OriginPolicy(
+          allowAllHardened: true,
+          requireFetchMetadata: false,
+        ),
+      );
+      final pOff = await off.start(
+        preferredPort: 31911,
+        fallbacks: const [31881],
+      );
+      addTearDown(off.stop);
+      final headerless = await send(
+        pOff,
+        post(
+          pOff,
+          origin: 'https://any.example',
+          fetchMode: null,
+          fetchDest: null,
+        ),
+      );
+      expect(
+        headerless['status'],
+        200,
+        reason: 'requireFetchMetadata: false admits headerless sends again',
+      );
     },
   );
 
@@ -476,7 +537,8 @@ void main() {
       final payload = 'x' * (mb + 1);
       final fullRequest = headers + payload;
 
-      final samples = <int>[];
+      final sampleXs = <double>[];
+      final sampleYs = <int>[];
       for (var i = 1; i <= 300; i++) {
         final socket = await Socket.connect(InternetAddress.loopbackIPv4, p);
         unawaited(socket.done.catchError((Object _) {}));
@@ -496,41 +558,34 @@ void main() {
         await sub.cancel();
         socket.destroy();
         expect(status, 413);
-        if (i == 100 || i == 200 || i == 300) {
+        if (i % 20 == 0) {
           // مهلة قياس مقصودة: تهدئة تخصيصات الذاكرة قبل قراءة RSS —
           // جزء من بروتوكول الشاهد نفسه لا تسوية أحداث قابلة للضخ
           await Future<void>.delayed(const Duration(milliseconds: 200));
-          samples.add(ProcessInfo.currentRss);
+          sampleXs.add(i.toDouble());
+          sampleYs.add(ProcessInfo.currentRss);
         }
       }
-      final d1 = samples[1] - samples[0];
-      final d2 = samples[2] - samples[1];
+      final slopePerRejection = _theilSenSlope(sampleYs, sampleXs);
       // ignore: avoid_print
       print(
-        'MEM-WITNESS rss100=${samples[0]} rss200=${samples[1]} '
-        'rss300=${samples[2]} delta1=$d1 delta2=$d2',
+        'MEM-WITNESS samples=${sampleYs.length} '
+        'first=${sampleYs.first} last=${sampleYs.last} '
+        'slope=${slopePerRejection.toStringAsFixed(3)}B/rejection',
       );
+      // سقف الميل: أي احتفاظ ثابت لكل رفض فوق ~0.15MiB يبني نمواً خطياً
+      // يلتقطه الوسيط (تسربٌ يحتفظ بجسم الـ1MiB المرفوض لكل طلب يميل
+      // نحو ~1MiB/رفض ≈ 300MB عبر الثلاثمئة)، بينما انفجارات العزل
+      // الموازي تنزاحها أقل من أن تحرك وسيطَ الأزواج — وهي الضجيج الذي
+      // أسقط دلتاي الثلاث نقاط سابقاً
       expect(
-        samples[2] - samples[0],
-        lessThan(30 * mb),
+        slopePerRejection,
+        lessThan(0.15 * mb),
         reason:
-            'no linear growth: three hundred rejections and total RSS under 30MB',
-      );
-      // الدلتا الأولى تثبت عند الصفر حين
-      // يحرر GC الشطر الأول (كانت سالبة تفجر المقارنة كذبا) — ومعها سقف
-      // مطلق للشطر الثاني: الاستقرار يقاس بالنمو لا بتحرر مبكر
-      final d1Clamped = d1 < 0 ? 0 : d1;
-      expect(
-        d2,
-        lessThan(d1Clamped + 8 * mb),
-        reason:
-            'the second half grows no more than the first - it settles, it does not leak',
-      );
-      expect(
-        d2,
-        lessThan(20 * mb),
-        reason:
-            'وسقف مطلق واسع لتذبذب GC مع ملفات موازية — الحارس الكلي 30MB فوقه',
+            'no persistent per-rejection growth: a leak retaining even a '
+            'fraction of each refused 1MiB body would slope near '
+            '1MiB/rejection, while the median pairwise slope ignores '
+            'allocation bursts from test isolates running in parallel',
       );
     },
   );
@@ -612,6 +667,101 @@ void main() {
         reason:
             'the allow-all path echoes valid https - and the host message stays hidden from it',
       );
+    },
+  );
+
+  test(
+    'origin_rate_limited 429 echoes CORS: the page reads the code and '
+    'Retry-After',
+    timeout: const Timeout(Duration(seconds: 20)),
+    () async {
+      final srv = makeServer(
+        policy: const OriginPolicy(
+          allowAllHardened: true,
+          perOriginPerMinute: 1,
+        ),
+      );
+      final p = await srv.start(preferredPort: 31913, fallbacks: const [31881]);
+      addTearDown(srv.stop);
+      expect(
+        (await send(p, post(p, origin: 'https://a.example')))['status'],
+        200,
+      );
+      final limited = await rawWithHeaders(
+        p,
+        post(p, origin: 'https://a.example'),
+      );
+      expect(limited['status'], 429);
+      expect(limited['body'], contains('origin_rate_limited'));
+      final h = limited['headers'] as Map<String, String>;
+      expect(
+        h['access-control-allow-origin'],
+        'https://a.example',
+        reason:
+            'without the echo the browser hides the code and the honest '
+            'Retry-After from the retrying page',
+      );
+      expect(h['access-control-expose-headers'], contains('Retry-After'));
+      expect(h.containsKey('retry-after'), isTrue);
+    },
+  );
+
+  test(
+    'token_locked 429 echoes CORS: the page reads the code and Retry-After',
+    timeout: const Timeout(Duration(seconds: 20)),
+    () async {
+      // Discovery policy + token: the unknown valid origin sits on the
+      // consent path (origin_pending 403), so a guessing origin accumulates
+      // misses until the per-origin lock answers 429 token_locked — and the
+      // page must still be able to read the code and the honest wait.
+      const token =
+          'a3f1c52e94b7d068f5e2a9c4b1d7e8036f9a2c5e8b1d7f04a6c9e2d5f8b3a1c7';
+      final srv = LocalIntakeServer(
+        telemetry: rec,
+        correlationIdGenerator: _counterId,
+        onCommand: (_) async => const CommandOutcome(ok: true),
+        protection: IntakeProtection(telemetry: rec)
+          ..update(
+            policy: OriginPolicy(
+              onUnknownOrigin: (_) => Completer<OriginConsent>().future,
+              askTimeout: const Duration(seconds: 30),
+            ),
+            token: token,
+          ),
+      );
+      final p = await srv.start(preferredPort: 31914, fallbacks: const [31881]);
+      addTearDown(srv.stop);
+      for (var i = 0; i < 5; i++) {
+        expect(
+          (await send(
+            p,
+            post(
+              p,
+              origin: 'https://a.example',
+              extra: 'X-Portal-Token: wrong$i\r\n',
+            ),
+          ))['status'],
+          403,
+        );
+      }
+      final locked = await rawWithHeaders(
+        p,
+        post(
+          p,
+          origin: 'https://a.example',
+          extra: 'X-Portal-Token: wrong\r\n',
+        ),
+      );
+      expect(locked['status'], 429);
+      expect(locked['body'], contains('token_locked'));
+      final h = locked['headers'] as Map<String, String>;
+      expect(
+        h['access-control-allow-origin'],
+        'https://a.example',
+        reason: 'the locked page must read the code and the honest wait',
+      );
+      expect(h['access-control-expose-headers'], contains('Retry-After'));
+      expect(h.containsKey('retry-after'), isTrue);
     },
   );
 }

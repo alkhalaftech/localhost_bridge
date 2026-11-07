@@ -16,6 +16,19 @@ class _BodyTooLargeException implements Exception {
   const _BodyTooLargeException();
 }
 
+/// The outcome of one body read: either a complete body, or the rejection
+/// error - which is only handed back AFTER the unread remainder was
+/// drained (or the bounded patience ran out): closing over unread data
+/// makes the framework destroy the connection, and Linux and macOS answer
+/// that destroy with a reset that throws the reply away.
+class _BodyOutcome {
+  _BodyOutcome.ok(this.body) : error = null;
+  _BodyOutcome.rejected(this.error) : body = null;
+
+  final String? body;
+  final Object? error;
+}
+
 /// A known JSON shape that is not a command (a Map with no known keys): an
 /// honest reject with its own code, not a misleading empty_payload for a non-empty body.
 class _UnsupportedPayloadShapeException implements Exception {
@@ -43,7 +56,7 @@ class IntakeBindException implements Exception {
 ///
 /// Listens on 127.0.0.1 only (no network exposure) on a configurable port
 /// with fallbacks when busy, and answers with CORS headers for the origins it
-/// allowed, so portal https pages can send label commands straight from the
+/// allowed, so portal https pages can send commands straight from the
 /// browser. Errors always come back with clear messages - no silent failure.
 ///
 /// Resource limits (body cap / timeout / seat cap) apply in every protection
@@ -124,7 +137,8 @@ class LocalIntakeServer {
   /// Called with every trusted command the package hands to the registered host.
   final TrustedCommandHandler onCommand;
 
-  /// The measurement and log seam: the host adapts AppLogger, keeping intake latency and classification alive.
+  /// The measurement and log seam: the host adapts its own logger, keeping
+  /// intake latency and classification alive.
   final BridgeTelemetry telemetry;
 
   /// Correlation-id generator - required with no default: the host passes its own.
@@ -164,19 +178,29 @@ class LocalIntakeServer {
   int get _now => _nowMs?.call() ?? _clock.elapsedMilliseconds;
 
   /// The cap label for 413 messages - derived from the setting: the default
-  /// reads "1MB" verbatim, so the wire changes only when the setting itself does.
+  /// reads "1 MiB" verbatim, so the wire changes only when the setting itself
+  /// does.
   late final String _mbLabel =
       config.maxBodyBytes >= 1024 * 1024 &&
           config.maxBodyBytes % (1024 * 1024) == 0
-      ? '${config.maxBodyBytes ~/ (1024 * 1024)}MB'
+      ? '${config.maxBodyBytes ~/ (1024 * 1024)} MiB'
       : '${config.maxBodyBytes}B';
+
+  /// Bounded patience for discarding an unread body after an early
+  /// rejection, never longer than the request timeout it lives under.
+  static const _discardPatience = Duration(seconds: 2);
+  late final Duration _discardWindow = effectiveTimeout < _discardPatience
+      ? effectiveTimeout
+      : _discardPatience;
+  int get _discardBudgetBytes => config.maxBodyBytes * 4;
 
   int _activeRequests = 0;
 
   /// Handlers still running after their request already timed out (504) and
-  /// left - the seat model does not see them, but the work is real: printing
-  /// could outlive stop() unless counted. Seats plus orphans are one live-work
-  /// budget, and stop() drains the orphans up to the handler budget.
+  /// left - the seat model does not see them, but the work is real: a local
+  /// Dart app's command could outlive stop() unless counted. Seats plus
+  /// orphans are one live-work budget, and stop() drains the orphans up to
+  /// the handler budget.
   int _orphanHandlers = 0;
 
   /// Armed when stop() arrives while orphans still run - completed when the
@@ -200,20 +224,31 @@ class LocalIntakeServer {
   int get port => _port;
   bool get isListening => _server != null;
 
-  /// Starts listening - tries the preferred port, then the fallbacks. Throws
-  /// [IntakeBindException] (a plain Exception - a failed bind is an
-  /// environmental condition) when every port fails, and [StateError] when
-  /// already listening or mid-start.
-
+  /// Starts listening - tries the preferred port, then the fallbacks.
+  ///
+  /// The returned future rejects with [IntakeBindException] (a plain
+  /// Exception - a failed bind is an environmental condition) when every
+  /// port fails, and with [StateError] when already listening or mid-start.
+  /// Every rejection travels through the returned future - none is thrown
+  /// synchronously - so `start(...).catchError(...)`,
+  /// `start(...).then(..., onError: ...)` and `await start(...)` inside a
+  /// `try/catch` all observe the same contract on every path.
   Future<int> start({
     required int preferredPort,
     List<int> fallbacks = const [],
   }) {
     if (_server != null || _starting) {
-      throw StateError(
-        _server != null
-            ? 'intake server already listening on port $_port'
-            : 'intake server start already in progress',
+      // The rejection travels through the returned future, never thrown
+      // synchronously: a synchronous throw escapes a caller's
+      // .catchError/.then(onError) on the result - there is no result to
+      // attach them to. The StateError contract is identical on every path.
+      return Future<int>.error(
+        StateError(
+          _server != null
+              ? 'intake server already listening on port $_port'
+              : 'intake server start already in progress',
+        ),
+        StackTrace.current,
       );
     }
     _starting = true;
@@ -407,6 +442,12 @@ class LocalIntakeServer {
           busyOrigin,
           admitted: protection.echoesCorsFor(busyOrigin),
         );
+        // The busy reject is an immediate cut on purpose: a saturated server
+        // spends no drain windows, and the platform reset on Linux/macOS can
+        // swallow this 503 reply while the body stays unread - the retrying
+        // client then reads it as a retryable network error. That loss is
+        // accepted and documented for this path alone; the 413 gate keeps the
+        // draining terminate.
         await _terminate(
           response,
           HttpStatus.serviceUnavailable,
@@ -511,8 +552,17 @@ class LocalIntakeServer {
             if (waitMs != null) {
               response.headers.set('Retry-After', '${(waitMs / 1000).ceil()}');
             }
-            // السؤال غير المعطِّل: الصفحة تعيد المحاولة بعد لحظة
-            if (rejection.code == 'origin_pending') {
+            // The page must read the code and the honest Retry-After to
+            // retry: the consent question always echoes (its own ask fired
+            // the request), and every rejection carrying a wait budget
+            // (per-origin quota or token lockout) echoes when the origin
+            // qualifies for one - without ACAO the browser hides both from
+            // the retrying page and Retry-After loses its meaning.
+            final echoesCors =
+                rejection.code == 'origin_pending' ||
+                (rejection.retryAfterMs != null &&
+                    protection.echoesCorsFor(origin));
+            if (echoesCors) {
               _echoCors(response, origin, admitted: true);
             }
             await _json(response, rejection.status, {
@@ -560,7 +610,7 @@ class LocalIntakeServer {
           final te = _firstHeader(request, HttpHeaders.transferEncodingHeader);
           final cl = request.contentLength;
           if ((te == null || te.isEmpty) && cl > config.maxBodyBytes) {
-            await _terminate(
+            await _terminateDiscarding(
               response,
               HttpStatus.requestEntityTooLarge,
               'payload_too_large',
@@ -573,34 +623,38 @@ class LocalIntakeServer {
           // المعلق، ثم فك UTF-8 واحد بعد حسم الحجم — المسار القديم كان
           // يبني سلسلة الجسم كاملة أولا ثم يضخّمها (trim + jsonDecode +
           // toString) فتتضاعف الذاكرة قبل أي حارس تطبيقي
-          String body;
-          try {
-            body = await _readBody(request);
-          } on _BodyTooLargeException {
-            await _terminate(
-              response,
-              HttpStatus.requestEntityTooLarge,
-              'payload_too_large',
-              'Request body exceeds the allowed limit ($_mbLabel)',
-            );
-            return;
-          } on TimeoutException {
-            await _terminate(
-              response,
-              HttpStatus.requestTimeout,
-              'request_timeout',
-              'Timed out waiting for the complete request body',
-            );
-            return;
-          } on FormatException {
-            await _terminate(
-              response,
-              HttpStatus.badRequest,
-              'invalid_utf8',
-              'The request body is not valid UTF-8',
-            );
+          final outcome = await _readBody(request);
+          if (outcome.error != null) {
+            if (outcome.error is _BodyTooLargeException) {
+              await _terminate(
+                response,
+                HttpStatus.requestEntityTooLarge,
+                'payload_too_large',
+                'Request body exceeds the allowed limit ($_mbLabel)',
+              );
+            } else if (outcome.error is TimeoutException) {
+              await _terminate(
+                response,
+                HttpStatus.requestTimeout,
+                'request_timeout',
+                'Timed out waiting for the complete request body',
+              );
+            } else if (outcome.error is FormatException) {
+              await _terminate(
+                response,
+                HttpStatus.badRequest,
+                'invalid_utf8',
+                'The request body is not valid UTF-8',
+              );
+            } else {
+              // خطأ مقبس أثناء الجسم ليس علة صيغة عند العميل: يُطلق
+              // ليصله مسار الشبكة الأماني (500 ثابت وسجل انهيار) كما
+              // كان قبل إعادة هيكلة النتيجة.
+              throw outcome.error!;
+            }
             return;
           }
+          final body = outcome.body!;
           if (!_jsonShapeWithinLimits(
             body,
             config.maxJsonElements,
@@ -748,33 +802,90 @@ class LocalIntakeServer {
   /// body subscription makes HttpServer destroy the connection at once and
   /// swallow the reply before delivery (measured directly on HttpServer), while
   /// an unconsumed body lets the reply through and then closes - the reject contract itself: honest reply plus cut.
-  Future<String> _readBody(HttpRequest request) async {
+  /// Reads the request body up to the byte cap and hands the caller an
+  /// [_BodyOutcome]. On the over-cap rejection the SAME single subscription
+  /// (a dart:io body allows exactly one listener) switches to a discard
+  /// phase, and the rejection is handed back only once the remainder was
+  /// drained: the framework destroys a response that closes while its own
+  /// accounting sees an unread body, so replying before the drain would
+  /// let that destroy swallow the reply (a reset on Linux and macOS). A
+  /// sender past the drain bounds keeps the hard cut, reply included.
+  Future<_BodyOutcome> _readBody(HttpRequest request) async {
     // copy:false: لا نسخة عند add — النسخة الوحيدة عند
     // takeBytes؛ ومخازن مقاطس dart:io طازجة لكل حدث فلا مشاركة
     final builder = BytesBuilder(copy: false);
     // أساس مونوتوني لكل طلب — لا wall-clock يتجمّد أو يقفز.
     final deadlineMs = _now + effectiveTimeout.inMilliseconds;
-    final done = Completer<String>();
+    final done = Completer<_BodyOutcome>();
     StreamSubscription? subscription;
+    Timer? cutTimer;
     var settled = false;
+    var discarding = false;
+    var discardedBytes = 0;
+    var drainDeadlineMs = 0;
+    Object? rejection;
+
+    // حسم الرفض لا يُحمَّل إلا بعد انتهاء التفريغ (نهاية الإرسال أو
+    // قطع الحد) — الرد بعده يجد الجسم مقروءاً بمحاسبة الإطار فيغلق
+    // نظيفاً بدل هدمه.
+    void finishDrain() {
+      cutTimer?.cancel();
+      cutTimer = null;
+      if (settled && !done.isCompleted) {
+        done.complete(_BodyOutcome.rejected(rejection));
+      }
+    }
+
+    // القطع الفوري: صبر التفريغ انتهى أو المرسل تجاوز الحدود — إلغاء
+    // الاشتراك يهدم الاتصال (المقاس على HttpServer) والبقية تبقى غير
+    // مقروءة؛ من لا يتوقف يستحق القطع كما قبل الإصلاح.
+    void cutNow() {
+      unawaited(subscription?.cancel());
+      finishDrain();
+    }
 
     void settle(Object? error, [String? body]) {
       if (settled) return;
+      if (error == null) {
+        settled = true;
+        done.complete(_BodyOutcome.ok(body!));
+        return;
+      }
+      // الرفض يحرر المخزن في الحال — لا ينتظر خروج النطاق
+      builder.clear();
+      if (error is _BodyTooLargeException) {
+        // وضع الرمي: نفس الاشتراك يستمر يقرأ ويحصي البقية (بلا تخزين)
+        // حتى نهاية الإرسال أو أحد حدي التفريغ، ثم يُحمَّل الرفض.
+        settled = true;
+        rejection = error;
+        discarding = true;
+        // الموعد يُؤسر عند بدء التفريغ لا عند كل مقطع — getter يعيد الحساب
+        // من _now لحظته فيصير الشرط ملازماً كاذباً أبداً.
+        drainDeadlineMs = _now + _discardWindow.inMilliseconds;
+        cutTimer = Timer(_discardWindow, cutNow);
+        return;
+      }
+      // المهلة والانقطاع: إيقاف مؤقت لا إلغاء — المرسل الصامت لم يترك
+      // بيانات غير مقروءة أصلاً؛ والمقطر الذي عبر الموعد المطلق قد
+      // يترك بايتات في الطريق فيغلق الإطار هدماً كحال 0.1.0 (بقية
+      // مقيسة مقبولة: رد 408 قد يضيع على لينكس عند مقطر لا يتوقف).
       settled = true;
       subscription?.pause();
-      if (error != null) {
-        // الرفض يحرر المخزن في الحال — لا ينتظر خروج النطاق
-        builder.clear();
-        done.completeError(error);
-      } else {
-        done.complete(body!);
-      }
+      done.complete(_BodyOutcome.rejected(error));
     }
 
     subscription = request
         .timeout(effectiveTimeout)
         .listen(
           (chunk) {
+            if (discarding) {
+              discardedBytes += chunk.length;
+              if (discardedBytes > _discardBudgetBytes ||
+                  _now >= drainDeadlineMs) {
+                cutNow();
+              }
+              return;
+            }
             if (_now >= deadlineMs) {
               settle(
                 TimeoutException(
@@ -790,15 +901,127 @@ class LocalIntakeServer {
             }
           },
           onDone: () {
+            if (discarding) {
+              finishDrain();
+              return;
+            }
             try {
               settle(null, utf8.decode(builder.takeBytes()));
             } on FormatException catch (e) {
               settle(e);
             }
           },
-          onError: (Object error) => settle(error),
+          onError: (Object error) {
+            if (discarding) {
+              // المقبس مات والعميل معه — لا معنى لانتظار المؤقت: الحسم
+              // فوراً وتحرير المقعد.
+              finishDrain();
+              return;
+            }
+            settle(error);
+          },
         );
     return done.future;
+  }
+
+  /// Reason phrases for the hand-built status line of the raw-socket
+  /// terminate - the codes that reach it.
+  static const _terminateReasons = <int, String>{
+    HttpStatus.requestEntityTooLarge: 'Payload Too Large',
+    HttpStatus.serviceUnavailable: 'Service Unavailable',
+  };
+
+  /// Rejects a request whose body was never listened to over the RAW socket -
+  /// the classic lingering close. Measured reason: the framework destroys the
+  /// connection at response.close() on Linux and macOS even when the body was
+  /// fully drained first (the reply is written and the client still sees a
+  /// broken pipe), so no reply can travel over the managed response. Instead
+  /// the socket is detached before anything is written; the hand-built reply -
+  /// the same JSON shape _terminate writes, current headers copied, framing
+  /// headers rebuilt from the exact body - is flushed, and the write side
+  /// closes FIRST. The read side stays open and the parser hands its unparsed
+  /// remainder to the detached socket, so the bounded drain counts and drops
+  /// bytes on THAT stream until done, an error, or either bound (the discard
+  /// window, the four-body budget); past them the hard cut stays, reply
+  /// included. destroy() always ends the socket.
+  Future<void> _terminateDiscarding(
+    HttpResponse response,
+    int status,
+    String code,
+    String message,
+  ) async {
+    final socket = await response.detachSocket(writeHeaders: false);
+    try {
+      // الرد اليدوي بنفس شكل _terminate: نفس الجسم، ونفس الترويسات الجارية
+      // عدا التأطيرية التي تُبنى هنا من طول الجسم الفعلي.
+      final body = utf8.encode(
+        jsonEncode({'ok': false, 'error': code, 'message': message}),
+      );
+      final head = StringBuffer()
+        ..write(
+          'HTTP/1.1 $status ${_terminateReasons[status] ?? 'Rejected'}'
+          '\r\n',
+        );
+      response.headers.forEach((name, values) {
+        final lower = name.toLowerCase();
+        if (lower == HttpHeaders.contentLengthHeader ||
+            lower == HttpHeaders.contentTypeHeader ||
+            lower == HttpHeaders.transferEncodingHeader) {
+          return;
+        }
+        for (final value in values) {
+          head.write('$name: $value\r\n');
+        }
+      });
+      head
+        ..write(
+          '${HttpHeaders.contentTypeHeader}: '
+          'application/json; charset=utf-8\r\n',
+        )
+        ..write('${HttpHeaders.contentLengthHeader}: ${body.length}\r\n')
+        ..write('${HttpHeaders.connectionHeader}: close\r\n\r\n');
+
+      // الرد أولاً ثم إغلاق جهة الكتابة: الفين يصل قبل أي شيء آخر، وجهة
+      // القراءة باقية كما قيس (التفريغ بعده يرى الجسم كاملاً حتى onDone).
+      socket.add(utf8.encode(head.toString()));
+      socket.add(body);
+      await socket.flush();
+      await socket.close();
+
+      // التفريغ المحدود على تيار المقبس المنفصل: المحلل يسلّم ما لم يُفكَّك
+      // إلى هذا التيار بعد الانتزاع — عدّ وارمِ بلا تخزين، بحدّيه نافذة
+      // التفريغ وميزانية الأربعة أجسام، وينتهي onDone أو onError أو بتجاوز
+      // أحد الحدين.
+      final drained = Completer<void>();
+      var seen = 0;
+      final budget = _discardBudgetBytes;
+      final deadlineMs = _now + _discardWindow.inMilliseconds;
+      late final StreamSubscription<List<int>> sub;
+      // late: يُسند قبل أي رد نداء (لا تسليم بين الإسناد والاستماع) —
+      // والإغلاق يحتاجه معرفاً قبل سطر التعريف.
+      late final Timer window;
+      void finish() {
+        window.cancel();
+        unawaited(sub.cancel());
+        if (!drained.isCompleted) drained.complete();
+      }
+
+      window = Timer(_discardWindow, finish);
+      sub = socket.listen(
+        (chunk) {
+          seen += chunk.length;
+          if (seen > budget || _now >= deadlineMs) {
+            finish();
+            return;
+          }
+        },
+        onDone: finish,
+        onError: (Object _) => finish(),
+      );
+      await drained.future;
+    } finally {
+      socket.destroy();
+    }
   }
 
   /// One linear pass over the body counting JSON structural pressure: every
@@ -919,7 +1142,7 @@ class LocalIntakeServer {
       // ليس JSON — نص خام مباشر
     }
     // مسار النص الخام وحده يُقلَّص (توافق السلوك القديم للبوابات التي
-    // ترسل أوامر TSPL نصا، وغالبا بأسطر ختامية)
+    // ترسل لغات أوامر نصية، وغالبا بأسطر ختامية)
     final trimmed = body.trim();
     return trimmed.isEmpty ? const [] : [trimmed];
   }
