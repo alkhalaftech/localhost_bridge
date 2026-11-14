@@ -96,7 +96,7 @@ void main() {
   test(
     'a body over 1MB is rejected with 413 and never reaches the handler',
     () async {
-      final port = await server.start(preferredPort: 29991);
+      final port = await server.start(preferredPort: 0);
       final body = List<int>.filled(1024 * 1024 + 4096, 0x61); // 'a'
       final status = await statusLineOf(
         port,
@@ -116,7 +116,7 @@ void main() {
   test(
     'a body exactly at the 1MB limit is accepted — the cap never breaks legitimate traffic',
     () async {
-      final port = await server.start(preferredPort: 29992);
+      final port = await server.start(preferredPort: 0);
       // 1MB ناقص غلاف JSON كي يكون الإجمالي عند الحد لا فوقه
       final inner = 'x' * (1024 * 1024 - 100);
       final client = HttpClient();
@@ -134,7 +134,7 @@ void main() {
   test(
     'a request stalling mid-body is answered with 408 within the timeout',
     () async {
-      final port = await server.start(preferredPort: 29993);
+      final port = await server.start(preferredPort: 0);
       final sw = Stopwatch()..start();
       final partial = List<int>.filled(64, 0x61);
       // Content-Length صادق لكننا لا نرسل البقية أبدا — اتصال معلق
@@ -176,7 +176,7 @@ void main() {
             ),
           ),
       );
-      final port = await slowServer.start(preferredPort: 29994);
+      final port = await slowServer.start(preferredPort: 0);
       addTearDown(() => slowServer.stop());
 
       // 16 طلبا يصلون للترويسة ثم يصمتون — كل واحد يحجز مقعد معالجة
@@ -221,7 +221,7 @@ void main() {
 
   test('a 1MiB body of empty JSON elements is rejected with 413 '
       'payload_too_complex before parsing', () async {
-    final port = await server.start(preferredPort: 29995);
+    final port = await server.start(preferredPort: 0);
     // Maximal element density: every three bytes become two decoded map
     // allocations - exactly the amplification shape the cap exists for.
     final parts = <String>['['];
@@ -249,7 +249,7 @@ void main() {
   test(
     'braces and commas inside JSON strings are not counted as elements',
     () async {
-      final port = await server.start(preferredPort: 29996);
+      final port = await server.start(preferredPort: 0);
       // Structural bytes far beyond the default cap, but all of them sit
       // inside one string: one element of decoding pressure, and it passes.
       final hostile = '{[,,{' * (1024 * 1024 ~/ 20);
@@ -280,7 +280,7 @@ void main() {
           ),
         ),
     );
-    final port = await strict.start(preferredPort: 29997);
+    final port = await strict.start(preferredPort: 0);
     addTearDown(strict.stop);
     final client = HttpClient();
     Future<int> post(String body) async {
@@ -349,4 +349,213 @@ void main() {
       );
     },
   );
+
+  group('the body deadline is absolute, not event-gated', () {
+    /// خادم مهلة 5s وحماية محصنة تقبل الأصول https بلا ترويسات fetch.
+    /// كل مدد هذه المجموعة عشرة أضعاف جدولها الأصلي والنسب باقية —
+    /// هامش الحسم صار بثوان لا بمئات الميلي ثانية فلا يكسره اختلاس
+    /// ساعة مضيف محمّل، وبقاؤه بالعقد نفسه (1.25 ضعف الموعد مثلها).
+    LocalIntakeServer deadlineServer() => LocalIntakeServer(
+      telemetry: const SilentTelemetry(),
+      correlationIdGenerator: _counterId,
+      onCommand: (cmd) async {
+        handlerCalls++;
+        return const CommandOutcome(ok: true);
+      },
+      requestTimeout: const Duration(seconds: 5),
+      protection: IntakeProtection()
+        ..update(
+          policy: const OriginPolicy(
+            allowAllHardened: true,
+            requireFetchMetadata: false,
+            perOriginPerMinute: 1000,
+          ),
+        ),
+    );
+
+    /// ترويسات POST مقطّعة بلا Content-Length حصراً — فلا بوابة CL
+    /// أصلاً والمهلة الصمتية وحدها لا تحرس العمر المطلق.
+    Future<Socket> chunkedHead(int port) async {
+      final sock = await Socket.connect(InternetAddress.loopbackIPv4, port);
+      unawaited(sock.done.catchError((Object _) {}));
+      sock.add(
+        utf8.encode(
+          'POST / HTTP/1.1\r\n'
+          'Host: 127.0.0.1:$port\r\n'
+          'Origin: https://portal.example\r\n'
+          'Content-Type: application/json\r\n'
+          'Transfer-Encoding: chunked\r\n\r\n',
+        ),
+      );
+      await sock.flush();
+      return sock;
+    }
+
+    Future<void> dripChunk(Socket sock, [int size = 64]) async {
+      sock.add(utf8.encode('${size.toRadixString(16)}\r\n'));
+      sock.add(List<int>.filled(size, 0x61));
+      sock.add(utf8.encode('\r\n'));
+      await sock.flush();
+    }
+
+    /// سطر الحالة الأول من مقبس مفتوح قائم — الطلب أُرسل عليه أصلاً.
+    Future<String> statusOfSocket(
+      Socket sock, {
+      Duration wait = const Duration(seconds: 10),
+    }) {
+      final completer = Completer<String>();
+      late final StreamSubscription subs;
+      subs = sock.listen(
+        (data) {
+          if (completer.isCompleted) return;
+          final text = latin1.decode(data);
+          final idx = text.indexOf('\r\n');
+          if (idx > 0) {
+            completer.complete(text.substring(0, idx));
+            unawaited(subs.cancel());
+          }
+        },
+        onDone: () {
+          if (!completer.isCompleted) completer.completeError('انقطع قبل الرد');
+        },
+        onError: (Object e) {
+          if (!completer.isCompleted) completer.completeError('خطأ مقبس: $e');
+        },
+      );
+      return completer.future.timeout(wait);
+    }
+
+    test(
+      'a chunked body completing after the deadline is rejected 408, handler untouched',
+      timeout: const Timeout(Duration(seconds: 20)),
+      () async {
+        final server = deadlineServer();
+        final port = await server.start(preferredPort: 0);
+        addTearDown(server.stop);
+        final sock = await chunkedHead(port);
+        // الترتيب لا الساعة: الرد يسجَّل قبل كتابة الخاتمة المتأخرة —
+        // التوقيت الحدّي القديم (أقل من 600ms أمام ختام ~620ms) كان
+        // هامش 20ms يكسره اختلاس واحد فوقه
+        final order = <String>[];
+        final reply = statusOfSocket(sock);
+        unawaited(
+          reply.then(
+            (_) => order.add('reply'),
+            onError: (Object _) => order.add('reply-error'),
+          ),
+        );
+        // الختام عند ~6.2s من البداية حصرا: بعد الموعد المطلق (5s) وقبل
+        // أن تُغلق فجوة الصمت (آخر قطرة عند ~3.6s + 5s) — فحص الأحداث
+        // وحده كان يقبل هذا الجسم عند اكتماله، والصمت لا يفسر الحسم
+        unawaited(
+          Future<void>.delayed(const Duration(milliseconds: 6200)).then((
+            _,
+          ) async {
+            order.add('terminator');
+            sock.add(utf8.encode('0\r\n\r\n'));
+            await sock.flush().catchError((Object _) {});
+          }),
+        );
+        // قطرات ودية قبل الموعد بفجوات دون مهلة الصمت (0 / 2.0s / 3.5s)
+        unawaited(dripChunk(sock));
+        await Future<void>.delayed(const Duration(milliseconds: 2000));
+        await dripChunk(sock);
+        await Future<void>.delayed(const Duration(milliseconds: 1500));
+        await dripChunk(sock);
+        final status = await reply;
+        expect(
+          status,
+          contains('408'),
+          reason: 'a late completion is a timeout, not an acceptance',
+        );
+        expect(
+          order.first,
+          'reply',
+          reason:
+              'the reply was recorded before the late terminator was '
+              'written - the absolute deadline cuts in its own time; a '
+              'deadline gated on body events would accept the body when '
+              'the terminator lands (200) or answer after it',
+        );
+        expect(
+          handlerCalls,
+          0,
+          reason: 'a timed-out body never reaches the handler',
+        );
+        sock.destroy();
+      },
+    );
+
+    test(
+      'a drip under the silence window is cut by the absolute deadline before 1.25x of it',
+      timeout: const Timeout(Duration(seconds: 30)),
+      () async {
+        final server = deadlineServer();
+        final port = await server.start(preferredPort: 0);
+        addTearDown(server.stop);
+        final sock = await chunkedHead(port);
+        final sw = Stopwatch()..start();
+        final reply = statusOfSocket(sock);
+        // قطرة كل 3.5s: دون مهلة الصمت (5s) ودون هامش الموعد نفسه —
+        // القطرة الثانية تقع داخل المهلة بيقين فلا يفسر الوصول المتأخر
+        // الحسم، ولا الصمت؛ حسمٌ في موعده لا يفسره إلا المؤقت المطلق.
+        // والمدد عشرة أضعاف جدولها الأصلي والنسب باقية: هامش القضية
+        // 1.25 ضعف الموعد صار 1.25s بدل 125ms
+        unawaited(
+          () async {
+            for (var i = 0; i < 4; i++) {
+              await dripChunk(sock);
+              await Future<void>.delayed(const Duration(milliseconds: 3500));
+            }
+          }().catchError((Object _) {}),
+        );
+        final status = await reply;
+        sw.stop();
+        expect(status, contains('408'));
+        expect(
+          sw.elapsed,
+          lessThan(const Duration(milliseconds: 6250)),
+          reason:
+              '1.25x of the 5s deadline is the bar - a drip pacing '
+              'events under the silence window must still be cut on time; '
+              'every duration here runs at tenfold with the same ratios, '
+              'so the slack is 1.25s of wall clock, not 125ms',
+        );
+        sock.destroy();
+      },
+    );
+
+    test(
+      'after the deadline cut the seat and timers are freed: the next request is served and stop drains',
+      timeout: const Timeout(Duration(seconds: 20)),
+      () async {
+        final server = deadlineServer();
+        final port = await server.start(preferredPort: 0);
+        addTearDown(server.stop);
+        final sock = await chunkedHead(port);
+        final reply = statusOfSocket(sock);
+        unawaited(dripChunk(sock));
+        // عشرة أضعاف الانتظار الأصلي (650ms): بعد الموعد بيقين والنسبة
+        // باقية — القراءة نفسها تنتظر الرد فلا هامش زمني هنا أصلاً
+        await Future<void>.delayed(const Duration(milliseconds: 6500));
+        expect(await reply, contains('408'));
+        sock.destroy();
+        // مقعد تال حي يُخدم فورا بعد القطع
+        final client = HttpClient();
+        final req = await client.postUrl(Uri.parse('http://127.0.0.1:$port/'));
+        req.headers.set('Origin', 'https://portal.example');
+        req.headers.contentType = ContentType.json;
+        req.write('["ok"]');
+        final resp = await req.close().timeout(const Duration(seconds: 5));
+        expect(
+          resp.statusCode,
+          200,
+          reason: 'the cut request released its seat - the next one is served',
+        );
+        client.close();
+        // وstop يفرغ بلا تعليق — لا مؤقت حي ولا مقعد محجوز
+        await server.stop().timeout(const Duration(seconds: 3));
+      },
+    );
+  });
 }

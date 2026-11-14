@@ -1,10 +1,8 @@
-# CI for the localhost_bridge package as a standalone repository.
-# This file lives inside the package tree; the public repository receives
-# the package as a git archive snapshot, where the package root is the
+# CI for the localhost_bridge package repository.
+# This file lives inside the package tree; the package root is the
 # repository root. All paths below are therefore repository-root relative.
 # Public repositories get free macOS and Windows minutes, so the full
-# matrix runs on every push here - the private monorepo workflow keeps
-# macOS behind a manual dispatch instead.
+# matrix runs on every push and pull request here.
 # Actions are pinned to full commit SHAs instead of mutable major tags -
 # a supply-chain measure, so a moved tag cannot change what runs here.
 # The workflow token is dropped to read-only: nothing here writes back.
@@ -12,6 +10,13 @@ name: dart
 
 on:
   push:
+  pull_request:
+  workflow_dispatch:
+
+# One run per ref: a new push or PR update cancels the older run.
+concurrency:
+  group: ${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: true
 
 permissions:
   contents: read
@@ -24,12 +29,13 @@ jobs:
         os: [ubuntu-latest, macos-latest, windows-latest]
         sdk: [stable]
         include:
-          # Floor of the declared constraint sdk: ^3.9.0.
+          # Floor of the declared constraint sdk: ^3.8.0.
           - os: ubuntu-latest
-            sdk: 3.9.0
+            sdk: 3.8.0
     runs-on: ${{ matrix.os }}
+    timeout-minutes: 15
     steps:
-      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4.4.0
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
 
       - uses: dart-lang/setup-dart@6afc89df92d6eb3834022f73cd65adc8cdfcb92d # v1.8.1
         with:
@@ -40,7 +46,12 @@ jobs:
       - name: resolve packages
         run: dart pub get
 
+      # Only the stable entry judges style: the formatter takes the package
+      # language version from the resolved package config, so the floor
+      # entry measures function (pub get, analyze, test) and its older
+      # style must not reject the newest-style sources.
       - name: format
+        if: matrix.sdk == 'stable'
         run: dart format --output=none --set-exit-if-changed .
 
       - name: analyze
@@ -59,8 +70,9 @@ jobs:
   # keeps passing.
   release-doc-gate:
     runs-on: ubuntu-latest
+    timeout-minutes: 15
     steps:
-      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4.4.0
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
 
       - name: Reject stale pre-publication wording in published files
         run: |

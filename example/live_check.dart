@@ -108,7 +108,7 @@ Future<void> main() async {
     telemetry: const SilentTelemetry(),
     correlationIdGenerator: () =>
         DateTime.now().microsecondsSinceEpoch.toRadixString(16),
-    protection: IntakeProtection()
+    protection: IntakeProtection(telemetry: const SilentTelemetry())
       ..update(
         policy: const OriginPolicy(
           allowed: ['localhost'],

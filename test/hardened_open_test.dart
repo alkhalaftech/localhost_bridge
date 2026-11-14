@@ -201,7 +201,7 @@ void main() {
     timeout: const Timeout(Duration(seconds: 20)),
     () async {
       final srv = makeServer();
-      final p = await srv.start(preferredPort: 0, fallbacks: const [31881]);
+      final p = await srv.start(preferredPort: 0);
       addTearDown(srv.stop);
 
       final navigate = await send(
@@ -237,7 +237,7 @@ void main() {
     timeout: const Timeout(Duration(seconds: 20)),
     () async {
       final srv = makeServer();
-      final p = await srv.start(preferredPort: 0, fallbacks: const [31881]);
+      final p = await srv.start(preferredPort: 0);
       addTearDown(srv.stop);
       final r = await send(
         p,
@@ -266,7 +266,7 @@ void main() {
       // path. The explicit off-switch is the only way a headerless client
       // crosses it.
       final srv = makeServer();
-      final p = await srv.start(preferredPort: 0, fallbacks: const [31881]);
+      final p = await srv.start(preferredPort: 0);
       addTearDown(srv.stop);
       final missing = await send(
         p,
@@ -286,10 +286,7 @@ void main() {
           requireFetchMetadata: false,
         ),
       );
-      final pOff = await off.start(
-        preferredPort: 31911,
-        fallbacks: const [31881],
-      );
+      final pOff = await off.start(preferredPort: 0);
       addTearDown(off.stop);
       final headerless = await send(
         pOff,
@@ -313,7 +310,7 @@ void main() {
     timeout: const Timeout(Duration(seconds: 20)),
     () async {
       final srv = makeServer();
-      final p = await srv.start(preferredPort: 31904, fallbacks: const [31881]);
+      final p = await srv.start(preferredPort: 0);
       addTearDown(srv.stop);
       for (final origin in ['null', null, 'http://x.example']) {
         final r = await send(p, post(p, origin: origin));
@@ -337,7 +334,7 @@ void main() {
           perOriginPerMinute: 2,
         ),
       );
-      final p = await srv.start(preferredPort: 31905, fallbacks: const [31881]);
+      final p = await srv.start(preferredPort: 0);
       addTearDown(srv.stop);
       expect(
         (await send(p, post(p, origin: 'https://a.example')))['status'],
@@ -369,7 +366,7 @@ void main() {
           perOriginPerMinute: 1,
         ),
       );
-      final p = await srv.start(preferredPort: 31906, fallbacks: const [31881]);
+      final p = await srv.start(preferredPort: 0);
       addTearDown(srv.stop);
       // شكل الطلب لا يعفى منه وضع المراقبة: نموذج مخفي (أصل A) وhttp
       // (أصل B) يرفضان دائما — لا fetch شرعيا يفشل هذه الفحوص قط
@@ -416,7 +413,7 @@ void main() {
         handler: () async =>
             const CommandOutcome(ok: false, errorMessage: 'SECRET-HOST-DETAIL'),
       );
-      final p = await srv.start(preferredPort: 31907, fallbacks: const [31881]);
+      final p = await srv.start(preferredPort: 0);
       addTearDown(srv.stop);
 
       final stranger = await send(
@@ -465,7 +462,7 @@ void main() {
             ),
           ),
       );
-      final p = await srv.start(preferredPort: 31912, fallbacks: const [31881]);
+      final p = await srv.start(preferredPort: 0);
       addTearDown(srv.stop);
 
       // أربعة طلبات من أصل غريب: ترد فورا origin_pending بلا مقاعد محجوزة
@@ -522,7 +519,7 @@ void main() {
           requireFetchMetadata: false,
         ),
       );
-      final p = await srv.start(preferredPort: 31908, fallbacks: const [31881]);
+      final p = await srv.start(preferredPort: 0);
       addTearDown(srv.stop);
 
       const mb = 1024 * 1024;
@@ -601,7 +598,7 @@ void main() {
           perOriginPerMinute: 1000,
         ),
       );
-      final p = await srv.start(preferredPort: 31909, fallbacks: const [31881]);
+      final p = await srv.start(preferredPort: 0);
       addTearDown(srv.stop);
 
       // غير مسموح بقائمة: 403 ولا ACAO أصلا — المتصفح يمنع القراءة
@@ -650,10 +647,7 @@ void main() {
           perOriginPerMinute: 1000,
         ),
       );
-      final pAll = await all.start(
-        preferredPort: 31910,
-        fallbacks: const [31881],
-      );
+      final pAll = await all.start(preferredPort: 0);
       addTearDown(all.stop);
       final strangerOnAll = await rawWithHeaders(
         pAll,
@@ -671,6 +665,67 @@ void main() {
   );
 
   test(
+    'token-only host: a preflight from any origin carries no ACAO',
+    timeout: const Timeout(Duration(seconds: 20)),
+    () async {
+      // سياسة فارغة وتوكن مضبوط: التوكن هو المسار الوحيد، وصفحة المتصفح
+      // لا تستطيع الوصول إليه — صدى الpreflight يتبع سياسة الأصول لا
+      // التوكن، فلا ACAO لأي أصل مهما سأل بإرسال ترويسة التوكن
+      const token =
+          'a3f1c52e94b7d068f5e2a9c4b1d7e8036f9a2c5e8b1d7f04a6c9e2d5f8b3a1c7';
+      final srv = LocalIntakeServer(
+        telemetry: rec,
+        correlationIdGenerator: _counterId,
+        onCommand: (_) async => const CommandOutcome(ok: true),
+        protection: IntakeProtection(telemetry: rec)
+          ..update(policy: const OriginPolicy(), token: token),
+      );
+      final p = await srv.start(preferredPort: 0);
+      addTearDown(srv.stop);
+      Future<Map<String, Object>> preflight(String origin, {String? ask}) =>
+          rawWithHeaders(
+            p,
+            'OPTIONS / HTTP/1.1\r\nHost: 127.0.0.1:$p\r\n'
+            'Origin: $origin\r\n'
+            'Access-Control-Request-Method: POST\r\n'
+            "${ask == null ? '' : 'Access-Control-Request-Headers: $ask\r\n'}"
+            '\r\n',
+          );
+      for (final origin in const [
+        'https://portal.example',
+        'https://stranger.example',
+        'http://127.0.0.1:5173',
+      ]) {
+        final r = await preflight(origin);
+        expect(r['status'], 204);
+        expect(
+          (r['headers'] as Map<String, String>).containsKey(
+            'access-control-allow-origin',
+          ),
+          isFalse,
+          reason: 'an empty policy admits no origin - no ACAO for $origin',
+        );
+      }
+      // وسؤال إرسال ترويسة التوكن نفسه يبقى بلا صدى: الإذن لا يأتي من
+      // الpreflight مهما كان الأصل
+      final tokenPreflight = await preflight(
+        'https://portal.example',
+        ask: 'Content-Type, X-Portal-Token',
+      );
+      expect(tokenPreflight['status'], 204);
+      expect(
+        (tokenPreflight['headers'] as Map<String, String>).containsKey(
+          'access-control-allow-origin',
+        ),
+        isFalse,
+        reason:
+            'the page cannot present the token through CORS either - '
+            'the echo follows the origin policy, not the token',
+      );
+    },
+  );
+
+  test(
     'origin_rate_limited 429 echoes CORS: the page reads the code and '
     'Retry-After',
     timeout: const Timeout(Duration(seconds: 20)),
@@ -681,7 +736,7 @@ void main() {
           perOriginPerMinute: 1,
         ),
       );
-      final p = await srv.start(preferredPort: 31913, fallbacks: const [31881]);
+      final p = await srv.start(preferredPort: 0);
       addTearDown(srv.stop);
       expect(
         (await send(p, post(p, origin: 'https://a.example')))['status'],
@@ -729,7 +784,7 @@ void main() {
             token: token,
           ),
       );
-      final p = await srv.start(preferredPort: 31914, fallbacks: const [31881]);
+      final p = await srv.start(preferredPort: 0);
       addTearDown(srv.stop);
       for (var i = 0; i < 5; i++) {
         expect(

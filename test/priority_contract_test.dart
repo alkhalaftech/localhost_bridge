@@ -291,6 +291,65 @@ void main() {
     });
   });
 
+  group('one token verdict per request — the failing-handler message', () {
+    test(
+      'a locked origin with the correct token gets the error code without the host message',
+      () async {
+        const t64 =
+            'a3f1c52e94b7d068f5e2a9c4b1d7e8036f9a2c5e8b1d7f04a6c9e2d5f8b3a1c7';
+        final srv = make(
+          policy: const OriginPolicy(
+            allowAllHardened: true,
+            perOriginPerMinute: 1000,
+          ),
+          token: t64,
+          handler: () async => const CommandOutcome(
+            ok: false,
+            errorCode: 'bridge_boom',
+            errorMessage: 'host-side failure detail',
+          ),
+        );
+        final port = await srv.start(preferredPort: 0);
+        addTearDown(srv.stop);
+        // خمسة إخفاقات توكن من الأصل نفسه: كلها تعبر سياسة «الكل» فيفشل
+        // المعالج — والتوكن الخاطئ غير موثوق فالرمز بلا نص المضيف أصلاً
+        for (var i = 0; i < 5; i++) {
+          final miss = await _talk(
+            port,
+            _post(port, 'https://guess.example', token: 'WRONG'),
+          );
+          expect(miss['status'], 500);
+          expect(bodyJson(miss)['error'], 'bridge_boom');
+          expect(
+            bodyJson(miss).containsKey('message'),
+            isFalse,
+            reason: 'a wrong token is not a trusted one',
+          );
+        }
+        // السادس بالتوكن الصحيح: نافذة القفل تجعل التوكن غائباً عن قرار
+        // النص التفصيلي كما هو غائب عن قرار القبول — الطلب يعبر (سياسة
+        // «الكل») والمعالج يفشل فيأخذ الرد الرمز وحده بلا نص المضيف
+        final locked = await _talk(
+          port,
+          _post(port, 'https://guess.example', token: t64),
+        );
+        expect(
+          locked['status'],
+          500,
+          reason: 'admission follows the origin policy, not the lock',
+        );
+        expect(bodyJson(locked)['error'], 'bridge_boom');
+        expect(
+          bodyJson(locked).containsKey('message'),
+          isFalse,
+          reason:
+              'a locked miss window makes the token absent for the verbose '
+              'decision - the host text must not travel',
+        );
+      },
+    );
+  });
+
   group(
     'CORS echo of 503 and 400 for listed origins — rejects stay echoless',
     () {
@@ -440,7 +499,8 @@ void main() {
       ['allowAll', 'http://any.example', 403, false],
       ['discovery', 'https://new.example', 403, true],
       ['token', 'https://stranger.example', 403, false],
-      ['token-valid', 'https://stranger.example', 200, true],
+      ['token-valid', 'https://portal.example', 200, true],
+      ['token-valid', 'https://stranger.example', 200, false],
     ];
 
     LocalIntakeServer serverFor(String mode) {
@@ -472,7 +532,10 @@ void main() {
         case 'token':
         case 'token-valid':
           return make(
-            policy: const OriginPolicy(perOriginPerMinute: 1000),
+            policy: const OriginPolicy(
+              allowed: ['https://portal.example'],
+              perOriginPerMinute: 1000,
+            ),
             token:
                 'a3f1c52e94b7d068f5e2a9c4b1d7e8036f9a2c5e8b1d7f04a6c9e2d5f8b3a1c7',
           );
@@ -1117,4 +1180,62 @@ void main() {
       },
     );
   });
+
+  test(
+    'the post-admission busy 503 echoes ACAO for the listed origin - token stranger gets none',
+    () async {
+      final never = Completer<CommandOutcome>();
+      final pr = IntakeProtection(telemetry: rec)
+        ..update(
+          policy: const OriginPolicy(allowed: ['https://portal.example']),
+          token:
+              'a3f1c52e94b7d068f5e2a9c4b1d7e8036f9a2c5e8b1d7f04a6c9e2d5f8b3a1c7',
+        );
+      // الموضع الثاني للانشغال: صادر بعد القبول وحجز المقعد حين يتيم
+      // المعالج يحتجز الميزانية — رد مقروء كبقية الردود المقروءة
+      final srv = LocalIntakeServer(
+        telemetry: rec,
+        correlationIdGenerator: _cid,
+        onCommand: (_) => never.future,
+        protection: pr,
+        handlerTimeout: const Duration(milliseconds: 60),
+        config: const BridgeConfig(maxConcurrentRequests: 2),
+      );
+      final port = await srv.start(preferredPort: 0);
+      addTearDown(srv.stop);
+      Future<Map<String, Object>> post(String origin) => _talk(
+        port,
+        _post(
+          port,
+          origin,
+          token:
+              'a3f1c52e94b7d068f5e2a9c4b1d7e8036f9a2c5e8b1d7f04a6c9e2d5f8b3a1c7',
+        ),
+      );
+      // يتيمان يحتجزان ميزانية المقعدَين، والثالث يصطدم بالسقف الثاني
+      expect((await post('https://portal.example'))['status'], 504);
+      expect((await post('https://portal.example'))['status'], 504);
+      final listedBusy = await post('https://portal.example');
+      expect(listedBusy['status'], 503);
+      final h = listedBusy['headers'] as Map<String, String>;
+      expect(
+        h['access-control-allow-origin'],
+        'https://portal.example',
+        reason:
+            'the readable busy reply echoes for the accepted origin '
+            'like every other read - the retrying page must read it',
+      );
+      expect(h['vary'], 'Origin');
+      final strangerBusy = await post('https://stranger.example');
+      expect(strangerBusy['status'], 503);
+      expect(
+        (strangerBusy['headers'] as Map<String, String>).containsKey(
+          'access-control-allow-origin',
+        ),
+        isFalse,
+        reason: 'an unqualified origin gets no echo - no probing channel',
+      );
+      never.complete(const CommandOutcome(ok: true));
+    },
+  );
 }

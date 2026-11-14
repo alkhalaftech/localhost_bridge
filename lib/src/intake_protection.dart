@@ -149,6 +149,18 @@ class IntakeProtection {
   final Map<String, Future<OriginConsent>> _pendingAsks =
       <String, Future<OriginConsent>>{};
 
+  /// Per-origin question sequence - bumped on every new question fired for
+  /// that origin. An answer applies only while its number is still the
+  /// latest for the origin, so an expired window's late reply cannot
+  /// override a newer question's decision; a late reply with no newer
+  /// question keeps its number and is still the last word - unless the cap
+  /// evicted that number as the oldest key with no live question, in which
+  /// case the late reply is ignored and the origin is asked anew on its
+  /// next request. The applied number is deleted, the map's own insertion
+  /// order is the queue (a new key at the [_maxConsents] cap evicts the
+  /// oldest key with no live question), and dispose clears it.
+  final Map<String, int> _askSequence = <String, int>{};
+
   /// One-shot grants: origin -> expiry of a short-lived single-request grant.
   /// Insertion sweeps expired entries once the map crosses
   /// [_maxOnceGrants]: an answered-but-never-retried grant must not live
@@ -197,29 +209,27 @@ class IntakeProtection {
   /// Token-guessing lockout - the window is per-origin for web requests (a
   /// guessing origin locks only itself: a collective web window let any
   /// visited site lock the bridge for the legitimate origin), one shared
-  /// window for originless requests (local integrations), and the map
-  /// capped by idle entries exactly like the origin quota windows below.
+  /// window for originless requests (local integrations), and idle windows
+  /// swept once a second exactly like the origin quota windows below.
   final Map<String, Queue<int>> _tokenMissWindows = <String, Queue<int>>{};
   final Queue<String> _tokenMissOrder = ListQueue<String>();
   int _nextTokenSweepMs = 0;
   static const _tokenLockThreshold = 5;
   static const _tokenLockWindowMs = 60_000;
-  static const _maxTokenMissWindows = 1000;
 
-  /// The entropy floor a configured portal token must meet (UTF-8 bytes):
+  /// The length floor a configured portal token must meet (UTF-8 bytes):
   /// update() refuses anything shorter - see the guard there.
   static const _minTokenBytes = 32;
   final Queue<int> _anonTokenMisses = Queue<int>();
 
   /// Origin quota windows: stamps trimmed from the front of a queue, and the
-  /// map itself capped by its idle entries, cleared oldest-insertion-first in
-  /// one pass (the same pattern as ArrivalGuard).
+  /// map itself cleared of its idle entries oldest-insertion-first in one
+  /// pass, once a second at most (the same pattern as ArrivalGuard).
   final Map<String, Queue<int>> _originWindows = <String, Queue<int>>{};
   final Queue<String> _windowOrder = ListQueue<String>();
   final Stopwatch _clock = Stopwatch()..start();
 
   static const _windowMs = 60_000;
-  static const _maxOriginWindows = 1000;
   int _nextWindowSweepMs = 0;
 
   OriginPolicy get policy => _policy;
@@ -235,14 +245,16 @@ class IntakeProtection {
   /// An omitted field keeps its current layer: a policy-only call leaves the
   /// token active and a token-only call leaves the allowlist intact - pass an
   /// explicit empty token ('') or const OriginPolicy() to clear a layer.
-  /// Every call starts a fresh policy generation (a pending consent answer
-  /// never applies under the policy it was asked under). Applying a changed
-  /// origin policy revokes remembered grants and once-grants; remembered
-  /// denials live for the session, and a token-only or empty call touches no
-  /// origin decision (persisting decisions across sessions is the host's
-  /// business).
+  /// A call that changes the origin decisions starts a fresh policy
+  /// generation, so a pending consent answer never applies under the policy
+  /// it was asked under; a token-only call or one re-applying the same
+  /// decisions keeps the generation and pending answers stay alive.
+  /// Applying a changed origin policy revokes remembered grants and
+  /// once-grants; remembered denials live for the session, and a token-only
+  /// or empty call touches no origin decision (persisting decisions across
+  /// sessions is the host's business).
   ///
-  /// Throws [ArgumentError] for a configured token below the entropy floor
+  /// Throws [ArgumentError] for a configured token below the length floor
   /// ([_minTokenBytes] UTF-8 bytes) BEFORE anything is applied, so a host
   /// that catches the error keeps its previous protection state untouched.
   /// The error names the offending length, never the token itself.
@@ -339,13 +351,16 @@ class IntakeProtection {
     // والأعلام وحضور خطاف السؤال — هويته لا تغير معنى الموافقة،
     // والحواصف والمهل أدوات تنفيذ لا مضمون قرارات)
     final originDecisionsChanged = !_sameOriginDecisions(_policy, policy);
-    // الجيل يزاد هنا وحدها: كل مسار يغير السياسة (update وupdateFromSaved)
-    // يبطل جوابات نوافذ الجيل السابق — كان updateFromSaved يتخطى الزيادة
-    _policyGeneration++;
     _policy = policy;
     _allowed = _normalizeAllowed(policy.allowed);
     _token = token.trim();
     if (!originDecisionsChanged) return;
+    // الجيل يزاد هنا وحده حين تتغير قرارات الأصل فعلاً: جواب نافذة
+    // قرارٌ على الأصل، والتحديث الذي لا يغير القرارات (التوكن وحده
+    // أو السياسة ذاتها) لا يهدم أجوبة نوافذ حية. وupdateFromSaved
+    // يمر من هنا بحكم تغييره القرارات (الإقلاع يبدل السياسة) فيبقى
+    // حارس الجيل قائماً على مساره
+    _policyGeneration++;
     // المنح تموت مع سياستها (سحب التضييق يعمل)، والرفض قرار المستخدم
     // على الأصل لا على السياسة فيبقى للجلسة كما يعد الدليل — وحارس
     // الجيل أعلاه يُسقط الجوابات المعلقة فلا يبقى إلا المخزّن
@@ -359,7 +374,7 @@ class IntakeProtection {
   /// the host survives as-is - an entry with a path never matches a browser
   /// Origin, and [_warnDeadAllowlistEntries] says so at save time.
   static List<String> _normalizeAllowed(List<String> origins) => origins
-      .map((o) => o.trim().toLowerCase().replaceAll(_trailingSlashes, ''))
+      .map((o) => _stripTrailingSlashes(o.trim().toLowerCase()))
       .where((o) => o.isNotEmpty)
       .toList();
 
@@ -428,7 +443,10 @@ class IntakeProtection {
   /// Update from a saved value (prefs): 'allowlist' and 'token' are known;
   /// complete absence (first run) is a clean close with no warning; an
   /// unknown one (including the retired 'open') closes with a warning and a
-  /// counter - capability is never widened silently.
+  /// counter - capability is never widened silently. [savedMode] is a closed
+  /// list no matter what the host passes: any value outside {null,
+  /// 'allowlist', 'token'} lands on the closed default, never on a wider
+  /// mode read back out of storage.
   void updateFromSaved({
     required String? savedMode,
     List<String> allowedOrigins = const [],
@@ -470,11 +488,24 @@ class IntakeProtection {
     );
   }
 
-  /// The two patterns are compiled once - they used to be rebuilt on every
-  /// settings update (one of them per request on the normalize path). They
-  /// are static now: normalize uses them from the hot paths too.
-  static final RegExp _trailingSlashes = RegExp(r'/+$');
+  /// Compiled once - it used to be rebuilt on every settings update (per
+  /// request on the normalize path). It is static now: the hot paths use it
+  /// directly.
   static final RegExp _bareOrigin = RegExp(r'^[a-z]+://[^/]+$');
+
+  /// Strips every trailing '/' in one backward scan. The regex sweep this
+  /// replaces matched `/+$` from every start position, so a long run of
+  /// slashes that does NOT reach the end (one trailing non-slash character)
+  /// squared the work on the run's length - and the raw Origin reached that
+  /// sweep before any admission decision. The output is identical for every
+  /// input: the final run of slashes is removed, nothing else is.
+  static String _stripTrailingSlashes(String s) {
+    var end = s.length;
+    while (end > 0 && s.codeUnitAt(end - 1) == 0x2F) {
+      end--;
+    }
+    return end == s.length ? s : s.substring(0, end);
+  }
 
   /// Is the origin listed? - full match, bare host, or `*.domain` pattern
   /// (the pattern covers subdomains only; the root must be listed explicitly).
@@ -511,8 +542,11 @@ class IntakeProtection {
     return false;
   }
 
+  /// Lower-cases an Origin value and strips trailing slashes - the canonical
+  /// key for every per-origin window in this object. Used by this package's
+  /// server, not a stable host-facing interface.
   static String normalize(String origin) =>
-      origin.toLowerCase().replaceAll(_trailingSlashes, '');
+      _stripTrailingSlashes(origin.toLowerCase());
 
   /// A valid browser origin - the basis for the discovery question (asking
   /// about sandbox/null or http origins is meaningless).
@@ -524,6 +558,7 @@ class IntakeProtection {
   /// Accept the request - null means allowed; [IntakeRejection] carries status,
   /// code, and message. Order: the token layer passes on its own, then the list,
   /// then allow-all with its hardening, then discovery or an explicit reject.
+  /// Used by this package's server, not a stable host-facing interface.
   Future<IntakeRejection?> check({
     String? origin,
     String? portalToken,
@@ -549,8 +584,15 @@ class IntakeProtection {
       if (window.length >= _tokenLockThreshold) {
         // القفل يمنع المقارنة وحدها: التوكن يُعامل كأنه غائب وتُقيَّم
         // سياسة الأصول — البوابة المدرجة تعبر رغم إخفاقات مهاجم مجهول،
-        // ومن ترفضه السياسة أصلًا يُرَدّ 429 (لا 403: كان يحاول التخمين)
-        final verdict = await _checkBeyondToken(origin, fetchMode, fetchDest);
+        // ومن ترفضه السياسة أصلًا يُرَدّ 429 (لا 403: كان يحاول التخمين).
+        // والسؤال الجديد لا يُفتح من وراء القفل: mayAskConsent=false
+        // يمنع فروع الاكتشاف من إطلاق نافذة موافقة لطلب مقفل
+        final verdict = await _checkBeyondToken(
+          origin,
+          fetchMode,
+          fetchDest,
+          mayAskConsent: false,
+        );
         if (verdict == null) return null;
         // الرأس الصادق: بقايا نافذة القفل نفسها — أقدم إخفاق يخرج من
         // النافذة فتنكسر، فانتظار الذكرى لا «ثانيتين» لكل الرفوض
@@ -576,8 +618,8 @@ class IntakeProtection {
 
   /// The miss window a token attempt counts against: per-origin for web
   /// requests, the shared originless window for local integrations. The
-  /// per-origin map is swept by idle entries at the same cap and pacing as
-  /// the quota windows (one pass at most, once a second at most).
+  /// per-origin map is swept by idle entries at the same pacing as the
+  /// quota windows (one pass at most, once a second at most).
   Queue<int> _tokenMissWindow(String? origin, int now) {
     if (origin == null) {
       while (_anonTokenMisses.isNotEmpty &&
@@ -596,16 +638,19 @@ class IntakeProtection {
     while (window.isNotEmpty && now - window.first > _tokenLockWindowMs) {
       window.removeFirst();
     }
-    if (_tokenMissWindows.length > _maxTokenMissWindows &&
-        now >= _nextTokenSweepMs) {
+    // الكنس الدوري للخاملين: مرة كل ثانية كأقصى — نافذة انقضت لا تبقى
+    // مقيدة. مفتاح الطلب الجاري محصَّن: الطابور يُمسك من هنا وحتى
+    // إضافة الطابع في check (مقطع مزامن بلا انتظار) فإخلاؤه الآن يتيم
+    // الطابع القادم ويكسر تكوين القفل ذاته
+    if (_tokenMissWindows.isNotEmpty && now >= _nextTokenSweepMs) {
       _nextTokenSweepMs = now + 1000;
       var attempts = _tokenMissOrder.length;
-      while (_tokenMissWindows.length > _maxTokenMissWindows &&
-          attempts-- > 0) {
+      while (attempts-- > 0) {
         final oldest = _tokenMissOrder.removeFirst();
         final ts = _tokenMissWindows[oldest];
-        if (ts == null) continue;
-        final idle = ts.isEmpty || now - ts.last > _tokenLockWindowMs;
+        final idle =
+            oldest != key &&
+            (ts == null || ts.isEmpty || now - ts.last > _tokenLockWindowMs);
         if (idle) {
           _tokenMissWindows.remove(oldest);
         } else {
@@ -617,11 +662,16 @@ class IntakeProtection {
   }
 
   /// Acceptance after the token layer: the list, then allow-all with its hardening, then discovery.
+  ///
+  /// [mayAskConsent] is false behind the token lockout: a locked request
+  /// whose origin the policy does not accept is refused without opening a
+  /// new consent question - the caller answers `429 token_locked` for it.
   Future<IntakeRejection?> _checkBeyondToken(
     String? origin,
     String? fetchMode,
-    String? fetchDest,
-  ) async {
+    String? fetchDest, {
+    bool mayAskConsent = true,
+  }) async {
     // (1) القائمة — المدرج يعبر (ومنه من حُفظ سماحه الدائم بالاكتشاف)،
     // ومع حصة اختيارية إن فعّلها المضيف: المدرج المخترق وحده من
     // يملأ المقاعد بلا حد، فالحصة هنا تحصر ضرره بنافذته ولا تمس
@@ -636,7 +686,7 @@ class IntakeProtection {
           if (!_policy.reportOnly) return quota;
           telemetry?.warn(
             'intake report-only: would reject — ${quota.code}: '
-            '${quota.message} (origin=${origin ?? 'none'})',
+            '${quota.message} (origin=${_originForLog(origin) ?? 'none'})',
             category: BridgeCategory.security,
           );
         }
@@ -657,7 +707,7 @@ class IntakeProtection {
       if (_policy.reportOnly) {
         telemetry?.warn(
           'intake report-only: would reject — ${quota.code}: '
-          '${quota.message} (origin=${origin ?? 'none'})',
+          '${quota.message} (origin=${_originForLog(origin) ?? 'none'})',
           category: BridgeCategory.security,
         );
         return null;
@@ -724,6 +774,16 @@ class IntakeProtection {
           retryAfterMs: budgetWaitMs < 1000 ? 1000 : budgetWaitMs,
         );
       }
+      // الطلب المقفل لا يفتح سؤال موافقة جديداً: نوافذ الموافقة لا تُطلَق
+      // من وراء قفل تخمين التوكن حتى لو كانت ميزانية الأسئلة تسمح —
+      // رفضه هنا غير صفري فيحوله الاستدعاءُ المقفلُ إلى 429 token_locked
+      if (!mayAskConsent) {
+        return const IntakeRejection(
+          403,
+          'origin_pending',
+          'The origin is locked; no new consent question opens for it',
+        );
+      }
       _fireAsk(key, origin);
       return const IntakeRejection(
         403,
@@ -742,10 +802,13 @@ class IntakeProtection {
             'no discovery callback is available for non-browser requests',
       );
     }
-    return IntakeRejection(
+    // الأصل قيمة يتحكم فيها الخصم: الرسالة ثابتة بلا استيفاء — القيمة
+    // تجري في حقل origin= المعقم وحده (الخادم يمرر الرسالة سبباً إلى
+    // noteRejection فأي قيمة خام هنا تُنسخ حرفياً إلى السجل)
+    return const IntakeRejection(
       403,
       'origin_not_listed',
-      'Origin $origin is not on the allowed list',
+      'Origin is not on the allowed list',
     );
   }
 
@@ -770,6 +833,28 @@ class IntakeProtection {
       return;
     }
     final generation = _policyGeneration;
+    // رقم السؤال للأصل يزيد عند كل إطلاق فعلي (الالتحاق بنافذة حية لا
+    // يطلق شيئاً فلا يزيد): جواب نافذة انتهت ثم أُزيلت بسؤال أحدث للأصل
+    // نفسه لا يطبق فوق قرار الأحدث، والمتأخر بلا سؤال أحدث يبقى رقمه
+    // باقياً فيطبق. الخريطة نفسها هي الطابور (LinkedHashMap يحفظ ترتيب
+    // الإدراج: الإسناد لمفتاح موجود لا يحرك موضعه والجديد يلحق بالآخر)
+    // وتفرغ عند dispose
+    if (!_askSequence.containsKey(key) && _askSequence.length >= _maxConsents) {
+      // عند بلوغ السقف يُطرد أقدم مفتاح بترتيب الإدراج ليس له سؤال حي
+      // في _pendingAsks — رقمه إما طُبق فمحاً أو نافذته فاتت بلا جواب.
+      // وإن لم يوجد (النظري محصور بعدد الأسئلة الحية) فلا طرد: النمو
+      // يبقى محدوداً بعدد الحي وحده فوق السقف
+      String? evict;
+      for (final k in _askSequence.keys) {
+        if (!_pendingAsks.containsKey(k)) {
+          evict = k;
+          break;
+        }
+      }
+      if (evict != null) _askSequence.remove(evict);
+    }
+    final seq = (_askSequence[key] ?? 0) + 1;
+    _askSequence[key] = seq;
     _pendingAsks[key] = ask;
     // ختم الإطلاق هنا وحده: الالتحاق بنافذة حية أو رد نداء رامٍ لا
     // يستهلك ميزانية الزمن — السؤال الجديد فقط هو المحسوب
@@ -781,6 +866,10 @@ class IntakeProtection {
           if (_disposed) return;
           // جواب تحت سياسة سابقة لا يطبق على اللاحقة
           if (generation != _policyGeneration) return;
+          // جواب نافذة أزالها سؤال أحدث للأصل نفسه لا يطبق: رقمه لم يبق
+          // الأخير — وتطبيق الجواب يمحو رقمه فلا يطبق مرتين
+          if (_askSequence[key] != seq) return;
+          _askSequence.remove(key);
           // سؤال أُغلق بلا قرار: لا ذاكرة ولا منحة — الأصل يُسأل
           // مرة أخرى عند طلبه التالي (المضيف أزاحه أو ماتت نافذته)
           if (answer == OriginConsent.dismissed) return;
@@ -883,7 +972,11 @@ class IntakeProtection {
   }
 
   /// Per-origin quota - a queue trimmed from the front (each stamp removed
-  /// once, and the push happens before the compare so the request itself counts).
+  /// once, and the push happens before the compare so the request itself
+  /// counts). A rejected request's stamp is withdrawn right away, so
+  /// rejections never occupy the window and the honest wait is measured
+  /// from the oldest admitted request; watching passes through the same
+  /// branch, so a would-reject leaves no stamp either.
   IntakeRejection? _originQuotaVerdict(String? origin, [int? limitOverride]) {
     if (origin == null) return null;
     final key = normalize(origin);
@@ -898,18 +991,16 @@ class IntakeProtection {
       window.removeFirst();
     }
     window.addLast(now);
-    // إخلاء نوافذ الخاملين عند تجاوز السقف — دورة واحدة كأقصى، وبمعدل
-    // مرة في الثانية حصرا: حين يكون الأحياء فوق السقف لا يلف كل طلب
-    // الطابور كاملا (نطاقات فرعية كافية لذلك)
-    if (_originWindows.length > _maxOriginWindows &&
-        now >= _nextWindowSweepMs) {
+    // الكنس الدوري للخاملين: مرة كل ثانية كأقصى — نافذة انقضت لا تبقى
+    // مقيدة. مفتاح الطلب الجاري محصَّن بالترتيب نفسه: ختمه أُضيف قبل
+    // هذه الكتلة فآخر طوابعه طازج لا يعد خاملاً أبداً
+    if (_originWindows.isNotEmpty && now >= _nextWindowSweepMs) {
       _nextWindowSweepMs = now + 1000;
       var attempts = _windowOrder.length;
-      while (_originWindows.length > _maxOriginWindows && attempts-- > 0) {
+      while (attempts-- > 0) {
         final oldest = _windowOrder.removeFirst();
         final ts = _originWindows[oldest];
-        if (ts == null) continue;
-        final idle = ts.isEmpty || now - ts.last > _windowMs;
+        final idle = ts == null || ts.isEmpty || now - ts.last > _windowMs;
         if (idle) {
           _originWindows.remove(oldest);
         } else {
@@ -918,6 +1009,12 @@ class IntakeProtection {
       }
     }
     if (window.length > (limitOverride ?? _policy.perOriginPerMinute)) {
+      // الرفض لا يشغل الحصة: طابعه يُسحب فور الرفض فتبقى النافذة بطول
+      // الحصة، وبقايا الانتظار تُحسب من أقدم طابع مقبول — العميل
+      // الملتزم بـ Retry-After يُقبل بعد انتظاره بالضبط. الوضع المراقب
+      // يمر من الفرع نفسه فكان-سيرفض لا يترك أثراً في النافذة، ونافذة
+      // إخفاق التوكن لا تمس — هي عتبة قفل لا حصة
+      window.removeLast();
       // بقايا نافذة الحصة: أقدم طلب يخرج منها فتفرغ خانة للتابع
       final quotaWaitMs = window.isEmpty
           ? _windowMs
@@ -936,6 +1033,7 @@ class IntakeProtection {
   /// or a valid https origin on the allow-all path - anyone else gets no ACAO
   /// header at all, so the browser blocks reading the reply: echoing to everyone
   /// equaled '*' and would open token guessing from any page.
+  /// Used by this package's server, not a stable host-facing interface.
   bool echoesCorsFor(String? origin) {
     if (origin == null || origin.isEmpty) return false;
     if (_isListed(origin)) return true;
@@ -958,9 +1056,16 @@ class IntakeProtection {
   }
 
   /// Detailed host messages for the trusted only - a correct token or a listed
-  /// origin; the allow-all path sees the code without the host text.
+  /// origin; the allow-all path sees the code without the host text. One
+  /// verdict per request: while the token failure window (the origin's, or
+  /// the shared originless one) is locked, the token counts as absent here
+  /// too - this decision never compares a token whose window [check] is
+  /// refusing on, so a locked origin cannot probe the token through the
+  /// host error text.
+  /// Used by this package's server, not a stable host-facing interface.
   bool verboseErrorsFor(String? origin, String? portalToken) {
-    if (_token.isNotEmpty &&
+    if (!_tokenWindowLocked(origin) &&
+        _token.isNotEmpty &&
         portalToken != null &&
         portalToken.isNotEmpty &&
         _fixedTimeEquals(portalToken, _token)) {
@@ -969,13 +1074,39 @@ class IntakeProtection {
     return _isListed(origin);
   }
 
+  /// Whether the token-guessing lock for [origin]'s window - per origin, or
+  /// the shared originless one - is engaged right now. Read-only on purpose:
+  /// the admission path in [check] owns the state, so a verdict reader adds
+  /// no stamps and creates no map entries; expired stamps simply do not count.
+  bool _tokenWindowLocked(String? origin) {
+    final now = _now;
+    final Iterable<int> stamps;
+    if (origin == null) {
+      stamps = _anonTokenMisses;
+    } else {
+      final window = _tokenMissWindows[normalize(origin)];
+      if (window == null) return false;
+      stamps = window;
+    }
+    var live = 0;
+    for (final ts in stamps) {
+      if (now - ts <= _tokenLockWindowMs) live++;
+    }
+    return live >= _tokenLockThreshold;
+  }
+
   /// A rejection from outside the protection patterns (host authorities) goes
   /// through the same counter and log path - denial is never silent.
+  /// Used by this package's server, not a stable host-facing interface.
   void noteRejection(String reason, [String? origin]) {
     _countRejection();
     logRejection(reason, origin);
   }
 
+  /// Writes one throttled security-log line for a rejection (the counter
+  /// lives in [noteRejection]): at most one line per second, with the
+  /// suppressed count folded into the next emitted line. Used by this
+  /// package's server, not a stable host-facing interface.
   void logRejection(String? reason, String? origin) {
     // عدم الصمت مع كبح الطوفان: سطر واحد في الثانية كحد أقصى بنمط خنق
     // معرف الارتباط — كل رفض يعدّ عدّا (فوق) والسطر يخرج بما كُتم بعده
@@ -1033,6 +1164,7 @@ class IntakeProtection {
     }
     _askTimers.clear();
     _pendingAsks.clear();
+    _askSequence.clear();
   }
 
   /// Constant-time comparison - no timing leak of length or first-diff position.

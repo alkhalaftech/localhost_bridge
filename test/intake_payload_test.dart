@@ -34,8 +34,8 @@ void main() {
   tearDown(() async => server.stop());
 
   test('listens on preferred port and answers CORS + payload', () async {
-    final port = await server.start(preferredPort: 19991);
-    expect(port, 19991);
+    final port = await server.start(preferredPort: 0);
+    expect(port, greaterThan(0), reason: 'the assigned port of a port-0 bind');
     expect(server.isListening, isTrue);
 
     final client = HttpClient();
@@ -58,7 +58,7 @@ void main() {
   });
 
   test('GET is rejected with clear error', () async {
-    final port = await server.start(preferredPort: 19992);
+    final port = await server.start(preferredPort: 0);
     final client = HttpClient();
     final req = await client.getUrl(Uri.parse('http://127.0.0.1:$port/'));
     final resp = await req.close();
@@ -67,17 +67,25 @@ void main() {
   });
 
   test('falls back when preferred port is busy', () async {
-    final blocker = LocalIntakeServer(
-      telemetry: const SilentTelemetry(),
-      correlationIdGenerator: _counterId,
-      onCommand: (_) async => const CommandOutcome(ok: false),
+    // المرشح المشغول يُولد من المنفذ 0 ويمسكه مستمع عادي — لا منفذ ثابت.
+    // والمرشح الحر يُضم ثم يُحرَّر كي يكون رقمه معلوماً لا مخمَّناً.
+    final busy = await ServerSocket.bind(InternetAddress.loopbackIPv4, 0);
+    addTearDown(busy.close);
+    final spareHolder = await ServerSocket.bind(
+      InternetAddress.loopbackIPv4,
+      0,
     );
-    await blocker.start(preferredPort: 19993);
+    final spare = spareHolder.port;
+    await spareHolder.close();
     final port = await server.start(
-      preferredPort: 19993,
-      fallbacks: const [19994],
+      preferredPort: busy.port,
+      fallbacks: [spare],
     );
-    expect(port, 19994);
-    await blocker.stop();
+    expect(
+      port,
+      spare,
+      reason: 'the busy candidate is skipped for the fallback',
+    );
+    expect(port, isNot(busy.port));
   });
 }

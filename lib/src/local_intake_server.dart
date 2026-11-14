@@ -35,6 +35,14 @@ class _UnsupportedPayloadShapeException implements Exception {
   const _UnsupportedPayloadShapeException();
 }
 
+/// The bridge's own handler budget - a private marker thrown by the budget
+/// timeout alone, never by a handler: a TimeoutException raised inside the
+/// handler itself keeps the plain internal-error path instead of a misleading
+/// gateway-timeout reply with orphan bookkeeping it never used.
+class _HandlerBudgetExceeded implements Exception {
+  const _HandlerBudgetExceeded();
+}
+
 /// Failure to reserve any listen port - a plain [Exception]: a failed bind
 /// is an environmental condition (another process holds the ports), caught
 /// by `on Exception` handlers without the Error semantics Dart reserves
@@ -72,7 +80,7 @@ class LocalIntakeServer {
     this.requestTimeout,
     this.handlerTimeout,
   }) : _nowMs = nowMs,
-       protection = protection ?? IntakeProtection() {
+       protection = protection ?? IntakeProtection(telemetry: telemetry) {
     _validateLimits();
   }
 
@@ -146,6 +154,9 @@ class LocalIntakeServer {
 
   /// Optional intake protection (open/allowlist/token) - read live on every
   /// request so a settings change takes effect without restarting the listener.
+  /// The default one is built with this server's telemetry so its security
+  /// log (allow-all warnings, rejection lines) is not muted; a passed one
+  /// carrying no telemetry warns once at [start] with directions to wire it.
   final IntakeProtection protection;
 
   /// Full-body receive timeout - injected directly for tests; the default comes
@@ -160,6 +171,15 @@ class LocalIntakeServer {
   /// value frees the processing seat from a never-ending handler with a 504
   /// handler_timeout reply - and a late result (if one arrives) is dropped with
   /// no orphan error: Dart does not cancel futures, and the response settled first.
+  ///
+  /// The null default means no deadline at all: a stuck handler holds its seat
+  /// indefinitely, sixteen stuck handlers exhaust the service (the seat cap),
+  /// and [stop] waits for them - the full remedy (a bounded stop and a default
+  /// budget) is planned for a later release, so pass a value in production.
+  ///
+  /// The seat counter is instance state: handlers that never complete keep
+  /// counting across [stop] and [start] until a new server object is built,
+  /// and sixteen of them mean every command is answered `503 server_busy`.
   final Duration? handlerTimeout;
 
   /// Injectable defaults - caps, idle time, and extraHosts authorities; the
@@ -218,9 +238,17 @@ class LocalIntakeServer {
   /// Armed when stop arrives mid-start - completes when the last seat drains.
   Completer<void>? _drain;
 
+  /// Set for the whole drain of a stop (seats and orphans) - a start called
+  /// in that window awaits it before binding, so the new generation never
+  /// shares the seat counter with the old one mid-drain.
+  Future<void>? _stoppingFuture;
+
   HttpServer? _server;
   int _port = 0;
 
+  /// The bound port while listening, and `0` when not - including after a
+  /// `start()` that failed on a post-bind step: a stale bound number would
+  /// point callers at a listener that no longer exists.
   int get port => _port;
   bool get isListening => _server != null;
 
@@ -229,10 +257,17 @@ class LocalIntakeServer {
   /// The returned future rejects with [IntakeBindException] (a plain
   /// Exception - a failed bind is an environmental condition) when every
   /// port fails, and with [StateError] when already listening or mid-start.
-  /// Every rejection travels through the returned future - none is thrown
-  /// synchronously - so `start(...).catchError(...)`,
-  /// `start(...).then(..., onError: ...)` and `await start(...)` inside a
-  /// `try/catch` all observe the same contract on every path.
+  /// When a previous [stop] is still draining (in-flight replies, or
+  /// orphaned handlers awaiting their grace), start waits for that drain to
+  /// settle before binding - the generations never share the seat counter.
+  /// Without a [handlerTimeout] a never-completing handler never frees its
+  /// seat, so the drain - and a start called during it - stays held until
+  /// the handler settles; with one, the wait is bounded by the handler
+  /// budget (the orphan grace). Every rejection travels through the
+  /// returned future - none is thrown synchronously - so
+  /// `start(...).catchError(...)`, `start(...).then(..., onError: ...)`
+  /// and `await start(...)` inside a `try/catch` all observe the same
+  /// contract on every path.
   Future<int> start({
     required int preferredPort,
     List<int> fallbacks = const [],
@@ -255,6 +290,16 @@ class LocalIntakeServer {
     Future<int> started;
     try {
       started = telemetry.measure<int>('intake.start', () async {
+        // فراغ جارٍ: البدء ينتظر تخلّي الجيل القديم كاملاً (مقاعده
+        // ويتاماه) قبل الربط — جيلان يتشاركان عدّاد المقاعد يجعلان
+        // طلبات الجيل الجديد تُرد 503 بلا انشغال حقيقي. بلا ميزانية
+        // معالج ومعالج لا يكمل لا يتحرر المقعد أبداً فيعلق البدء هنا
+        // إلى الأبد — والانتظار بنمط _startingFuture الذي ينتظر به
+        // stop البدءَ الجاري.
+        final draining = _stoppingFuture;
+        if (draining != null) {
+          await draining;
+        }
         final candidates = [preferredPort, ...fallbacks];
         Object? lastError;
         for (final candidate in candidates) {
@@ -268,6 +313,18 @@ class LocalIntakeServer {
             _port = _server!.port;
             _authorities = computeAuthorities(_port, config.extraHosts);
             _warnExtraHosts(config.extraHosts);
+            // سجل الحماية الصامت: حماية ممررة بلا مرصد تبتلع تحذيرات
+            // الأمن (allow-all وأسطر الرفض) في null — الخادم يقولها مرة
+            // واحدة بمرصده هو مع طريق الوصل، أما الافتراضية فبُنيت
+            // بمرصد الخادم نفسه فلا تحذير عليها.
+            if (protection.telemetry == null) {
+              telemetry.warn(
+                'intake protection carries no telemetry — its security log '
+                'is muted; pass the same telemetry to '
+                'IntakeProtection(telemetry: ...) that you gave the server',
+                category: BridgeCategory.security,
+              );
+            }
             // الاتصالات بلا طلب نشط (keep-alive صامتة أو توقف المرسل قبل
             // اكتمال الترويسات) تُغلق بعد المهلة بدل حجزها إلى الأبد؛
             // جسم طلب نشط تحرسه [requestTimeout] أعلى
@@ -288,8 +345,22 @@ class LocalIntakeServer {
             return _port;
           } catch (e) {
             lastError = e;
+            // المستمع اليتيم: الربط نجح ثم رمت خطوة إقلاع لاحقة (تحذير
+            // الحماية أو listen أو سطر الإقلاع) — المقبس يبقى يستمع بلا
+            // مرجع بعد إحلال المرشح التالي، وإن فشل كل المرشحين بقي
+            // _server غير صفري فيصطدم الإقلاع التالي بـStateError. أغلق
+            // المربوط وأصفّر الحالة قبل المرشح التالي.
+            final orphan = _server;
+            if (orphan != null) {
+              _server = null;
+              // والمنفذ يتبع الخادم إلى الصفر: رقم قديم فوق خادم لم
+              // يعد موجوداً كذبة يستند إليها المستدعي (عقد port)
+              _port = 0;
+              await orphan.close(force: true);
+            }
             telemetry.warn(
-              'port $candidate busy, trying fallback',
+              'port $candidate unavailable (${e.runtimeType}), '
+              'trying fallback',
               category: BridgeCategory.network,
             );
           }
@@ -312,7 +383,9 @@ class LocalIntakeServer {
   /// once, in-flight replies finish (force used to cut them mid-send), then
   /// the seats are awaited until drained; orphaned handlers (timed out of
   /// their seat but still running) are awaited up to the handler budget and
-  /// the remainder is announced instead of silently outliving the stop.
+  /// the remainder is announced instead of silently outliving the stop. A
+  /// [start] issued while this drain is still running waits for it, so the
+  /// new generation binds only after the old one has fully stopped.
   Future<void> stop() async {
     // بداية جارية: ينتظر حسمها أولا — الرد
     // الفوري كان يدع الربط يكتمل خادما يتيما بعد عودة stop
@@ -324,33 +397,49 @@ class LocalIntakeServer {
         // فشل البدء: لا خادم لإيقافه — الحسم وحده مقصود
       }
     }
-    final server = _server;
-    _server = null;
-    _port = 0;
-    await server?.close();
-    while (_activeRequests > 0) {
-      // أعد استخدام المسلح: نداءان متداخلان لstop
-      // كان الثاني يطحن _drain فيبقى الأول معلقا على مستقبل لا يكتمل
-      final drained = _drain ??= Completer<void>();
-      await drained.future;
-      _drain = null;
+    // فراغ جارٍ من نداء آخر: ينضم لمستقبله بدل أن يمشي المسار ثانية —
+    // المسلّحان المشتركان (_drain و_orphanDrain) لا يُطحنان
+    final inFlight = _stoppingFuture;
+    if (inFlight != null) {
+      return inFlight;
     }
-    _drain = null;
-    // اليتامى: مقاعدهم فرغت برد 504 لكن عملهم حي — stop كان يعود
-    // وهي تطبع بعده؛ الآن تنتظر حتى ميزانية المعالج نفسها، والباقي
-    // فوقها يُعلن بعدّه لا يُترك صامتا
-    final grace = handlerTimeout;
-    if (_orphanHandlers > 0 && grace != null) {
-      final orphaned = _orphanDrain ??= Completer<void>();
-      try {
-        await orphaned.future.timeout(grace);
-      } on TimeoutException {
-        telemetry.warn(
-          'intake stopped with $_orphanHandlers orphan handler(s) still '
-          'running',
-          category: BridgeCategory.network,
-        );
+    // مستقبل الفراغ يُسلَّح قبل أول انتظار: بداية تستدعى في نافذة
+    // الفراغ تنتظره كاملاً — لا يربط جيل جديد فوق كشّاف لم يفض ولا
+    // يتشارك عدّاد المقاعد مع الجيل القديم
+    final settled = Completer<void>();
+    _stoppingFuture = settled.future;
+    try {
+      final server = _server;
+      _server = null;
+      _port = 0;
+      await server?.close();
+      while (_activeRequests > 0) {
+        // أعد استخدام المسلح: نداءان متداخلان لstop
+        // كان الثاني يطحن _drain فيبقى الأول معلقا على مستقبل لا يكتمل
+        final drained = _drain ??= Completer<void>();
+        await drained.future;
+        _drain = null;
       }
+      _drain = null;
+      // اليتامى: مقاعدهم فرغت برد 504 لكن عملهم حي — stop كان يعود
+      // وهي تطبع بعده؛ الآن تنتظر حتى ميزانية المعالج نفسها، والباقي
+      // فوقها يُعلن بعدّه لا يُترك صامتا
+      final grace = handlerTimeout;
+      if (_orphanHandlers > 0 && grace != null) {
+        final orphaned = _orphanDrain ??= Completer<void>();
+        try {
+          await orphaned.future.timeout(grace);
+        } on TimeoutException {
+          telemetry.warn(
+            'intake stopped with $_orphanHandlers orphan handler(s) still '
+            'running',
+            category: BridgeCategory.network,
+          );
+        }
+      }
+    } finally {
+      _stoppingFuture = null;
+      settled.complete();
     }
   }
 
@@ -365,10 +454,38 @@ class LocalIntakeServer {
     }
   }
 
+  /// The internal Origin length cap, not a public option: every real
+  /// browser origin (scheme, host, port) sits far below it, while an
+  /// unbounded value becomes a map key, a consent question, a handler
+  /// field, and a telemetry context before any policy decision sees it.
+  /// Over the cap the value is refused here - before the single-header
+  /// gate makes any CORS decision and before anything else reads it.
+  static const _maxOriginChars = 1024;
+
   Future<void> _handle(HttpRequest request) async {
     final response = request.response;
     _corsHeaders(response);
     try {
+      // سقف طول الأصل: القيمة يتحكم فيها الخصم وتصير مفاتيح خرائط
+      // وأسئلة موافقة وحقول معالج وسياق قياس قبل أي قرار سياسة —
+      // الأطول من السقف يُرد هنا قبل أن يراه أي كود آخر. رفض شكل
+      // بروتوكولي كترويسة مكررة: خارج عدّاد الحماية وسجلها، وبلا
+      // قرار CORS على هذا الطريق حصراً (لا صدى قبل الرفض).
+      final earlyOrigin = _firstHeader(request, 'Origin');
+      if (earlyOrigin != null && earlyOrigin.length > _maxOriginChars) {
+        response.headers.set(
+          'X-Correlation-Id',
+          _sanitizeCorrelationId(_firstHeader(request, 'X-Correlation-Id')),
+        );
+        await _terminate(
+          response,
+          HttpStatus.badRequest,
+          'origin_too_long',
+          'Origin header exceeds the allowed length ($_maxOriginChars '
+              'characters)',
+        );
+        return;
+      }
       // الترويسات أحادية الدلالة: تعدد قيمها طلب ملغوب صريح
       // 400 وقطع، بدل استثناء valueغير الملتقط الذي يعلّق المقبس بلا
       // رد أصلا (حادثة سابقة: UNCAUGHT-IN-ZONE + مقبس معلق). Host
@@ -414,6 +531,11 @@ class LocalIntakeServer {
         final reason = verdict == AuthorityVerdict.rejectAbsoluteForm
             ? 'The request line carries an absolute URI — not accepted by this bridge'
             : 'Request Host is not allowed — this bridge accepts localhost only';
+        // The close over the unread body is intentional: this reply answers
+        // a DNS-rebinding attempt (or an absolute-form probe), not a page
+        // this bridge needs to reach - delivering it is not required, and
+        // the close over an unread body can swallow the reply on Linux and
+        // macOS. Accepted loss for this path alone.
         protection.noteRejection(reason, _firstHeader(request, 'Origin'));
         await _json(response, HttpStatus.forbidden, {
           'ok': false,
@@ -542,7 +664,12 @@ class LocalIntakeServer {
             fetchDest: _firstHeader(request, 'Sec-Fetch-Dest'),
           );
           if (rejection != null) {
-            protection.noteRejection(rejection.message, origin);
+            // الرمز يستجلم السطر: الرسالة وحدها لا تسمي عقد المطور،
+            // والسجل هو ما يقرأه المضيف عند تتبع رفض على السلك
+            protection.noteRejection(
+              '${rejection.code}: ${rejection.message}',
+              origin,
+            );
             // الرأس الصادق: بقايا النافذة التي رفضت الطلب كما قاسها
             // الحماية؛ الثابت 2 يبقى للسؤال المفتوح وحده (المستخدم قد
             // يجيب فورا فلا يُستعار له رأس دقائق)
@@ -572,7 +699,14 @@ class LocalIntakeServer {
             });
             return;
           }
-          _echoCors(response, origin, admitted: true);
+          // الصدى بعد القبول للمؤهل وحده — عقد echoesCorsFor: التوكن
+          // يقبل عميلاً غير متصفحي أصله غير مدرج فلا يرى ACAO (لا يقرأه)،
+          // والمتصفح غير المؤهل لا يصل أصلاً لغياب صدى الpreflight
+          _echoCors(
+            response,
+            origin,
+            admitted: protection.echoesCorsFor(origin),
+          );
           // الرسائل التفصيلية للمضيف المعتمد حصرا — مسار «الكل»
           // يرى الرمز بلا نص المضيف (منع كشف معلومات المضيف لأي أصل)
           final verboseErrors = protection.verboseErrorsFor(
@@ -731,12 +865,13 @@ class LocalIntakeServer {
           try {
             result = handlerTimeout == null
                 ? await commandFuture
-                : await commandFuture.timeout(handlerTimeout!);
-          } on TimeoutException {
-            // null يعني لا مهلة أصلا: TimeoutException
-            // هنا رمى المعالجُ نفسه فيعود لمساره الأصلي (500 internal)
-            // زاوية كانت تنقض «null صفر-تغيير حرفيا»
-            if (handlerTimeout == null) rethrow;
+                : await commandFuture.timeout(
+                    handlerTimeout!,
+                    // ميزانية الجسر بعلامة خاصة: كل TimeoutException
+                    // أخرى (رمى المعالجُ نفسه) تعود لمسار 500 العام
+                    onTimeout: () => throw const _HandlerBudgetExceeded(),
+                  );
+          } on _HandlerBudgetExceeded {
             commandFuture.ignore();
             // اليتيم ما زال يعمل فعلا: يُعدّ ضمن ميزانية العمل الحي،
             // وفراغه يدق جرس تفريغ stop — then بمعالج خطأ فارغ كي لا
@@ -795,8 +930,11 @@ class LocalIntakeServer {
 
   /// Reads the body with a cumulative byte counter: hitting the cap or the
   /// deadline stops reading at once (never a silent truncation); total silence
-  /// is cut by the stream timeout while slow dripping is cut by a per-request
-  /// monotonic deadline. UTF-8 after the size is settled: no string above the cap is ever built.
+  /// is cut by the stream timeout while slow dripping is cut by the absolute
+  /// deadline - one timer armed at the read start settles the timeout on its
+  /// own, and a completion arriving after the deadline is rejected too, so an
+  /// event pace under the silence window cannot stretch the read past its
+  /// budget. UTF-8 after the size is settled: no string above the cap is ever built.
   ///
   /// Stopping pauses the subscription instead of cancelling it: cancelling a
   /// body subscription makes HttpServer destroy the connection at once and
@@ -819,6 +957,11 @@ class LocalIntakeServer {
     final done = Completer<_BodyOutcome>();
     StreamSubscription? subscription;
     Timer? cutTimer;
+    // الموعد المطلق مؤقّت واحد يبدأ مع القراءة: فحص onData كان يقبل
+    // جسماً يكتمل بعد موعده (onDone بلا فحص) ومهلة الصمت تقيس بين
+    // حدثين لا مجموع العمر — المؤقت يحسم بالموعد أياً كان إيقاع
+    // وصول الأحداث، ويلغى في كل طريق حسم.
+    Timer? deadlineTimer;
     var settled = false;
     var discarding = false;
     var discardedBytes = 0;
@@ -829,6 +972,8 @@ class LocalIntakeServer {
     // قطع الحد) — الرد بعده يجد الجسم مقروءاً بمحاسبة الإطار فيغلق
     // نظيفاً بدل هدمه.
     void finishDrain() {
+      deadlineTimer?.cancel();
+      deadlineTimer = null;
       cutTimer?.cancel();
       cutTimer = null;
       if (settled && !done.isCompleted) {
@@ -846,6 +991,9 @@ class LocalIntakeServer {
 
     void settle(Object? error, [String? body]) {
       if (settled) return;
+      // كل حسم يلغي مؤقت الموعد — التفريغ بعده يملك مؤقته الخاص
+      deadlineTimer?.cancel();
+      deadlineTimer = null;
       if (error == null) {
         settled = true;
         done.complete(_BodyOutcome.ok(body!));
@@ -874,6 +1022,13 @@ class LocalIntakeServer {
       done.complete(_BodyOutcome.rejected(error));
     }
 
+    // مؤقت الموعد يُسند قبل الاستماع — رده يحسم عبر settle مهما كان
+    // إيقاع الأحداث، والفحص داخل onData يبقى مختصراً للإيقاف الباكر.
+    deadlineTimer = Timer(effectiveTimeout, () {
+      settle(
+        TimeoutException('request body deadline exceeded', effectiveTimeout),
+      );
+    });
     subscription = request
         .timeout(effectiveTimeout)
         .listen(
@@ -905,6 +1060,17 @@ class LocalIntakeServer {
               finishDrain();
               return;
             }
+            // الاكتمال بعد الموعد رفض مهلة لا قبول متأخر — onDone كان
+            // الباب الوحيد بلا فحص فيمرر جسماً عجز موعده كاملاً
+            if (_now >= deadlineMs) {
+              settle(
+                TimeoutException(
+                  'request body deadline exceeded',
+                  effectiveTimeout,
+                ),
+              );
+              return;
+            }
             try {
               settle(null, utf8.decode(builder.takeBytes()));
             } on FormatException catch (e) {
@@ -925,10 +1091,12 @@ class LocalIntakeServer {
   }
 
   /// Reason phrases for the hand-built status line of the raw-socket
-  /// terminate - the codes that reach it.
+  /// terminate - the codes that reach it. Only the 413 Content-Length gate
+  /// takes the raw-socket path today; the busy 503 replies through the
+  /// managed response instead, so its phrase is not listed here and the
+  /// fallback covers any emergency code that ever reaches this path.
   static const _terminateReasons = <int, String>{
     HttpStatus.requestEntityTooLarge: 'Payload Too Large',
-    HttpStatus.serviceUnavailable: 'Service Unavailable',
   };
 
   /// Rejects a request whose body was never listened to over the RAW socket -
@@ -1070,15 +1238,19 @@ class LocalIntakeServer {
     return true;
   }
 
-  /// A non-loopback name in extraHosts (a public DNS name, or a
-  /// private-network address like 192.168.x.x) is the host's explicit
-  /// opt-out of the DNS-rebinding guard for that one name - say it once at
-  /// startup so the decision is visible in the log, not silent in the
-  /// config. Local means a literal: `localhost`, a bracketed `::1`, or an
-  /// address that parses inside the loopback range - a `127.` text prefix
-  /// would silence the warning for public names that merely resolve to
-  /// loopback (`127.0.0.1.nip.io`), which is exactly the opt-out that
-  /// must be said.
+  /// Any non-loopback entry in extraHosts (a public DNS name, a
+  /// private-network address like 192.168.x.x or fe80::1, or a bare
+  /// dotless name like `printer`) is the host's explicit opt-out of the
+  /// DNS-rebinding guard for that one name - say it once at startup so the
+  /// decision is visible in the log, not silent in the config. A dotless
+  /// name warns too: "has no dot" proves nothing about where it resolves -
+  /// a single-label name can land on a search domain or an mDNS network at
+  /// a machine that is not this one, which is exactly the rebinding risk
+  /// the guard exists for. Local means a literal: `localhost`, a bracketed
+  /// `::1`, or an address that parses inside the loopback range - a `127.`
+  /// text prefix would silence the warning for public names that merely
+  /// resolve to loopback (`127.0.0.1.nip.io`), which is exactly the opt-out
+  /// that must be said.
   void _warnExtraHosts(List<String> extraHosts) {
     for (final raw in extraHosts) {
       final host = raw.trim().toLowerCase();
@@ -1087,7 +1259,7 @@ class LocalIntakeServer {
           host == 'localhost' ||
           host == '[::1]' ||
           (asAddress != null && asAddress.isLoopback);
-      if (host.contains('.') && !isLocal) {
+      if (host.isNotEmpty && !isLocal) {
         telemetry.warn(
           'extraHosts entry "$host" is not a loopback literal — listing it '
           'opts that one name out of the DNS-rebinding guard; make sure it '
@@ -1244,6 +1416,11 @@ class LocalIntakeServer {
 
   /// A final reply after which the connection is cut - limit errors (413/408/503)
   /// close it so the sender cannot keep pushing an already-rejected request.
+  /// Protocol-shape rejections (this path and the managed-JSON rejects: 405,
+  /// duplicate headers, 415, payload shape, empty payload) sit outside the
+  /// protection rejection counter and its structured log by design - the
+  /// counter counts security rejections (origin and token decisions) only,
+  /// and every one of these paths answers with its own explicit reply.
   Future<void> _terminate(
     HttpResponse response,
     int status,

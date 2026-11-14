@@ -14,7 +14,6 @@ import 'support/wire.dart' show bodyJson;
 // output goes to the system temp dir.
 final _outPath = '${Directory.systemTemp.path}/bridge-wire-new.json';
 const _timeout = Duration(milliseconds: 700);
-const _pMain = 31991, _pSlow = 31992;
 
 /// A realistic configured token: 32 random bytes hex-encoded - the floor
 /// update() enforces and the shape generatePortalToken() produces.
@@ -55,6 +54,72 @@ class _Rec extends BridgeTelemetry {
 
 var _idSeq = 0;
 String _counterId() => 'corp-${_idSeq++}';
+
+/// يقرأ رداً كاملاً من مقبس خام أُرسلت عليه بايتات حرة — لا يفترض
+/// نصاً صالحاً في أي من الطرفين (شهود الجسم التالف).
+Future<Map<String, Object?>> _rawExchange(int port, List<int> payload) async {
+  final socket = await Socket.connect('127.0.0.1', port);
+  final buffer = BytesBuilder();
+  final done = Completer<Map<String, Object?>>();
+  late StreamSubscription sub;
+  void settle(List<int> raw) {
+    final text = latin1.decode(raw, allowInvalid: true);
+    final sep = text.indexOf('\r\n\r\n');
+    final head = sep < 0 ? text : text.substring(0, sep);
+    final body = sep < 0 ? '' : text.substring(sep + 4);
+    final statusLine = head.isEmpty ? '' : head.split('\r\n').first;
+    final headers = <String, String>{};
+    for (final line in head.split('\r\n').skip(1)) {
+      final i = line.indexOf(':');
+      if (i > 0) {
+        headers[line.substring(0, i).trim().toLowerCase()] = line
+            .substring(i + 1)
+            .trim();
+      }
+    }
+    done.complete({
+      'status': statusLine.isEmpty
+          ? -1
+          : (int.tryParse(statusLine.split(' ')[1]) ?? -1),
+      'headers': headers,
+      'body': body,
+    });
+  }
+
+  sub = socket.listen(
+    (chunk) {
+      buffer.add(chunk);
+      if (done.isCompleted) return;
+      final text = latin1.decode(buffer.toBytes(), allowInvalid: true);
+      final sep = text.indexOf('\r\n\r\n');
+      if (sep < 0) return;
+      final head = text.substring(0, sep);
+      final clMatch = RegExp(
+        r'content-length:\s*(\d+)',
+        caseSensitive: false,
+      ).firstMatch(head);
+      final bodyLen = text.length - (sep + 4);
+      final chunkedEnd = text.endsWith('0\r\n\r\n');
+      final hasCl = clMatch != null && bodyLen >= int.parse(clMatch.group(1)!);
+      if (hasCl || chunkedEnd) settle(buffer.toBytes());
+    },
+    onDone: () {
+      if (!done.isCompleted) settle(buffer.toBytes());
+    },
+  );
+  socket.add(payload);
+  final result = await done.future.timeout(
+    const Duration(seconds: 4),
+    onTimeout: () => <String, Object?>{
+      'status': -2,
+      'headers': <String, String>{},
+      'body': 'NO-RESPONSE',
+    },
+  );
+  await sub.cancel();
+  socket.destroy();
+  return result;
+}
 
 Future<Map<String, Object?>> _exchange(
   int port,
@@ -225,10 +290,7 @@ void main() {
         final m = mode;
         final pr = makeProtection(mode);
         srv = make(pr: pr);
-        await srv!.start(
-          preferredPort: _pMain,
-          fallbacks: const [31997, 31998],
-        );
+        await srv!.start(preferredPort: 0);
         final p = srv!.port;
 
         Future<void> cap(String name, String request, String describe) async {
@@ -387,7 +449,7 @@ void main() {
 
         // 7 التزامن على الخادم البطيء
         slow = make(delayMs: 250, pr: makeProtection(mode));
-        await slow!.start(preferredPort: _pSlow, fallbacks: const [31998]);
+        await slow!.start(preferredPort: 0);
         final results = await Future.wait(
           List.generate(17, (i) async {
             final body = jsonEncode({
@@ -548,7 +610,7 @@ void main() {
       expect(nested.length, 1024 * 1024, reason: 'a body of exactly 1MB');
       final pr = makeProtection('allowAll');
       srv = make(pr: pr);
-      await srv!.start(preferredPort: 31996, fallbacks: const [31997]);
+      await srv!.start(preferredPort: 0);
 
       final sw = Stopwatch()..start();
       final r = await _exchange(
@@ -600,7 +662,7 @@ void main() {
   test('rejection is not silent: origin denial is counted and logged', () async {
     final pr = makeProtection('allowAll');
     srv = make(pr: pr);
-    await srv!.start(preferredPort: _pMain, fallbacks: const [31997]);
+    await srv!.start(preferredPort: 0);
     final before = pr.rejectedCount;
     final r = await _exchange(
       srv!.port,
@@ -624,7 +686,7 @@ void main() {
     // افتراضي: «1 MiB» حرفياً — وكلا موقعي الرفض يشترك في _mbLabel
     final pr = makeProtection('allowAll');
     srv = make(pr: pr);
-    await srv!.start(preferredPort: _pMain, fallbacks: const [31997]);
+    await srv!.start(preferredPort: 0);
     final over = await _exchange(
       srv!.port,
       // الضرب داخل ${...} إلزامي: مجاورة الحرفيات تلتحم قبل *، فيقع الضرب
@@ -648,7 +710,7 @@ void main() {
       pr: makeProtection('allowAll'),
       config: const BridgeConfig(maxBodyBytes: 900 * 1024),
     );
-    await odd.start(preferredPort: 31995, fallbacks: const [31997]);
+    await odd.start(preferredPort: 0);
     addTearDown(odd.stop);
     final overOdd = await _exchange(
       odd.port,
@@ -713,11 +775,14 @@ void main() {
   );
 
   test(
-    '413 drain cut on the byte-counter path: past four bodies mid-read',
+    '413 drain cut on the byte-counter path: a chunked body with no Content-Length past the cap',
     () async {
-      // Content-Length under the cap so the early gate stays out: the
-      // byte counter rejects mid-read, and the sender blasts far past the
-      // drain budget - the discard on the same subscription must cut.
+      // لا ترويسة Content-Length حصرا (chunked خام عبر المقبس): بوابة
+      // الطول المعلن شرطها حضوره فوق السقف فمستحيلة هنا أصلا — لا يبقى
+      // مصدر 413 واحد هو عدّاد البايتات التراكمي داخل قراءة الجسم.
+      // الأرقام تحدد المسار: سقف 1024، مقطع أول 1024 بالضبط (لا رفض)،
+      // وبايت واحد فوقه يرمي العدّاد، ثم إغراق فوق ميزانية التفريغ
+      // (4096 = أربعة أجسام) فيقطع التفريغ على الاشتراك نفسه.
       final small = make(
         pr: makeProtection('allowAll'),
         config: const BridgeConfig(maxBodyBytes: 1024),
@@ -731,9 +796,11 @@ void main() {
         'Host: 127.0.0.1:${small.port}\r\n'
         'Origin: https://agent.test\r\n'
         'Content-Type: application/json\r\n'
-        'Content-Length: 8192\r\n\r\n',
+        'Transfer-Encoding: chunked\r\n\r\n',
       );
-      socket.write('x' * 8192);
+      socket.write('400\r\n${'x' * 1024}\r\n');
+      socket.write('1\r\nx\r\n');
+      socket.write('1e00\r\n${'x' * 7680}\r\n0\r\n\r\n');
       unawaited(socket.flush().catchError((Object _) {}));
       final ended = Completer<void>();
       late final StreamSubscription sub;
@@ -799,6 +866,137 @@ void main() {
   );
 
   test(
+    'a three-byte invalid UTF-8 body is rejected 400 invalid_utf8',
+    () async {
+      final pr = makeProtection('allowAll');
+      srv = make(pr: pr);
+      await srv!.start(preferredPort: 0);
+      // بايتات خام عبر المقبس: دنبال لا صحة له في UTF-8 بقلب طويل صادق
+      final head = utf8.encode(
+        'POST / HTTP/1.1\r\n'
+        'Host: 127.0.0.1:${srv!.port}\r\n'
+        'Origin: https://agent.test\r\n'
+        'Content-Type: application/json\r\n'
+        'Content-Length: 3\r\n\r\n',
+      );
+      final r = await _rawExchange(srv!.port, [...head, 0xFF, 0xFE, 0x61]);
+      expect(r['status'], 400);
+      expect(r['body'], contains('invalid_utf8'));
+    },
+  );
+
+  test('an empty JSON array body is rejected 400 empty_payload', () async {
+    final pr = makeProtection('allowAll');
+    srv = make(pr: pr);
+    await srv!.start(preferredPort: 0);
+    final body = '[]';
+    final r = await _exchange(
+      srv!.port,
+      'POST / HTTP/1.1\r\n'
+      'Host: 127.0.0.1:${srv!.port}\r\n'
+      'Origin: https://agent.test\r\n'
+      'Content-Type: application/json\r\n'
+      'Content-Length: ${body.length}\r\n\r\n$body',
+    );
+    expect(r['status'], 400);
+    expect(r['body'], contains('empty_payload'));
+  });
+
+  test(
+    'the early 413 gate replies a fully honest hand-built response',
+    () async {
+      // أصل مدرج ومعرف ارتباط صالح: الرد اليدوي المكتوب على المقبس الخام
+      // يقرأ كاملا — سطر الحالة حرفيا والصدى والمعرف والتأطير
+      final pr = makeProtection('allowlist');
+      srv = make(pr: pr);
+      await srv!.start(preferredPort: 0);
+      final socket = await Socket.connect('127.0.0.1', srv!.port);
+      addTearDown(socket.destroy);
+      socket.write(
+        'POST / HTTP/1.1\r\n'
+        'Host: 127.0.0.1:${srv!.port}\r\n'
+        'Origin: https://portal.example\r\n'
+        'X-Correlation-Id: raw-413-check-1\r\n'
+        'Content-Type: application/json\r\n'
+        'Content-Length: ${1024 * 1024 + 1}\r\n'
+        '\r\n${'x' * (1024 * 1024 + 1)}',
+      );
+      unawaited(socket.flush().catchError((Object _) {}));
+      final chunks = <int>[];
+      final done = Completer<String>();
+      late final StreamSubscription sub;
+      sub = socket.listen(
+        (d) {
+          chunks.addAll(d);
+          if (done.isCompleted) return;
+          final text = latin1.decode(chunks, allowInvalid: true);
+          final sep = text.indexOf('\r\n\r\n');
+          if (sep < 0) return;
+          final cl = RegExp(
+            r'content-length:\s*(\d+)',
+            caseSensitive: false,
+          ).firstMatch(text.substring(0, sep));
+          if (cl != null && text.length >= sep + 4 + int.parse(cl.group(1)!)) {
+            done.complete(text);
+          }
+        },
+        onDone: () {
+          if (!done.isCompleted) {
+            done.complete(latin1.decode(chunks, allowInvalid: true));
+          }
+        },
+        onError: (Object _) {
+          if (!done.isCompleted) {
+            done.complete(latin1.decode(chunks, allowInvalid: true));
+          }
+        },
+      );
+      final raw = await done.future.timeout(const Duration(seconds: 10));
+      await sub.cancel();
+      final sep = raw.indexOf('\r\n\r\n');
+      final head = raw.substring(0, sep);
+      final bodyText = raw.substring(sep + 4);
+      final lines = head.split('\r\n');
+      final headers = <String, String>{};
+      for (final line in lines.skip(1)) {
+        final i = line.indexOf(':');
+        if (i > 0) {
+          headers[line.substring(0, i).trim().toLowerCase()] = line
+              .substring(i + 1)
+              .trim();
+        }
+      }
+      expect(
+        lines.first,
+        'HTTP/1.1 413 Payload Too Large',
+        reason: 'the hand-built status line, verbatim',
+      );
+      expect(
+        headers['access-control-allow-origin'],
+        'https://portal.example',
+        reason:
+            'the listed origin reads the reject - the echo carries its origin',
+      );
+      expect(headers['vary'], 'Origin');
+      expect(
+        headers['x-correlation-id'],
+        'raw-413-check-1',
+        reason: 'the sent correlation id is echoed as-is',
+      );
+      expect(
+        headers['connection']?.toLowerCase(),
+        'close',
+        reason: 'the framing closes the write side first',
+      );
+      expect(
+        int.parse(headers['content-length']!),
+        utf8.encode(bodyText).length,
+        reason: 'the framing headers are rebuilt from the exact body bytes',
+      );
+    },
+  );
+
+  test(
     'compressed payloads pass through untouched (host owns decompression)',
     () async {
       final seen = <List<String>>[];
@@ -812,7 +1010,7 @@ void main() {
         protection: makeProtection('allowAll'),
         requestTimeout: _timeout,
       );
-      await srv!.start(preferredPort: _pMain, fallbacks: const [31997]);
+      await srv!.start(preferredPort: 0);
       final bomb = 'H4sIAAA${'A' * 200000}=';
       final r = await _exchange(
         srv!.port,
@@ -839,7 +1037,7 @@ void main() {
           token: _t64,
         );
       srv = make(pr: pr);
-      await srv!.start(preferredPort: 31993, fallbacks: const [31996]);
+      await srv!.start(preferredPort: 0);
       String raw() =>
           'POST / HTTP/1.1\r\n'
           'Host: 127.0.0.1:${srv!.port}\r\n'
@@ -878,7 +1076,7 @@ void main() {
           ),
         );
       srv = make(pr: pr);
-      await srv!.start(preferredPort: 31994, fallbacks: const [31995]);
+      await srv!.start(preferredPort: 0);
       Future<Map<String, Object?>> fire(String origin) => _exchange(
         srv!.port,
         'POST / HTTP/1.1\r\nHost: 127.0.0.1:${srv!.port}\r\n'
@@ -905,7 +1103,7 @@ void main() {
     'hidden-form content types are refused while the textual gateway passes',
     () async {
       srv = make(pr: makeProtection('allowlist'));
-      await srv!.start(preferredPort: 31989, fallbacks: const [31988]);
+      await srv!.start(preferredPort: 0);
       Future<Map<String, Object?>> post(String ct, String body) => _exchange(
         srv!.port,
         'POST / HTTP/1.1\r\nHost: 127.0.0.1:${srv!.port}\r\n'
@@ -931,6 +1129,69 @@ void main() {
       expect(json['status'], 200);
       final absent = await post('', 'PRINT 1,1\n');
       expect(absent['status'], 200);
+    },
+  );
+
+  test(
+    'a 64 KiB slash-padded Origin is answered inside the usual test response timeout, then the next normal request is served',
+    () async {
+      srv = make(pr: makeProtection('allowlist'));
+      await srv!.start(preferredPort: 0);
+      // أصل بطول 64KiB شرطات لا تقع في الآخر: الحرف الختامي الوحيد يجعل
+      // مسح الشرطات الختامية يبدأ من كل موضع فتتضاعف الكلفة مربعاً —
+      // والخادم أحادي الخيط فالمجمدة هنا تجميد للجسر كله
+      String padded() {
+        final base = 'https://portal.example';
+        return '$base${'/' * (64 * 1024 - base.length - 1)}x';
+      }
+
+      Future<Map<String, Object?>> hostile(String method) => _exchange(
+        srv!.port,
+        '$method / HTTP/1.1\r\nHost: 127.0.0.1:${srv!.port}\r\n'
+        'Origin: ${padded()}\r\n'
+        'Content-Type: application/json\r\nContent-Length: 2\r\n\r\n{}',
+        wait: _timeout,
+      );
+      final preflight = await hostile('OPTIONS');
+      expect(
+        preflight['status'],
+        isNot(-2),
+        reason:
+            'the hostile preflight is answered inside the usual response '
+            'timeout - a quadratic trailing-slash sweep freezes the host '
+            'far beyond it',
+      );
+      final post = await hostile('POST');
+      expect(
+        post['status'],
+        isNot(-2),
+        reason: 'the hostile POST is answered inside the same budget',
+      );
+      final code = bodyJson(post.cast<String, Object>())['error'];
+      expect(
+        post['status'],
+        anyOf(400, 403),
+        reason: 'the hostile origin is rejected, never left hanging',
+      );
+      expect(
+        code,
+        anyOf('origin_too_long', 'origin_not_listed'),
+        reason: 'the rejection carries its stable code',
+      );
+      const good = '{"data":["PING"]}';
+      final next = await _exchange(
+        srv!.port,
+        'POST / HTTP/1.1\r\nHost: 127.0.0.1:${srv!.port}\r\n'
+        'Origin: https://portal.example\r\n'
+        'Content-Type: application/json\r\n'
+        'Content-Length: ${utf8.encode(good).length}\r\n\r\n$good',
+      );
+      expect(
+        next['status'],
+        200,
+        reason:
+            'the next normal request is served right after the hostile ones',
+      );
     },
   );
 }

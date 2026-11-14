@@ -91,7 +91,7 @@ void main() async {
     telemetry: const ConsoleTelemetry(),
     correlationIdGenerator: newCorrelationId,
     handlerTimeout: const Duration(seconds: 5),
-    protection: IntakeProtection()
+    protection: IntakeProtection(telemetry: const ConsoleTelemetry())
       ..update(
         policy: const OriginPolicy(
           // Closed by default - this list is your contract with the gates.

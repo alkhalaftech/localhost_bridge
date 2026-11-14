@@ -930,6 +930,49 @@ void main() {
       },
     );
 
+    test(
+      'a pending answer survives a token-only update under the same policy',
+      () async {
+        const t64 =
+            'a3f1c52e94b7d068f5e2a9c4b1d7e8036f9a2c5e8b1d7f04a6c9e2d5f8b3a1c7';
+        Completer<OriginConsent>? gate;
+        final p = IntakeProtection()
+          ..update(
+            policy: OriginPolicy(
+              onUnknownOrigin: (origin) {
+                gate = Completer<OriginConsent>();
+                return gate!.future;
+              },
+              askTimeout: const Duration(seconds: 30),
+            ),
+          );
+        expect(
+          (await p.check(
+            origin: 'https://pending.example',
+            fetchMode: 'cors',
+            fetchDest: 'empty',
+          ))!.code,
+          'origin_pending',
+        );
+        // تحديث التوكن وحده بالسياسة نفسها: قرارات الأصل لم تتغير فلا
+        // جيل جديد — جواب السؤال المفتوح يبقى حياً ويُطبَّق
+        p.update(token: t64);
+        gate!.complete(OriginConsent.allowAlways);
+        await pumpEventQueue();
+        expect(
+          await p.check(
+            origin: 'https://pending.example',
+            fetchMode: 'cors',
+            fetchDest: 'empty',
+          ),
+          isNull,
+          reason:
+              'the token layer never changed origin decisions, so the '
+              'open question answer must be saved',
+        );
+      },
+    );
+
     test('a policy change revokes grants but keeps the denials', () async {
       Completer<OriginConsent>? gate;
       Future<OriginConsent> ask(String origin) {
@@ -1420,20 +1463,32 @@ void main() {
               askTimeout: const Duration(milliseconds: 150),
             ),
           );
-        final sw = Stopwatch()..start();
+        // ترتيب لا ساعة: مؤقت الشاهد يُسلَّح قبل النداء بمهلة السؤال
+        // نفسها فيُجدول قبل مؤقت النافذة الداخلي بحكم الاشتغال لا
+        // بهامش زمني — فإن عاد الرد قبل اشتغاله وثّق أن العودة سابقة
+        // لمسار المؤقت كله؛ ولو انتظر check السؤال أو مهلته لعاد بعد
+        // اشتغاله حصراً فيحمر الترتيب، ولو انتظر موافقة السؤال نفسها
+        // لعاد الرد أبداً (البوابة لم تُحسم) فيحمر الاختبار بمهلته
+        var probeFired = false;
+        final probe = Timer(const Duration(milliseconds: 150), () {
+          probeFired = true;
+        });
         final r = await p.check(
           origin: 'https://new.example',
           fetchMode: 'cors',
           fetchDest: 'empty',
         );
-        sw.stop();
         expect(r!.code, 'origin_pending');
         expect(
-          sw.elapsed,
-          lessThan(const Duration(milliseconds: 100)),
+          probeFired,
+          isFalse,
           reason:
-              'no waiting: the request returns at once and the page retries',
+              'the reply was recorded before the ask-deadline timer path '
+              'fired - check hands the question to the page and returns at '
+              'once; holding the call past the ask timeout would return '
+              'only after this timer',
         );
+        probe.cancel();
         // النافذة الصامتة تشغل خانتها حتى انقضاء مهلتها — ثم يفتح المجال
         expect(
           (await p.check(
@@ -1444,9 +1499,7 @@ void main() {
           'origin_pending',
         );
         expect(asked, 2, reason: 'another origin: a new window (the cap is 3)');
-        // انتظار حقيقي مقصود: يعبر مهلة السؤال الفعلية (150ms) — مؤقت
-        // حقيقي لا يقدّمه ضخ الأحداث، ولا ساعة محقونة في هذه الواجهة
-        await Future<void>.delayed(const Duration(milliseconds: 220));
+        // والثالث يسأل في الحال: الخانات الثلاث لم تمتلئ بعد (نافذتان)
         expect(
           (await p.check(
             origin: 'https://third.example',
@@ -1458,8 +1511,34 @@ void main() {
         expect(
           asked,
           3,
+          reason: 'the third unknown origin opens the last window',
+        );
+        // تحرر الخانة بإشارة من مسار المؤقت: الأصل الرابع لا يُسأل ما
+        // دامت النوافذ الثلاث مفتوحة، ويُسأل فور انقضائها بمؤقتاتها -
+        // نستطلع حتى تحدث الإشارة (سؤالٌ رابع) بلا أي هامش ساعة ثابت
+        final waitFloor = DateTime.now().add(const Duration(seconds: 10));
+        var fourthAsked = false;
+        while (!fourthAsked) {
+          if (DateTime.now().isAfter(waitFloor)) {
+            fail('the askTimeout never released the occupied windows');
+          }
+          await Future<void>.delayed(const Duration(milliseconds: 50));
+          final fourth = await p.check(
+            origin: 'https://fourth.example',
+            fetchMode: 'cors',
+            fetchDest: 'empty',
+          );
+          expect(fourth!.code, 'origin_pending');
+          fourthAsked = asked >= 4;
+        }
+        expect(
+          asked,
+          4,
           reason:
-              'after both timeouts expired, their two slots freed for the third origin',
+              'the fourth ask happens only after the three windows expired '
+              'on their own askTimeout timers - the slot release is the '
+              'timer-path signal, and a fourth window could not open while '
+              'they held the cap',
         );
       },
     );
@@ -2005,5 +2084,1038 @@ void main() {
             'inserts — an unconsumed grant cannot live forever',
       );
     });
+  });
+
+  group(
+    'consent supersession: the latest question for an origin owns its answer',
+    () {
+      test(
+        'a superseded window answer cannot override a newer decision',
+        () async {
+          var asked = 0;
+          final gates = <int, Completer<OriginConsent>>{};
+          final p = IntakeProtection()
+            ..update(
+              policy: OriginPolicy(
+                onUnknownOrigin: (origin) {
+                  asked++;
+                  final g = Completer<OriginConsent>();
+                  gates[asked] = g;
+                  return g.future;
+                },
+                askTimeout: const Duration(milliseconds: 120),
+              ),
+            );
+          // السؤال أ يفتح وينتهي بلا جواب
+          expect(
+            (await p.check(
+              origin: 'https://stale.example',
+              fetchMode: 'cors',
+              fetchDest: 'empty',
+            ))!.code,
+            'origin_pending',
+          );
+          await Future<void>.delayed(const Duration(milliseconds: 220));
+          // السؤال ب للأصل نفسه يفتح ويُرفض
+          expect(
+            (await p.check(
+              origin: 'https://stale.example',
+              fetchMode: 'cors',
+              fetchDest: 'empty',
+            ))!.code,
+            'origin_pending',
+          );
+          expect(asked, 2, reason: 'the expired window re-asks for the origin');
+          gates[2]!.complete(OriginConsent.reject);
+          await pumpEventQueue();
+          expect(
+            (await p.check(
+              origin: 'https://stale.example',
+              fetchMode: 'cors',
+              fetchDest: 'empty',
+            ))!.code,
+            'origin_declined',
+          );
+          // جواب أ المتأخر بالسماح لا يطغى على قرار ب الأحدث
+          gates[1]!.complete(OriginConsent.allowAlways);
+          await pumpEventQueue();
+          expect(
+            (await p.check(
+              origin: 'https://stale.example',
+              fetchMode: 'cors',
+              fetchDest: 'empty',
+            ))!.code,
+            'origin_declined',
+            reason:
+                'a superseded window answer never applies over the newer '
+                'decision',
+          );
+        },
+      );
+
+      test(
+        'a superseded allow cannot ride over a newer allowOnce grant',
+        () async {
+          var asked = 0;
+          final gates = <int, Completer<OriginConsent>>{};
+          final p = IntakeProtection()
+            ..update(
+              policy: OriginPolicy(
+                onUnknownOrigin: (origin) {
+                  asked++;
+                  final g = Completer<OriginConsent>();
+                  gates[asked] = g;
+                  return g.future;
+                },
+                askTimeout: const Duration(milliseconds: 120),
+              ),
+            );
+          expect(
+            (await p.check(
+              origin: 'https://stalegrant.example',
+              fetchMode: 'cors',
+              fetchDest: 'empty',
+            ))!.code,
+            'origin_pending',
+          );
+          await Future<void>.delayed(const Duration(milliseconds: 220));
+          expect(
+            (await p.check(
+              origin: 'https://stalegrant.example',
+              fetchMode: 'cors',
+              fetchDest: 'empty',
+            ))!.code,
+            'origin_pending',
+          );
+          gates[2]!.complete(OriginConsent.allowOnce);
+          await pumpEventQueue();
+          expect(
+            await p.check(
+              origin: 'https://stalegrant.example',
+              fetchMode: 'cors',
+              fetchDest: 'empty',
+            ),
+            isNull,
+            reason: 'the newer once-grant serves the first retry',
+          );
+          // جواب أ المتأخر بالسماح الدائم لا يعود الأصل مقبولاً للأبد
+          gates[1]!.complete(OriginConsent.allowAlways);
+          await pumpEventQueue();
+          expect(
+            (await p.check(
+              origin: 'https://stalegrant.example',
+              fetchMode: 'cors',
+              fetchDest: 'empty',
+            ))!.code,
+            'origin_pending',
+            reason:
+                'a stale allow must not admit the origin after the '
+                'once-grant was consumed',
+          );
+          expect(asked, 3, reason: 'the origin is asked again, not admitted');
+        },
+      );
+
+      test(
+        'a stale answer cannot ride over a newer dismissed window',
+        () async {
+          var asked = 0;
+          final gates = <int, Completer<OriginConsent>>{};
+          final p = IntakeProtection()
+            ..update(
+              policy: OriginPolicy(
+                onUnknownOrigin: (origin) {
+                  asked++;
+                  final g = Completer<OriginConsent>();
+                  gates[asked] = g;
+                  return g.future;
+                },
+                askTimeout: const Duration(milliseconds: 120),
+              ),
+            );
+          expect(
+            (await p.check(
+              origin: 'https://staledismiss.example',
+              fetchMode: 'cors',
+              fetchDest: 'empty',
+            ))!.code,
+            'origin_pending',
+          );
+          await Future<void>.delayed(const Duration(milliseconds: 220));
+          expect(
+            (await p.check(
+              origin: 'https://staledismiss.example',
+              fetchMode: 'cors',
+              fetchDest: 'empty',
+            ))!.code,
+            'origin_pending',
+          );
+          // النافذة الأحدث أُغلقت بلا قرار — فجواب الأقدم بالرفض لا يُتذكر
+          gates[2]!.complete(OriginConsent.dismissed);
+          await pumpEventQueue();
+          gates[1]!.complete(OriginConsent.reject);
+          await pumpEventQueue();
+          expect(
+            (await p.check(
+              origin: 'https://staledismiss.example',
+              fetchMode: 'cors',
+              fetchDest: 'empty',
+            ))!.code,
+            'origin_pending',
+            reason: 'nothing is remembered from the superseded window',
+          );
+          expect(
+            asked,
+            3,
+            reason:
+                'dismissed leaves no memory and a stale reject must not '
+                'create one',
+          );
+        },
+      );
+
+      test('a late answer with no newer question still applies', () async {
+        var asked = 0;
+        Completer<OriginConsent>? gate;
+        final p = IntakeProtection()
+          ..update(
+            policy: OriginPolicy(
+              onUnknownOrigin: (origin) {
+                asked++;
+                gate = Completer<OriginConsent>();
+                return gate!.future;
+              },
+              askTimeout: const Duration(milliseconds: 120),
+            ),
+          );
+        // نافذة تنتهي بلا جواب ثم يصل الجواب متأخراً بلا سؤال أحدث: هو
+        // الكلمة الأخيرة للأصل فيطبق — سلوك مقصود لا يكسره ترقيم الأسئلة
+        expect(
+          (await p.check(
+            origin: 'https://latelast.example',
+            fetchMode: 'cors',
+            fetchDest: 'empty',
+          ))!.code,
+          'origin_pending',
+        );
+        await Future<void>.delayed(const Duration(milliseconds: 220));
+        gate!.complete(OriginConsent.allowAlways);
+        await pumpEventQueue();
+        expect(
+          await p.check(
+            origin: 'https://latelast.example',
+            fetchMode: 'cors',
+            fetchDest: 'empty',
+          ),
+          isNull,
+          reason: 'the late answer is the last word for the origin',
+        );
+        expect(asked, 1, reason: 'no newer question was opened for the origin');
+      });
+
+      test(
+        'a late answer for an open question survives a thousand newer asks',
+        () async {
+          var fakeNow = 0;
+          var asked = 0;
+          final gates = <String, Completer<OriginConsent>>{};
+          final p = IntakeProtection(nowMs: () => fakeNow)
+            ..update(
+              policy: OriginPolicy(
+                onUnknownOrigin: (origin) {
+                  asked++;
+                  final g = Completer<OriginConsent>();
+                  gates[origin] = g;
+                  return g.future;
+                },
+                // أبعد من مدة الاختبار كله: النوافذ لا تنقضي بمؤقتها
+                // الحي — فالسؤال المفتوح الوحيد يبقى مفتوحاً حتى جوابه
+                askTimeout: const Duration(minutes: 10),
+              ),
+            );
+          // مضخة سؤال-وجواب: بين كل عشرة أسئلة جديدة تُقدَّم الساعة
+          // نافذةَ الميزانية (عشر دقائق) كي لا يسبق ميزانية الزمن
+          // عدَّ الأسئلة — وسقف اللحظة (ثلاث نوافذ) لا يمس التصميم:
+          // كل سؤال يُجاب فور إطلاقه فلا تتكدس النوافذ
+          var sinceBudgetBump = 0;
+          Future<void> askAndAnswer(String origin) async {
+            if (sinceBudgetBump == 10) {
+              fakeNow += 601_000;
+              sinceBudgetBump = 0;
+            }
+            final r = await p.check(
+              origin: origin,
+              fetchMode: 'cors',
+              fetchDest: 'empty',
+            );
+            expect(r!.code, 'origin_pending');
+            sinceBudgetBump++;
+            gates[origin]!.complete(OriginConsent.allowAlways);
+            await pumpEventQueue();
+          }
+
+          // ألف أصل يُسأل ويُجاب: كل جواب يُطبق فيمحا رقمه فالخريطة
+          // لا تنمو منهم (ترقيم الأصل يُمحى مع التطبيق)
+          for (var i = 0; i < 1000; i++) {
+            await askAndAnswer('https://answered$i.example');
+          }
+          // سؤال X يفتح ويبقى مفتوحاً: رقمه يبقى آخر رقم لأصله
+          fakeNow += 601_000;
+          const x = 'https://open.example';
+          final rx = await p.check(
+            origin: x,
+            fetchMode: 'cors',
+            fetchDest: 'empty',
+          );
+          expect(rx!.code, 'origin_pending');
+          // ألف أصل آخر يُسأل ويُجاب — عقد السقف: الخريطة لا تتجاوز
+          // سقف الموافقات ولا جوارٌ يُسقط خطأً بحجز السقف
+          for (var i = 0; i < 1000; i++) {
+            await askAndAnswer('https://later$i.example');
+          }
+          // جواب X المتأخر بلا سؤال أحدث لأصله هو الكلمة الأخيرة: يُطبق
+          // ويُحفظ — طابورٌ جانبي يمحو رقم X الحي يجعله يسقط
+          gates[x]!.complete(OriginConsent.allowAlways);
+          await pumpEventQueue();
+          expect(
+            await p.check(origin: x, fetchMode: 'cors', fetchDest: 'empty'),
+            isNull,
+            reason:
+                'the open question keeps its number across the newer asks '
+                '- its late answer is still the last word and is remembered',
+          );
+          expect(
+            await p.check(
+              origin: 'https://later999.example',
+              fetchMode: 'cors',
+              fetchDest: 'empty',
+            ),
+            isNull,
+            reason:
+                'the newer asks keep their own answers - the cap '
+                'bookkeeping drops no live answer of theirs',
+          );
+          expect(asked, 2001, reason: 'no origin was asked twice');
+          p.dispose();
+        },
+      );
+
+      test('a late answer for an open question survives a thousand abandoned '
+          'windows', () async {
+        var fakeNow = 0;
+        var totalFires = 0;
+        final asked = <String, int>{};
+        final gates = <String, Completer<OriginConsent>>{};
+        Future<OriginConsent> ask(String origin) {
+          totalFires++;
+          asked[origin] = (asked[origin] ?? 0) + 1;
+          final g = Completer<OriginConsent>();
+          gates[origin] = g;
+          return g.future;
+        }
+
+        final p = IntakeProtection(nowMs: () => fakeNow)
+          ..update(
+            policy: OriginPolicy(
+              onUnknownOrigin: ask,
+              // أبعد من مدة الاختبار كله: نافذة X تبقى حية حتى جوابها
+              askTimeout: const Duration(minutes: 10),
+            ),
+          );
+        // سؤال X يُفتح أولاً ويبقى مفتوحاً: رقمه أول مفاتيح خريطة
+        // الترقيم ونافذته حية — فرع الطرد عند السقف يجب أن يتجاوزه
+        // شرط «ليس له سؤال حي» حصراً
+        const x = 'https://open.example';
+        expect(
+          (await p.check(
+            origin: x,
+            fetchMode: 'cors',
+            fetchDest: 'empty',
+          ))!.code,
+          'origin_pending',
+        );
+        // قلب المهلة إلى قصيرة عبر تحديث سياسة لا يغيّر قرارات الأصل:
+        // الجيل باقٍ فجواب X لا يقفل، والنوافذ الجديدة تنقضي بمؤقتها.
+        // المؤقت حقيقي لا تقوده الساعة المحقونة — الانتظار الحي القصير
+        // بعد كل سؤال هو ما يزيل النافذة من القائمة الحية ويترك رقمها
+        // بلا سؤال حي
+        p.update(
+          policy: OriginPolicy(
+            onUnknownOrigin: ask,
+            askTimeout: const Duration(milliseconds: 1),
+          ),
+        );
+        // مضخة الميزانية المعروفة: بين كل عشرة أسئلة تُقدَّم الساعة
+        // نافذةَ الميزانية (عشر دقائق) كي لا يسبق ميزانية الزمن عدَّ
+        // الأسئلة — والانتظار الحي يبقي النوافذ المعلقة تحت سقف اللحظة.
+        // العدّ يبدأ من واحد: سؤال X نفسه استهلك خانة من ميزانية
+        // العشرة فطابورها يبدأ بعنصر واحد
+        var sinceBudgetBump = 1;
+        Future<void> askAbandoned(String origin) async {
+          if (sinceBudgetBump == 10) {
+            fakeNow += 601_000;
+            sinceBudgetBump = 0;
+          }
+          final fires = totalFires;
+          final r = await p.check(
+            origin: origin,
+            fetchMode: 'cors',
+            fetchDest: 'empty',
+          );
+          expect(r?.code, 'origin_pending');
+          expect(
+            totalFires,
+            fires + 1,
+            reason: 'every abandoned ask must fire its own question',
+          );
+          sinceBudgetBump++;
+          await Future<void>.delayed(const Duration(milliseconds: 5));
+        }
+
+        // ألف نافذة تُفتح وتنقضي مهلتها بلا جواب: خريطة الترقيم تمتلئ
+        // بألف رقم لا سؤال حياً لها
+        for (var i = 0; i < 1000; i++) {
+          await askAbandoned('https://ghost$i.example');
+        }
+        // مضخة قبل ما بعدها: ميزانية الأسئلة لا تسدّ الفحوص التالية
+        fakeNow += 601_000;
+        // خمسون نافذة جديدة فوق السقف: كل إدراج يُشغّل فرع الطرد فيأكل
+        // الأشباح من مقدمة الإدراج — ورقم X الحي لا يُلمَس
+        for (var i = 0; i < 50; i++) {
+          await askAbandoned('https://wave$i.example');
+        }
+
+        // جواب X المتأخر يُطبق: يُحفظ والأصل يُقبل بلا سؤال ثانٍ
+        fakeNow += 601_000;
+        gates[x]!.complete(OriginConsent.allowAlways);
+        await pumpEventQueue();
+        expect(
+          await p.check(origin: x, fetchMode: 'cors', fetchDest: 'empty'),
+          isNull,
+          reason:
+              'the live question kept its number across the abandoned '
+              'windows - its late answer is remembered',
+        );
+        expect(asked[x], 1, reason: 'no second question for the origin');
+
+        // جواب أقدم شبح طُرد رقمه لا يُطبق: الأصل يُسأل من جديد عند
+        // طلبه التالي فعدّاد أسئلته يزيد
+        gates['https://ghost0.example']!.complete(OriginConsent.allowAlways);
+        await pumpEventQueue();
+        expect(
+          (await p.check(
+            origin: 'https://ghost0.example',
+            fetchMode: 'cors',
+            fetchDest: 'empty',
+          ))!.code,
+          'origin_pending',
+          reason:
+              'its number was evicted, so the late answer is not the '
+              'last word - the origin is asked anew',
+        );
+        expect(
+          asked['https://ghost0.example'],
+          2,
+          reason: 'the question counter increases for the evicted ghost',
+        );
+
+        // جواب شبح لم يُطرد (آخرها) يُطبق — فالطرد أصاب الأقدم بلا
+        // سؤال حي حصراً
+        gates['https://ghost999.example']!.complete(OriginConsent.allowAlways);
+        await pumpEventQueue();
+        expect(
+          await p.check(
+            origin: 'https://ghost999.example',
+            fetchMode: 'cors',
+            fetchDest: 'empty',
+          ),
+          isNull,
+          reason:
+              'its number was never evicted, so the late answer is the '
+              'last word for the origin',
+        );
+        expect(asked['https://ghost999.example'], 1);
+        // ألف شبح + خمسون + سؤال X + إعادة سؤال الشبح المطرود — لا
+        // سؤال ثانٍ لأحد سواهم
+        expect(totalFires, 1052);
+        p.dispose();
+      });
+    },
+  );
+
+  group('quota window: a rejected request does not occupy the quota', () {
+    test(
+      'waiting exactly Retry-After after a rejection admits the retry',
+      () async {
+        var now = 0;
+        final p = IntakeProtection(nowMs: () => now)
+          ..update(
+            policy: const OriginPolicy(
+              allowAllHardened: true,
+              perOriginPerMinute: 3,
+            ),
+          );
+        for (final at in [0, 15000, 30000]) {
+          now = at;
+          expect(
+            await p.check(
+              origin: 'https://a.example',
+              fetchMode: 'cors',
+              fetchDest: 'empty',
+            ),
+            isNull,
+            reason: 'accepted at ${at}ms inside the quota',
+          );
+        }
+        now = 31000;
+        final over = await p.check(
+          origin: 'https://a.example',
+          fetchMode: 'cors',
+          fetchDest: 'empty',
+        );
+        expect(over!.code, 'origin_rate_limited');
+        expect(
+          over.retryAfterMs,
+          29500,
+          reason: 'the honest remainder from the oldest admitted stamp',
+        );
+        now += over.retryAfterMs!;
+        expect(
+          await p.check(
+            origin: 'https://a.example',
+            fetchMode: 'cors',
+            fetchDest: 'empty',
+          ),
+          isNull,
+          reason:
+              'the rejected request left the window, so the announced '
+              'wait actually lands',
+        );
+      },
+    );
+
+    test(
+      '20000 rejected attempts leave the window at the quota length',
+      () async {
+        var now = 0;
+        final p = IntakeProtection(nowMs: () => now)
+          ..update(
+            policy: const OriginPolicy(
+              allowAllHardened: true,
+              perOriginPerMinute: 3,
+            ),
+          );
+        for (var i = 0; i < 3; i++) {
+          now = i * 15000;
+          expect(
+            await p.check(
+              origin: 'https://a.example',
+              fetchMode: 'cors',
+              fetchDest: 'empty',
+            ),
+            isNull,
+          );
+        }
+        now = 31000;
+        IntakeRejection? over;
+        for (var i = 0; i < 20000; i++) {
+          over = await p.check(
+            origin: 'https://a.example',
+            fetchMode: 'cors',
+            fetchDest: 'empty',
+          );
+          if (over == null || over.code != 'origin_rate_limited') {
+            fail('flood attempt $i must be rejected, got ${over?.code}');
+          }
+        }
+        // آخر رفض يعلن بقايا أقدم طابع مقبول (0) لا طوابع المرفوضات
+        expect(over!.retryAfterMs, 29500);
+        now += over.retryAfterMs!;
+        expect(
+          await p.check(
+            origin: 'https://a.example',
+            fetchMode: 'cors',
+            fetchDest: 'empty',
+          ),
+          isNull,
+          reason: 'the window held only the admitted requests all along',
+        );
+      },
+    );
+
+    test('the same rule holds for the listed-path quota', () async {
+      var now = 0;
+      final p = IntakeProtection(nowMs: () => now)
+        ..update(
+          policy: const OriginPolicy(
+            allowed: ['https://a.example'],
+            listedPerOriginPerMinute: 3,
+          ),
+        );
+      for (final at in [0, 15000, 30000]) {
+        now = at;
+        expect(
+          await p.check(
+            origin: 'https://a.example',
+            fetchMode: 'cors',
+            fetchDest: 'empty',
+          ),
+          isNull,
+        );
+      }
+      now = 31000;
+      final over = await p.check(
+        origin: 'https://a.example',
+        fetchMode: 'cors',
+        fetchDest: 'empty',
+      );
+      expect(over!.code, 'origin_rate_limited');
+      expect(over.retryAfterMs, 29500);
+      now += over.retryAfterMs!;
+      expect(
+        await p.check(
+          origin: 'https://a.example',
+          fetchMode: 'cors',
+          fetchDest: 'empty',
+        ),
+        isNull,
+        reason: 'the listed path drops its rejections from the window too',
+      );
+    });
+
+    test(
+      'watch mode also drops the would-be-rejected stamp from the window',
+      () async {
+        final rec = _Rec();
+        var now = 0;
+        final p = IntakeProtection(telemetry: rec, nowMs: () => now)
+          ..update(
+            policy: const OriginPolicy(
+              allowAllHardened: true,
+              reportOnly: true,
+              perOriginPerMinute: 3,
+            ),
+          );
+        for (final at in [0, 15000, 30000]) {
+          now = at;
+          expect(
+            await p.check(
+              origin: 'https://a.example',
+              fetchMode: 'cors',
+              fetchDest: 'empty',
+            ),
+            isNull,
+          );
+        }
+        expect(
+          rec.warns.where((w) => w.contains('would reject')),
+          isEmpty,
+          reason: 'the admitted requests are inside the quota',
+        );
+        now = 31000;
+        for (var i = 0; i < 20000; i++) {
+          expect(
+            await p.check(
+              origin: 'https://a.example',
+              fetchMode: 'cors',
+              fetchDest: 'empty',
+            ),
+            isNull,
+            reason: 'watching serves every request',
+          );
+        }
+        expect(
+          rec.warns.where((w) => w.contains('would reject')).length,
+          20000,
+          reason: 'each flood attempt was measured, never silenced',
+        );
+        now = 60500; // مقادار Retry-After الصادق: أقدم طابع مقبول 0
+        expect(
+          await p.check(
+            origin: 'https://a.example',
+            fetchMode: 'cors',
+            fetchDest: 'empty',
+          ),
+          isNull,
+        );
+        expect(
+          rec.warns.where((w) => w.contains('would reject')).length,
+          20000,
+          reason:
+              'the would-rejects left no stamp, so the honest wait lands '
+              'with no new would-reject',
+        );
+      },
+    );
+  });
+
+  group('rejection lines carry no raw origin', () {
+    void expectSanitizedLine(String line, String hostile) {
+      expect(
+        line.contains(hostile),
+        isFalse,
+        reason: 'the raw origin never enters the line',
+      );
+      expect(
+        line.contains('\u0000') || line.contains('\u001F'),
+        isFalse,
+        reason: 'no control character survives anywhere in the line',
+      );
+      // حقل الأصل نفسه: بين 'origin=' وقوس الإغلاق إن وُجد (سطور
+      // المراقبة تحيطه بقوسين، وسطر noteRejection يليه اللاحقة مباشرة)
+      final start = line.indexOf('origin=') + 'origin='.length;
+      final close = line.indexOf(')', start);
+      final logged = close == -1
+          ? line.substring(start)
+          : line.substring(start, close);
+      expect(
+        logged.length,
+        lessThanOrEqualTo(200),
+        reason: 'the origin field stays under its declared cap',
+      );
+    }
+
+    test(
+      'the origin_not_listed line through a real check carries no raw origin',
+      () async {
+        final rec = _Rec();
+        final p = IntakeProtection(telemetry: rec, nowMs: () => 0);
+        final hostile = 'https://evil.example/\u0000\u001F${'a' * 1000}';
+        final r = await p.check(origin: hostile);
+        expect(r!.code, 'origin_not_listed');
+        // مسار الخادم الحقيقي: رسالة الرفض نفسها هي سبب السجل — أي قيمة
+        // خام داخلها تنسخ إلى السطر كله
+        p.noteRejection(r.message, hostile);
+        expectSanitizedLine(rec.warns.single, hostile);
+      },
+    );
+
+    test(
+      'the listed-quota watch line passes through the origin sanitizer',
+      () async {
+        final rec = _Rec();
+        final hostile = 'https://evil.example/\u0000\u001F${'a' * 1000}';
+        final p = IntakeProtection(telemetry: rec, nowMs: () => 0)
+          ..update(
+            policy: OriginPolicy(
+              allowed: [hostile],
+              listedPerOriginPerMinute: 1,
+              reportOnly: true,
+            ),
+          );
+        expect(await p.check(origin: hostile), isNull);
+        expect(
+          await p.check(origin: hostile),
+          isNull,
+          reason: 'watching serves over the quota',
+        );
+        expectSanitizedLine(
+          rec.warns.singleWhere((w) => w.contains('would reject')),
+          hostile,
+        );
+      },
+    );
+
+    test(
+      'the allow-all watch line passes through the origin sanitizer',
+      () async {
+        final rec = _Rec();
+        final hostile = 'https://evil.example/\u0000\u001F${'a' * 1000}';
+        final p = IntakeProtection(telemetry: rec, nowMs: () => 0)
+          ..update(
+            policy: OriginPolicy(
+              allowAllHardened: true,
+              reportOnly: true,
+              perOriginPerMinute: 1,
+            ),
+          );
+        expect(
+          await p.check(origin: hostile, fetchMode: 'cors', fetchDest: 'empty'),
+          isNull,
+        );
+        expect(
+          await p.check(origin: hostile, fetchMode: 'cors', fetchDest: 'empty'),
+          isNull,
+        );
+        expectSanitizedLine(
+          rec.warns.singleWhere((w) => w.contains('would reject')),
+          hostile,
+        );
+      },
+    );
+  });
+
+  group('origin normalization output contract', () {
+    test('trailing slashes are stripped and case is unified', () {
+      expect(
+        IntakeProtection.normalize('https://Portal.Example.COM///'),
+        'https://portal.example.com',
+      );
+      expect(
+        IntakeProtection.normalize('HTTPS://PORTAL.EXAMPLE.COM/'),
+        'https://portal.example.com',
+      );
+      expect(
+        IntakeProtection.normalize('https://portal.example.com/'),
+        'https://portal.example.com',
+      );
+    });
+
+    test('an origin with no trailing slash comes back unchanged', () {
+      expect(
+        IntakeProtection.normalize('https://portal.example.com'),
+        'https://portal.example.com',
+      );
+      expect(
+        IntakeProtection.normalize('https://portal.example.com/a/b'),
+        'https://portal.example.com/a/b',
+      );
+    });
+
+    test(
+      'slashes inside the origin are kept; only the final run is removed',
+      () {
+        expect(
+          IntakeProtection.normalize('https://portal.example.com/a/b//'),
+          'https://portal.example.com/a/b',
+        );
+        // المدخل المبطن بشرطات لا تقع في الآخر يعود كما هو — الشكل الذي
+        // كان يربّع زمن المسح عليه بلا أي تغيير في الناتج
+        final padded = 'https://portal.example${'/' * 5000}x';
+        expect(IntakeProtection.normalize(padded), padded);
+      },
+    );
+  });
+
+  group('token miss-window retention below the cap', () {
+    test(
+      'a thousand stale miss windows release their origins after the window; a fresh burst re-locks from zero',
+      () async {
+        var now = 0;
+        final p = IntakeProtection(nowMs: () => now)
+          ..update(
+            policy: const OriginPolicy(),
+            token:
+                'a3f1c52e94b7d068f5e2a9c4b1d7e8036f9a2c5e8b1d7f04a6c9e2d5f8b3a1c7',
+          );
+        // ألف أصل بإخفاق واحد لكل منها: الخريطة عند سقفها بالضبط —
+        // الكنس الذي كان ينتظر ما فوق السقف يتركها مقيدة إلى الأبد
+        for (var i = 0; i < 1000; i++) {
+          final r = await p.check(
+            origin: 'https://stale$i.example',
+            portalToken: 'WRONG',
+          );
+          expect(r!.code, 'origin_not_listed');
+        }
+        // تقديم الساعة بعد النافذة ثم طلب واحد آخر — نبضة الكنس
+        now += 61_000;
+        expect(
+          (await p.check(
+            origin: 'https://fresh.example',
+            portalToken: 'WRONG',
+          ))!.code,
+          'origin_not_listed',
+        );
+        // عقد الاحتفاظ بما يُرصد علنياً: لا شبح من النافذة المنقضية —
+        // التوكن الصحيح يعبر، والانفجار الجديد يقفل من الصفر بانتظار صادق
+        expect(
+          await p.check(
+            origin: 'https://stale0.example',
+            portalToken:
+                'a3f1c52e94b7d068f5e2a9c4b1d7e8036f9a2c5e8b1d7f04a6c9e2d5f8b3a1c7',
+          ),
+          isNull,
+          reason: 'an expired window never haunts its origin',
+        );
+        for (var i = 0; i < 5; i++) {
+          await p.check(origin: 'https://stale0.example', portalToken: 'WRONG');
+        }
+        final locked = await p.check(
+          origin: 'https://stale0.example',
+          portalToken:
+              'a3f1c52e94b7d068f5e2a9c4b1d7e8036f9a2c5e8b1d7f04a6c9e2d5f8b3a1c7',
+        );
+        expect(locked!.code, 'token_locked');
+        expect(
+          locked.retryAfterMs,
+          60_500,
+          reason:
+              'the re-lock counts only fresh misses - the expired window '
+              'exerted no influence and the announced wait is honest',
+        );
+      },
+    );
+  });
+
+  group('one token verdict per request: the lock gates the verbose decision', () {
+    const t64 =
+        'a3f1c52e94b7d068f5e2a9c4b1d7e8036f9a2c5e8b1d7f04a6c9e2d5f8b3a1c7';
+
+    test(
+      'a locked origin with the correct token earns no host message',
+      () async {
+        final p = IntakeProtection()
+          ..update(
+            policy: const OriginPolicy(allowAllHardened: true),
+            token: t64,
+          );
+        for (var i = 0; i < 5; i++) {
+          await p.check(
+            origin: 'https://guess.example',
+            portalToken: 'WRONG',
+            fetchMode: 'cors',
+            fetchDest: 'empty',
+          );
+        }
+        // خمسة إخفاقات قفلت نافذة الأصل: الطلب الصحيح يعبر بقرار سياسة
+        // «الكل» لأن القفل يجعل التوكن غائباً عن قرار القبول — وهو غائب
+        // عن قرار النص التفصيلي أيضاً، فالمقارنة خارج بوابة القفل قناة
+        // تخمين موازية تعبر من نص خطأ المضيف
+        expect(
+          await p.check(
+            origin: 'https://guess.example',
+            portalToken: t64,
+            fetchMode: 'cors',
+            fetchDest: 'empty',
+          ),
+          isNull,
+          reason: 'the allow-all policy admits the request while locked',
+        );
+        expect(
+          p.verboseErrorsFor('https://guess.example', t64),
+          isFalse,
+          reason:
+              'a locked miss window makes the token absent for the verbose '
+              'decision too - the host text must not ride an ungated '
+              'comparison',
+        );
+        // النافذة المشتركة للطلبات بلا Origin تحكم القرار نفسه
+        for (var i = 0; i < 5; i++) {
+          await p.check(origin: null, portalToken: 'WRONG');
+        }
+        expect(
+          (await p.check(origin: null, portalToken: t64))!.code,
+          'token_locked',
+          reason: 'the shared originless window locks like a web one',
+        );
+        expect(
+          p.verboseErrorsFor(null, t64),
+          isFalse,
+          reason: 'a locked shared window strips the host text as well',
+        );
+      },
+    );
+
+    test(
+      'with no misses the correct token from an unlisted origin keeps the message',
+      () async {
+        final p = IntakeProtection()
+          ..update(
+            policy: const OriginPolicy(allowAllHardened: true),
+            token: t64,
+          );
+        expect(
+          p.verboseErrorsFor('https://quiet.example', t64),
+          isTrue,
+          reason: 'no failure window exists - the correct token is trusted',
+        );
+        final listed = IntakeProtection()
+          ..update(
+            policy: const OriginPolicy(allowed: ['https://portal.example']),
+            token: t64,
+          );
+        expect(
+          listed.verboseErrorsFor('https://portal.example', null),
+          isTrue,
+          reason: 'a listed origin earns the message without any token',
+        );
+      },
+    );
+
+    test(
+      'after the lock window expires on the injected clock the message returns',
+      () async {
+        var now = 0;
+        final p = IntakeProtection(nowMs: () => now)
+          ..update(
+            policy: const OriginPolicy(allowAllHardened: true),
+            token: t64,
+          );
+        for (var i = 0; i < 5; i++) {
+          await p.check(
+            origin: 'https://guess.example',
+            portalToken: 'WRONG',
+            fetchMode: 'cors',
+            fetchDest: 'empty',
+          );
+        }
+        now = 60_001;
+        expect(
+          await p.check(
+            origin: 'https://guess.example',
+            portalToken: t64,
+            fetchMode: 'cors',
+            fetchDest: 'empty',
+          ),
+          isNull,
+          reason: 'the window expired - the lock no longer holds',
+        );
+        expect(
+          p.verboseErrorsFor('https://guess.example', t64),
+          isTrue,
+          reason: 'an expired window never haunts the verbose decision',
+        );
+      },
+    );
+
+    test(
+      'a locked origin is refused without opening a new consent question',
+      () async {
+        var asked = 0;
+        final p = IntakeProtection()
+          ..update(
+            policy: OriginPolicy(
+              onUnknownOrigin: (_) {
+                asked++;
+                return Future<OriginConsent>.value(OriginConsent.dismissed);
+              },
+            ),
+            token: t64,
+          );
+        // خمسة إخفاقات من أصل جديد: كل واحد يفتح سؤالاً ويُجاب dismissed
+        // فوراً فلا يبقى أثر للسؤال
+        for (var i = 0; i < 5; i++) {
+          expect(
+            (await p.check(
+              origin: 'https://fresh.example',
+              portalToken: 'WRONG',
+              fetchMode: 'cors',
+              fetchDest: 'empty',
+            ))!.code,
+            'origin_pending',
+          );
+          await pumpEventQueue();
+        }
+        expect(asked, 5, reason: 'each unlocked miss fired its own question');
+        // السادس: نافذة القفل مقفلة — يُرد token_locked بلا سؤال سادس،
+        // فطلب مقفل لا يفتح نوافذ موافقة جديدة مهما ما زالت ميزانية
+        // الأسئلة تسمح
+        final sixth = await p.check(
+          origin: 'https://fresh.example',
+          portalToken: t64,
+          fetchMode: 'cors',
+          fetchDest: 'empty',
+        );
+        expect(sixth!.status, 429);
+        expect(sixth.code, 'token_locked');
+        expect(
+          asked,
+          5,
+          reason:
+              'a locked request opens no consent question - the callback '
+              'counter stays at five',
+        );
+      },
+    );
   });
 }

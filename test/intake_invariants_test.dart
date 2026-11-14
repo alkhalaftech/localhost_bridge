@@ -4,6 +4,16 @@
 import 'package:test/test.dart';
 import 'package:localhost_bridge/src/intake_invariants.dart';
 
+/// The fifth raw invariant ("no silent rejection") is a security-rejection
+/// contract, not a protocol-error one: the protection rejection counter and
+/// its structured log count origin and token decisions only. Protocol-shape
+/// rejections (405 method_not_allowed, 400 duplicate_header, 413
+/// payload_too_large on both gates, 408 request_timeout, 415
+/// unsupported_media_type, 400 unsupported_payload_shape, 400 empty_payload,
+/// and both 503 server_busy paths) sit outside that counter and its log BY
+/// DESIGN, and every one of them answers with its own explicit reply - the
+/// busy path also warns on telemetry - so nothing is rejected silently
+/// anywhere on the wire.
 void main() {
   test('built-in loopback authorities carry both forms', () {
     final a = computeAuthorities(9200, const []);

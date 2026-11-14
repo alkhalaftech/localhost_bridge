@@ -31,7 +31,7 @@ void main() {
             ),
           ),
       );
-      final p = await srv.start(preferredPort: 0, fallbacks: const [31881]);
+      final p = await srv.start(preferredPort: 0);
       addTearDown(srv.stop);
 
       Future<int> exchange(String raw) async {
@@ -137,12 +137,18 @@ void main() {
     'json amplification: 16 concurrent 1MiB bodies of empty objects stay under a declared ceiling',
     timeout: const Timeout(Duration(minutes: 2)),
     () async {
-      // قياس موثق لا تخمين: جسم 1MiB من عناصر فارغة يتضخم لكائنات
-      // مفكوكة قبل أن يراها المعالج — المقاعد ال16 كلها دفعة واحدة
+      // قياس موثق لا تخمين: جسم 1MiB من عناصر فارغة يُعدّ عناصره قبل
+      // الفك فيُرد 413 قبل أي معالج — والشاهد يقرأ الردود الستة عشر
+      // كلها ويؤكد الرفض وصفر معالج، فحالةُ الذاكرة وحدها كانت تقبل
+      // خادماً فكّ الأجسام فعلاً بلا أن يخفق شيء
+      var handlerCalls = 0;
       final srv = LocalIntakeServer(
         telemetry: const SilentTelemetry(),
         correlationIdGenerator: _counterId,
-        onCommand: (_) async => const CommandOutcome(ok: true),
+        onCommand: (_) async {
+          handlerCalls++;
+          return const CommandOutcome(ok: true);
+        },
         protection: IntakeProtection()
           ..update(
             policy: const OriginPolicy(
@@ -152,8 +158,44 @@ void main() {
             ),
           ),
       );
-      final p = await srv.start(preferredPort: 0, fallbacks: const [31881]);
+      final p = await srv.start(preferredPort: 0);
       addTearDown(srv.stop);
+
+      /// يقرأ رداً كاملاً من مقبس جسم مُرسل — يفهم CL وخاتمة chunked
+      Future<int> readStatus(Socket s) async {
+        final done = Completer<int>();
+        final chunks = <int>[];
+        late final StreamSubscription sub;
+        sub = s.listen(
+          (d) {
+            chunks.addAll(d);
+            if (done.isCompleted) return;
+            final text = latin1.decode(chunks, allowInvalid: true);
+            final sep = text.indexOf('\r\n\r\n');
+            if (sep < 0) return;
+            final head = text.substring(0, sep);
+            final cl = RegExp(
+              'content-length:\\s*(\\d+)',
+              caseSensitive: false,
+            ).firstMatch(head);
+            final bodyText = text.substring(sep + 4);
+            final hasCl =
+                cl != null && bodyText.length >= int.parse(cl.group(1)!);
+            if (hasCl || bodyText.endsWith('0\r\n\r\n')) {
+              done.complete(int.parse(head.split(' ')[1]));
+            }
+          },
+          onDone: () {
+            if (!done.isCompleted) done.completeError('انقطع قبل الرد');
+          },
+          onError: (Object e) {
+            if (!done.isCompleted) done.completeError('خطأ مقبس: $e');
+          },
+        );
+        final status = await done.future.timeout(const Duration(seconds: 30));
+        await sub.cancel();
+        return status;
+      }
 
       // JSON صالح محشو أقصى عدد عناصر في ميغابايت حرفيا — القطع الأعمى
       // قد يفسر المصفوفة فيرمي المحلل مبكرا بلا تضخيم أصلا
@@ -184,20 +226,48 @@ void main() {
         return s;
       });
       final socks = await Future.wait(sends);
-      await pumpEventQueue();
+      // الردود الستة عشر كلها تُقرأ — لا مقبس يهدم قبل أن يحمل حكمه
+      final statuses = await Future.wait([
+        for (final s in socks) readStatus(s),
+      ]);
       final peak = ProcessInfo.currentRss;
       for (final s in socks) {
         s.destroy();
       }
       final deltaMb = (peak - before) / (1024 * 1024);
+      final rejected413 = statuses.where((st) => st == 413).length;
       // ignore: avoid_print
-      print('AMP-WITNESS rss-delta-MB=$deltaMb');
-      // سقف معلن مسبقا: التضخم حقيقي لكنه محصور — تجاوزه يغير قرار
-      // توثيق وضع «الكل» (راجع README: cap element counts)
+      print(
+        'AMP-WITNESS rejected413=$rejected413/16 '
+        'handler-calls=$handlerCalls rss-delta-MB=$deltaMb',
+      );
+      expect(
+        rejected413,
+        16,
+        reason:
+            'every 1MiB empty-object body is over the element cap and is '
+            'refused 413 pre-decode - the witness reads all sixteen replies',
+      );
+      expect(
+        handlerCalls,
+        0,
+        reason:
+            'the element gate answers before any handler runs - a single '
+            'decoded body would call the handler here',
+      );
+      // الحد مشتق مكتوب لا رقم معلق: سقف الجسم (1MiB) × عدد المقاعد
+      // (16) = 16MiB أجساماً خاماً؛ النسختان لكل جسم (بايتات المقبس
+      // وسلسلة العدّ) ومساحة العد ترفعان المشتق إلى 4×، وضجيج الجيران
+      // الموازيين في نفس العملية ×2 — الحد المعلن 128MiB بهامش ×8
+      const cfg = BridgeConfig();
+      final ceilingMb =
+          (cfg.maxBodyBytes * cfg.maxConcurrentRequests * 8) / (1024 * 1024);
       expect(
         deltaMb,
-        lessThan(1024),
-        reason: 'peak under the declared megabyte ceiling',
+        lessThan(ceilingMb),
+        reason:
+            'peak under the derived ceiling (body cap × seats, ×8 written '
+            'margin) - the old 1024MB bound accepted a decoded runaway',
       );
     },
   );

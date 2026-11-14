@@ -179,6 +179,47 @@ class _ExplodingMeasure extends BridgeTelemetry {
   }
 }
 
+/// مرصد يرمي مرة واحدة في أول info (سطر الإقلاع بعد أول bind ناجح)
+/// ثم يصمت — عطل خطوة إقلاع لا عطل ربط.
+class _ThrowsOnceOnInfo extends BridgeTelemetry {
+  var throwsLeft = 1;
+
+  @override
+  void info(
+    String m, {
+    BridgeCategory category = BridgeCategory.network,
+    Map<String, Object?>? context,
+  }) {
+    if (throwsLeft > 0) {
+      throwsLeft--;
+      throw StateError('synthetic telemetry failure');
+    }
+  }
+
+  @override
+  void warn(
+    String m, {
+    BridgeCategory category = BridgeCategory.network,
+    Map<String, Object?>? context,
+  }) {}
+
+  @override
+  void error(
+    String m, {
+    Object? error,
+    StackTrace? stackTrace,
+    BridgeCategory category = BridgeCategory.network,
+    Map<String, Object?>? context,
+  }) {}
+
+  @override
+  Future<T> measure<T>(
+    String label,
+    Future<T> Function() body, {
+    Map<String, Object?>? context,
+  }) => body();
+}
+
 void main() {
   test(
     'duplicate X-Correlation-Id: 400 duplicate_header, connection closed, zone clean',
@@ -187,7 +228,7 @@ void main() {
       final zoneErrors = <Object>[];
       await runZonedGuarded(() async {
         final srv = _server(telemetry: const SilentTelemetry());
-        await srv.start(preferredPort: 31880, fallbacks: const [31881]);
+        await srv.start(preferredPort: 0);
         addTearDown(srv.stop);
 
         final req = _post(
@@ -241,7 +282,7 @@ void main() {
     'repeated Origin or X-Portal-Token, even identical values: 400 duplicate_header',
     () async {
       final srv = _server(telemetry: const SilentTelemetry());
-      await srv.start(preferredPort: 31882, fallbacks: const [31881]);
+      await srv.start(preferredPort: 0);
       addTearDown(srv.stop);
 
       final cases = <String, String>{
@@ -275,7 +316,7 @@ void main() {
     () async {
       final telemetry = _ExplodingMeasure();
       final srv = _server(telemetry: telemetry);
-      await srv.start(preferredPort: 31883, fallbacks: const [31881]);
+      await srv.start(preferredPort: 0);
       addTearDown(srv.stop);
 
       telemetry.explodeOnHandle = true;
@@ -296,11 +337,11 @@ void main() {
     'second start rejects with StateError, first server stays alive',
     () async {
       final srv = _server(telemetry: const SilentTelemetry());
-      final p = await srv.start(preferredPort: 31884, fallbacks: const [31881]);
+      final p = await srv.start(preferredPort: 0);
       addTearDown(srv.stop);
       expect(p, greaterThan(0));
       expect(
-        () => srv.start(preferredPort: 31884),
+        () => srv.start(preferredPort: 0),
         throwsStateError,
         reason:
             'a double start used to bind a second server and leak the first with no reference; '
@@ -314,14 +355,14 @@ void main() {
   test('double start rejects through the returned future: catchError sees the '
       'StateError', () async {
     final srv = _server(telemetry: const SilentTelemetry());
-    final p = await srv.start(preferredPort: 31886, fallbacks: const [31881]);
+    final p = await srv.start(preferredPort: 0);
     addTearDown(srv.stop);
     expect(p, greaterThan(0));
     // The rejection must travel through the returned future: a caller
     // attaching catchError to the result never sees a synchronous throw,
     // because there is no result to attach it to.
     Object? caught;
-    final second = srv.start(preferredPort: 31886).catchError((Object e) {
+    final second = srv.start(preferredPort: 0).catchError((Object e) {
       caught = e;
       return -1;
     });
@@ -337,21 +378,26 @@ void main() {
     timeout: const Timeout(Duration(seconds: 20)),
     () async {
       final release = Completer<void>();
+      // إشارة حتمية لدخول المعالج: كان الاعتماد على pumpEventQueue قبل stop
+      // رهان توقيت — قد تُضخ دون أن يصل الطلب لمقعد معالجة فيكمل stop فورا
+      // وينكسر توقع البقاء. دخول المعالج نفسه يعني المقعد محجوزا فعلا
+      final entered = Completer<void>();
       final srv = _server(
         telemetry: const SilentTelemetry(),
         handler: () async {
+          // نداء المعالج الثاني (بعد إعادة التشغيل) لا يعيد إكمال مكتملة
+          if (!entered.isCompleted) entered.complete();
           await release.future;
           return const CommandOutcome(ok: true);
         },
       );
-      final p = await srv.start(preferredPort: 31885, fallbacks: const [31881]);
+      final p = await srv.start(preferredPort: 0);
 
       final socket = await Socket.connect(InternetAddress.loopbackIPv4, p);
       unawaited(socket.done.catchError((Object _) {}));
       final respFuture = _readResponse(socket);
       socket.write(_post('127.0.0.1:$p', _alive));
-      // حتى يستقر الطلب داخل مقعد المعالجة
-      await pumpEventQueue();
+      await entered.future;
 
       var stopped = false;
       final stopping = srv.stop().then((_) => stopped = true);
@@ -375,10 +421,7 @@ void main() {
       await stopping.timeout(const Duration(seconds: 3));
 
       // وبعد الإفراغ: إعادة البدء على الخادم نفسه شرعية
-      final p2 = await srv.start(
-        preferredPort: 31885,
-        fallbacks: const [31881],
-      );
+      final p2 = await srv.start(preferredPort: 0);
       expect(p2, greaterThan(0));
       final ok = await _send(p2, _post('127.0.0.1:$p2', _alive));
       expect(ok['status'], 200);
@@ -388,14 +431,10 @@ void main() {
   test(
     'all ports busy: IntakeBindException — a plain Exception, never an Error',
     () async {
-      final squatA = await ServerSocket.bind(
-        InternetAddress.loopbackIPv4,
-        31887,
-      );
-      final squatB = await ServerSocket.bind(
-        InternetAddress.loopbackIPv4,
-        31888,
-      );
+      // قائمة البدائل هي موضوع الشاهد: مرشحان مأخوذان من المنفذ 0
+      // ويمسكهما مستمعان عاديان — مشغولان فعلا بلا منفذ ثابت واحد
+      final squatA = await ServerSocket.bind(InternetAddress.loopbackIPv4, 0);
+      final squatB = await ServerSocket.bind(InternetAddress.loopbackIPv4, 0);
       addTearDown(() async {
         await squatA.close();
         await squatB.close();
@@ -403,7 +442,7 @@ void main() {
 
       final srv = _server(telemetry: const SilentTelemetry());
       await expectLater(
-        srv.start(preferredPort: 31887, fallbacks: const [31888]),
+        srv.start(preferredPort: squatA.port, fallbacks: [squatB.port]),
         throwsA(isA<IntakeBindException>()),
       );
       // عقد المضيف: on Exception يمسكه (المضيف يصنف الحواجز بها)،
@@ -411,7 +450,7 @@ void main() {
       var caught = false;
       Object? seen;
       try {
-        await srv.start(preferredPort: 31887, fallbacks: const [31888]);
+        await srv.start(preferredPort: squatA.port, fallbacks: [squatB.port]);
       } on Exception catch (e) {
         caught = true;
         seen = e;
@@ -436,20 +475,25 @@ void main() {
     timeout: const Timeout(Duration(seconds: 20)),
     () async {
       final release = Completer<void>();
+      // إشارة حتمية لدخول المعالج: pumpEventQueue وحدها لا يضمنان وصول
+      // الطلب لمقعد معالجة قبل stop — فقد يكمل stop فورا وينكسر توقع
+      // البقاء (السباق الذي أصاح لينكس وماك على CI)
+      final entered = Completer<void>();
       final srv = _server(
         telemetry: const SilentTelemetry(),
         handler: () async {
+          if (!entered.isCompleted) entered.complete();
           await release.future;
           return const CommandOutcome(ok: true);
         },
       );
-      final p = await srv.start(preferredPort: 31889, fallbacks: const [31881]);
+      final p = await srv.start(preferredPort: 0);
 
       final socket = await Socket.connect(InternetAddress.loopbackIPv4, p);
       unawaited(socket.done.catchError((Object _) {}));
       final respFuture = _readResponse(socket);
       socket.write(_post('127.0.0.1:$p', _alive));
-      await pumpEventQueue();
+      await entered.future;
 
       var stoppedA = false;
       var stoppedB = false;
@@ -475,14 +519,193 @@ void main() {
   );
 
   test(
+    'start called while a stop is still draining waits for the in-flight '
+    'request — the generations never share the seat counter',
+    timeout: const Timeout(Duration(seconds: 20)),
+    () async {
+      final entered = Completer<void>();
+      final release = Completer<void>();
+      final srv = LocalIntakeServer(
+        telemetry: const SilentTelemetry(),
+        correlationIdGenerator: _counterId,
+        onCommand: (_) async {
+          if (!entered.isCompleted) entered.complete();
+          await release.future;
+          return const CommandOutcome(ok: true);
+        },
+        protection: _openProtection(),
+        // مقعد واحد: لو تشارك الجيلان العدّاد لرد الطلب الثاني 503
+        config: const BridgeConfig(maxConcurrentRequests: 1),
+      );
+      final p = await srv.start(preferredPort: 0);
+
+      final socket = await Socket.connect(InternetAddress.loopbackIPv4, p);
+      unawaited(socket.done.catchError((Object _) {}));
+      addTearDown(socket.destroy);
+      addTearDown(() {
+        if (!release.isCompleted) release.complete();
+      });
+      final respFuture = _readResponse(socket);
+      socket.write(_post('127.0.0.1:$p', _alive));
+      await entered.future;
+
+      // stop بلا انتظار ثم start في نافذة الفراغ نفسها
+      unawaited(srv.stop());
+      final order = <String>[];
+      final restart = srv.start(preferredPort: 0);
+      restart.then(
+        (_) => order.add('start'),
+        onError: (Object _) => order.add('start'),
+      );
+
+      // نضب قائمة الأحداث أولاً: ربطٌ إن جرى فوراً فوق كشّاف لم يفض
+      // اكتمل هنا حتماً (لا هامش زمني — أداة الضب المعتمدة في الطقم)،
+      // والبدء المعلق على فراغٍ لم يفض لا يملك حدثاً يكتمل به
+      await pumpEventQueue();
+      expect(
+        order,
+        isNot(contains('start')),
+        reason:
+            'start() must stay held while the old request still holds its '
+            'seat — binding over an unfinished drain shares the seat '
+            'counter between the two generations',
+      );
+
+      release.complete();
+      final p2 = await restart.timeout(const Duration(seconds: 5));
+      expect(p2, greaterThan(0));
+
+      // والجيل الجديد يملك مقاعده وحده: طلبه الأول يُجاب لا 503 انشغالاً
+      final r2 = await _send(p2, _post('127.0.0.1:$p2', _alive));
+      expect(
+        r2['status'],
+        200,
+        reason:
+            'the new generation owns its own seat counter — a counter shared '
+            'with the drained generation answers 503 server_busy here',
+      );
+      final r1 = await respFuture;
+      expect(r1['status'], 200);
+      socket.destroy();
+      await srv.stop();
+    },
+  );
+
+  test(
+    'with a handlerTimeout, stop then start completes inside the handler '
+    'budget and a wide margin',
+    timeout: const Timeout(Duration(seconds: 20)),
+    () async {
+      final never = Completer<CommandOutcome>();
+      var calls = 0;
+      const budget = Duration(milliseconds: 300);
+      final srv = LocalIntakeServer(
+        telemetry: const SilentTelemetry(),
+        correlationIdGenerator: _counterId,
+        onCommand: (_) {
+          calls++;
+          // الطلب الأول وحده هو المعلق الأبدي: اللاحق للجيل الجديد
+          // ينجح كي لا يخطئ الشاهد ميزانيته هو نفسها
+          return calls == 1
+              ? never.future
+              : Future<CommandOutcome>.value(const CommandOutcome(ok: true));
+        },
+        protection: _openProtection(),
+        handlerTimeout: budget,
+      );
+      final p = await srv.start(preferredPort: 0);
+      final r = await _send(p, _post('127.0.0.1:$p', _alive));
+      expect(
+        r['status'],
+        504,
+        reason:
+            'the handler never settles - the budget frees the seat with 504',
+      );
+
+      // stop ثم start أثناء فراغ اليتيم: البدء ينتظر ميزانية اليتيم
+      // نفسها — ويكتمل داخلها بهامش واسع لا بهامش زمني هش
+      unawaited(srv.stop());
+      final sw = Stopwatch()..start();
+      final p2 = await srv
+          .start(preferredPort: 0)
+          .timeout(
+            budget * 2 + const Duration(seconds: 2),
+            onTimeout: () => fail(
+              'start() did not complete within the handler budget and a '
+              'wide margin',
+            ),
+          );
+      sw.stop();
+      expect(p2, greaterThan(0));
+      final ok = await _send(p2, _post('127.0.0.1:$p2', _alive));
+      expect(ok['status'], 200, reason: 'the restart serves cleanly');
+      await srv.stop();
+    },
+  );
+
+  test(
+    'without a handlerTimeout a never-ending handler holds start() until the '
+    'drain settles',
+    timeout: const Timeout(Duration(seconds: 20)),
+    () async {
+      final entered = Completer<void>();
+      final release = Completer<void>();
+      final srv = _server(
+        telemetry: const SilentTelemetry(),
+        handler: () async {
+          if (!entered.isCompleted) entered.complete();
+          await release.future;
+          return const CommandOutcome(ok: true);
+        },
+      );
+      final p = await srv.start(preferredPort: 0);
+
+      final socket = await Socket.connect(InternetAddress.loopbackIPv4, p);
+      unawaited(socket.done.catchError((Object _) {}));
+      addTearDown(socket.destroy);
+      addTearDown(() {
+        if (!release.isCompleted) release.complete();
+      });
+      final respFuture = _readResponse(socket);
+      socket.write(_post('127.0.0.1:$p', _alive));
+      await entered.future;
+
+      unawaited(srv.stop());
+      // الإثبات بالضب لا بهامش زمني: بلا ميزانية معالج لا يتحرر المقعد
+      // أبداً فيعلق البدء على فراغٍ لم يفض — والربط الفوري (السلوك
+      // القديم) اكتمل حتماً قبل نضب قائمة الأحداث
+      final order = <String>[];
+      final restart = srv.start(preferredPort: 0);
+      restart.then(
+        (_) => order.add('start'),
+        onError: (Object _) => order.add('start'),
+      );
+      await pumpEventQueue();
+      expect(
+        order,
+        isNot(contains('start')),
+        reason:
+            'without a handlerTimeout the seat never frees, so stop() drains '
+            'forever and start() stays held until the handler settles - the '
+            'hold is documented, and a handler budget is the full remedy',
+      );
+
+      release.complete();
+      final p2 = await restart.timeout(const Duration(seconds: 5));
+      expect(p2, greaterThan(0));
+      final r1 = await respFuture;
+      expect(r1['status'], 200);
+      socket.destroy();
+      await srv.stop();
+    },
+  );
+
+  test(
     'stop during pending start settles binding then closes — no orphan server',
     timeout: const Timeout(Duration(seconds: 20)),
     () async {
       final srv = _server(telemetry: const SilentTelemetry());
-      final starting = srv.start(
-        preferredPort: 31890,
-        fallbacks: const [31881],
-      );
+      final starting = srv.start(preferredPort: 0);
       // stop يسبق اكتمال الربط عمدا — العقد: ينتظر الحسم لا أن يعود فورا
       await srv.stop();
       final p = await starting.timeout(const Duration(seconds: 3));
@@ -493,11 +716,103 @@ void main() {
         reason:
             'closed after the start settled - no live server orphaned after stop returns',
       );
-      final p2 = await srv.start(preferredPort: p, fallbacks: const [31881]);
+      final p2 = await srv.start(preferredPort: p);
       expect(p2, greaterThan(0), reason: 'the instance can restart afterwards');
       await srv.stop();
     },
   );
+
+  test('a startup-step failure after bind closes the orphaned listener - '
+      'the fallback completes and the instance stays clean', () async {
+    // احتلال منفذ ثم تحريره: رقم المنفذ الأول معروف حتما لا مخمَّن
+    final squat = await ServerSocket.bind(InternetAddress.loopbackIPv4, 0);
+    final orphanPort = squat.port;
+    await squat.close();
+    // والبديل الحر كذلك: رقم من المنفذ 0 يُضم ثم يُحرَّر قبل المرور إليه
+    final spareHolder = await ServerSocket.bind(
+      InternetAddress.loopbackIPv4,
+      0,
+    );
+    final sparePort = spareHolder.port;
+    await spareHolder.close();
+
+    final rec = _ThrowsOnceOnInfo();
+    final srv = _server(telemetry: rec);
+    final port = await srv.start(
+      preferredPort: orphanPort,
+      fallbacks: [sparePort],
+    );
+    expect(
+      port,
+      isNot(orphanPort),
+      reason:
+          'the preferred bind succeeded then a startup step failed - '
+          'start completed on the fallback',
+    );
+
+    // المنفذ الأول مغلق فعلا: اتصال به يفشل
+    var orphanRefused = false;
+    try {
+      final leak = await Socket.connect(
+        InternetAddress.loopbackIPv4,
+        orphanPort,
+        timeout: const Duration(seconds: 3),
+      );
+      leak.destroy();
+    } on SocketException {
+      orphanRefused = true;
+    }
+    expect(
+      orphanRefused,
+      isTrue,
+      reason:
+          'the listener bound before the failure is closed - no orphan left '
+          'listening with no reference',
+    );
+
+    // والحالة سليمة: stop ثم start ثانية بلا StateError
+    await srv.stop();
+    final p2 = await srv.start(preferredPort: 0);
+    expect(p2, greaterThan(0));
+    await srv.stop();
+  });
+
+  test('a telemetry crash after bind on the only candidate: start fails, '
+      'isListening false and port back to 0', () async {
+    final squat = await ServerSocket.bind(InternetAddress.loopbackIPv4, 0);
+    final candidate = squat.port;
+    await squat.close();
+
+    final rec = _ThrowsOnceOnInfo();
+    final srv = _server(telemetry: rec);
+    await expectLater(
+      srv.start(preferredPort: candidate),
+      throwsA(isA<IntakeBindException>()),
+    );
+    expect(
+      rec.throwsLeft,
+      0,
+      reason:
+          'the crash really fired post-bind on the only candidate - had '
+          'the bind itself failed, the throwing step would never have run',
+    );
+    expect(
+      srv.isListening,
+      isFalse,
+      reason: 'no listener survives the post-bind failure',
+    );
+    expect(
+      srv.port,
+      0,
+      reason:
+          'a failed start must not leave the bound number behind - a stale '
+          'port points callers at a listener that no longer exists',
+    );
+    // والحالة سليمة لبدء تالٍ: لا StateError يطارد
+    final next = await srv.start(preferredPort: 0);
+    expect(next, greaterThan(0));
+    await srv.stop();
+  });
 
   test(
     'handlerTimeout: null waits for handler to finish — unchanged behavior',
@@ -515,7 +830,7 @@ void main() {
         protection: _openProtection(),
         handlerTimeout: null,
       );
-      final p = await srv.start(preferredPort: 31891, fallbacks: const [31881]);
+      final p = await srv.start(preferredPort: 0);
       final r = await _send(p, _post('127.0.0.1:$p', _alive));
       expect(
         r['status'],
@@ -553,7 +868,7 @@ void main() {
         // التسرب الآن (بمقعد واحد كان اليتيم نفسه يرد 503 بحق)
         config: const BridgeConfig(maxConcurrentRequests: 2),
       );
-      final p = await srv.start(preferredPort: 31892, fallbacks: const [31881]);
+      final p = await srv.start(preferredPort: 0);
 
       final r = await _send(p, _post('127.0.0.1:$p', _alive));
       expect(r['status'], 504);
@@ -600,7 +915,7 @@ void main() {
         protection: _openProtection(),
         handlerTimeout: null,
       );
-      final p = await srv.start(preferredPort: 31893, fallbacks: const [31881]);
+      final p = await srv.start(preferredPort: 0);
       final r = await _send(p, _post('127.0.0.1:$p', _alive));
       expect(
         r['status'],
@@ -631,7 +946,7 @@ void main() {
         handlerTimeout: const Duration(milliseconds: 50),
         config: const BridgeConfig(maxConcurrentRequests: 16),
       );
-      final p = await srv.start(preferredPort: 31894, fallbacks: const [31881]);
+      final p = await srv.start(preferredPort: 0);
       for (var i = 0; i < 16; i++) {
         final r = await _send(p, _post('127.0.0.1:$p', _alive));
         expect(
@@ -676,7 +991,7 @@ void main() {
         protection: _openProtection(),
         handlerTimeout: const Duration(milliseconds: 300),
       );
-      final p = await srv.start(preferredPort: 31895, fallbacks: const [31881]);
+      final p = await srv.start(preferredPort: 0);
       final r = await _send(p, _post('127.0.0.1:$p', _alive));
       expect(r['status'], 504);
       await srv.stop();
@@ -703,7 +1018,7 @@ void main() {
         protection: _openProtection(),
         handlerTimeout: const Duration(milliseconds: 100),
       );
-      final p = await srv.start(preferredPort: 31896, fallbacks: const [31881]);
+      final p = await srv.start(preferredPort: 0);
       await _send(p, _post('127.0.0.1:$p', _alive));
       await srv.stop();
       expect(
@@ -726,7 +1041,7 @@ void main() {
         onCommand: (_) async => const CommandOutcome(ok: true),
         protection: _openProtection(),
       );
-      final p = await srv.start(preferredPort: 0, fallbacks: const [31881]);
+      final p = await srv.start(preferredPort: 0);
       // 5000 قوسا متداخلا: 5000 عنصرا تحت سقف العناصر (10000) وعمق
       // 5000 فوق أي عمق معقول لأمر — قياسان مختلفان للاستغلال
       final body = '[' * 5000 + ']' * 5000;
@@ -750,7 +1065,7 @@ void main() {
       protection: _openProtection(),
       config: const BridgeConfig(extraHosts: ['portal.example']),
     );
-    await srv.start(preferredPort: 31898, fallbacks: const [31881]);
+    await srv.start(preferredPort: 0);
     expect(
       rec.warns.any((w) => w.contains('DNS-rebinding')),
       isTrue,
@@ -771,7 +1086,7 @@ void main() {
         onCommand: (_) async => const CommandOutcome(ok: true),
         protection: _openProtection(),
       );
-      final p = await srv.start(preferredPort: 0, fallbacks: const [31881]);
+      final p = await srv.start(preferredPort: 0);
       // مفتاح مخصص محايد: ليس من المجموعة الافتراضية — الحزمة محايدة
       // فلا تفك مفتاحاً مخصصاً إلا من يضيفه لإعداده بنفسه
       final customKey = await _send(
@@ -808,7 +1123,7 @@ void main() {
           payloadWrapperKeys: {'data', 'payload', 'commands', 'customItems'},
         ),
       );
-      final q = await adapted.start(preferredPort: 0, fallbacks: const [31881]);
+      final q = await adapted.start(preferredPort: 0);
       final restored = await _send(
         q,
         _post('127.0.0.1:$q', '{"customItems":["QUJD"]}'),
@@ -834,7 +1149,7 @@ void main() {
         protection: _openProtection(),
         config: const BridgeConfig(fallbackErrorCode: 'print_failed'),
       );
-      final p = await srv.start(preferredPort: 0, fallbacks: const [31881]);
+      final p = await srv.start(preferredPort: 0);
       final r = await _send(p, _post('127.0.0.1:$p', _alive));
       expect(r['status'], 500);
       expect(
@@ -856,12 +1171,15 @@ void main() {
         telemetry: rec,
         correlationIdGenerator: _counterId,
         onCommand: (_) async => const CommandOutcome(ok: true),
-        protection: _openProtection(),
+        // حماية بمرصد الخادم نفسه وسياسة صامتة (لا طلبات هنا أصلا):
+        // عدّ التحذير لتحذيرات extraHosts حصرا — تحذيرا allow-all
+        // وسجل الحماية الصامت لكلٍّ شاهده الخاص
+        protection: IntakeProtection(telemetry: rec),
         config: const BridgeConfig(
           extraHosts: ['127.0.0.1.nip.io', 'localhost', '127.0.0.1'],
         ),
       );
-      await srv.start(preferredPort: 0, fallbacks: const [31881]);
+      await srv.start(preferredPort: 0);
       expect(
         rec.warns.length,
         1,
@@ -875,6 +1193,186 @@ void main() {
         reason: 'the one warning is the public loopback-resolving name',
       );
       await srv.stop();
+    },
+  );
+
+  test('every non-loopback extraHosts entry warns - dotless names and '
+      'non-loopback IPv6 included', () async {
+    final rec = _Rec();
+    final srv = LocalIntakeServer(
+      telemetry: rec,
+      correlationIdGenerator: _counterId,
+      onCommand: (_) async => const CommandOutcome(ok: true),
+      // حماية بمرصد الخادم نفسه: عدّ التحذير لتحذيرات extraHosts حصرا
+      protection: IntakeProtection(telemetry: rec),
+      config: const BridgeConfig(
+        extraHosts: [
+          'printer', // اسم مجرد بلا نقطة: قد يحل لغير هذا الجهاز فيحذَّر
+          'fe80::1', // IPv6 غير راجع: غير محلي فيحذَّر
+          'localhost', // حرفي محلي: صامت
+          '127.0.0.1', // عنوان حلقة راجعة: صامت
+          '127.0.0.1.nip.io', // يحل للحلقة الراجعة وهو عام: يحذَّر كما كان
+        ],
+      ),
+    );
+    await srv.start(preferredPort: 0);
+    final warned = rec.warns
+        .where((w) => w.contains('extraHosts entry'))
+        .toList();
+    expect(
+      warned.length,
+      3,
+      reason:
+          'printer, fe80::1, and nip.io are each a non-loopback opt-out - '
+          'only the loopback literals stay silent',
+    );
+    expect(warned.any((w) => w.contains('printer')), isTrue);
+    expect(warned.any((w) => w.contains('fe80::1')), isTrue);
+    expect(warned.any((w) => w.contains('nip.io')), isTrue);
+    await srv.stop();
+  });
+
+  group('protection logging rides the server telemetry alone', () {
+    test(
+      'default protection: allow-all activation warns through the server telemetry',
+      timeout: const Timeout(Duration(seconds: 20)),
+      () async {
+        final rec = _Rec();
+        // لا كائن حماية يمرر: الافتراضية يبنيها الخادم، وتحديثها النشط
+        // يمر بمرصد الخادم وحده — مسجل واحد للإعداد الموثق كله
+        final srv = LocalIntakeServer(
+          telemetry: rec,
+          correlationIdGenerator: _counterId,
+          onCommand: (_) async => const CommandOutcome(ok: true),
+        );
+        srv.protection.update(
+          policy: const OriginPolicy(
+            allowAllHardened: true,
+            requireFetchMetadata: false,
+            perOriginPerMinute: 1000,
+          ),
+        );
+        await srv.start(preferredPort: 0);
+        addTearDown(srv.stop);
+        final r = await _send(srv.port, _post('127.0.0.1:${srv.port}', _alive));
+        expect(r['status'], 200);
+        expect(
+          rec.warns.any((w) => w.contains('allow-all-hardened is ACTIVE')),
+          isTrue,
+          reason:
+              'the riskiest activation is logged, not swallowed - the '
+              'default protection rides the server telemetry',
+        );
+      },
+    );
+
+    test(
+      'default protection: an unlisted origin logs a rejection line carrying its code',
+      timeout: const Timeout(Duration(seconds: 20)),
+      () async {
+        final rec = _Rec();
+        final srv = LocalIntakeServer(
+          telemetry: rec,
+          correlationIdGenerator: _counterId,
+          onCommand: (_) async => const CommandOutcome(ok: true),
+        );
+        await srv.start(preferredPort: 0);
+        addTearDown(srv.stop);
+        final r = await _send(srv.port, _post('127.0.0.1:${srv.port}', _alive));
+        expect(r['status'], 403);
+        expect(r['body'], contains('origin_not_listed'));
+        expect(
+          rec.warns.any(
+            (w) => w.contains('origin_not_listed') && w.contains('origin='),
+          ),
+          isTrue,
+          reason:
+              'the rejection line carries the stable code and the '
+              'sanitized origin field - the security log is the one '
+              'the server was given',
+        );
+      },
+    );
+
+    test(
+      'a passed protection without telemetry warns once at start, not per request',
+      timeout: const Timeout(Duration(seconds: 20)),
+      () async {
+        final rec = _Rec();
+        final srv = LocalIntakeServer(
+          telemetry: rec,
+          correlationIdGenerator: _counterId,
+          onCommand: (_) async => const CommandOutcome(ok: true),
+          protection: _openProtection(),
+        );
+        await srv.start(preferredPort: 0);
+        addTearDown(srv.stop);
+        final r = await _send(srv.port, _post('127.0.0.1:${srv.port}', _alive));
+        expect(r['status'], 200);
+        final muted = rec.warns
+            .where((w) => w.contains('security log is muted'))
+            .toList();
+        expect(
+          muted.length,
+          1,
+          reason:
+              'one warning at start - the host is told the protection '
+              'log is silent and how to wire it, not reminded per request',
+        );
+        expect(
+          muted.single,
+          contains('IntakeProtection(telemetry:'),
+          reason: 'the warning names the wiring, not just the problem',
+        );
+      },
+    );
+  });
+
+  test(
+    'a handler-thrown TimeoutException under a budget stays 500 internal - no orphan bookkeeping',
+    timeout: const Timeout(Duration(seconds: 30)),
+    () async {
+      final rec = _Rec();
+      final srv = LocalIntakeServer(
+        telemetry: rec,
+        correlationIdGenerator: _counterId,
+        onCommand: (_) async {
+          // المعالج يرمي مهلته هو الخاصة فورا: فشل محدد صاحبه، لا
+          // ميزانية جسر — ومهلة الجسر طويلة عمدا كي لا يبلغها شيء
+          throw TimeoutException('host handler own timeout');
+        },
+        protection: _openProtection(),
+        handlerTimeout: const Duration(seconds: 5),
+      );
+      final p = await srv.start(preferredPort: 0);
+      addTearDown(srv.stop);
+      for (var i = 0; i < 17; i++) {
+        final r = await _send(p, _post('127.0.0.1:$p', _alive));
+        expect(
+          r['status'],
+          500,
+          reason:
+              'request ${i + 1}: the handler own failure is an internal '
+              'error, never a bridge timeout',
+        );
+        expect(r['body'], contains('internal'));
+      }
+      expect(
+        rec.warns.any((w) => w.contains('seat released')),
+        isFalse,
+        reason:
+            'no bridge-budget reply was issued, so no seat was ever '
+            'released and no orphan was booked',
+      );
+      // اليتامى صفر: الطلب التالي يجد مقعدا حيا — فشله 500 (رمي
+      // المعالج ذاته، فكل معالجات هذا الخادم ترمي) لا 503 انشغالا
+      final ok = await _send(p, _post('127.0.0.1:$p', _alive));
+      expect(
+        ok['status'],
+        isNot(503),
+        reason: 'seats stayed free - the failures booked no orphans',
+      );
+      expect(ok['body'], contains('internal'));
     },
   );
 }

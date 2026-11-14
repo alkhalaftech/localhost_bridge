@@ -12,6 +12,11 @@ class TrustedCommand {
   final String source;
 
   /// Payloads as extracted (kept as a list - no join before the guards).
+  ///
+  /// Extraction contract: inside a JSON array, non-string and
+  /// empty-string elements drop without notice; a body that fails JSON
+  /// decoding, or a JSON number, boolean, or `null` body, arrives as raw
+  /// command text.
   final List<String> payloads;
 
   /// Useful request headers (lowercase keys) plus the correlation id.
@@ -31,5 +36,11 @@ class CommandOutcome {
 }
 
 /// The host's single registration point (it knows nothing of ports).
+///
+/// The payloads it receives are unvalidated wire data: a body that fails
+/// JSON decoding arrives as raw command text, a JSON number, boolean, or
+/// `null` body likewise arrives as raw text, and inside a JSON array the
+/// non-string and empty-string elements drop without notice. Validating
+/// the payload language stays the host's job.
 typedef TrustedCommandHandler =
     Future<CommandOutcome> Function(TrustedCommand command);

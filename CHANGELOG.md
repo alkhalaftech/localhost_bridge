@@ -1,3 +1,61 @@
+## 0.1.2
+
+- Security: a long run of `/` characters in the `Origin` header no
+  longer freezes the intake.
+- Security: while the token failure window is locked, a failing
+  handler's reply no longer carries the host's message, and no new
+  consent question opens.
+- An `Origin` header longer than 1,024 characters is refused with
+  `400 origin_too_long`.
+- `start()` called while `stop()` is still draining waits for it;
+  after a failed start, `port` is `0`.
+- Minimum Dart SDK lowered to 3.8.0 (Flutter 3.32.0).
+- The protection log is no longer silent in the documented setup: the
+  server builds its default protection with the server's own telemetry,
+  and `start()` logs a warning when a protection passed in has no
+  telemetry of its own, so the allow-all warning and the rejection
+  lines reach the host log as documented.
+- A late answer to an expired consent question can no longer override a
+  newer decision for the same origin: answers apply only when they
+  answer that origin's most recent question.
+- Updating only the token no longer drops a pending consent answer: the
+  consent generation advances only when origin decisions change, so an
+  `allowAlways` answer given after a token update is still remembered.
+- The per-origin rate-limit window no longer counts rejected attempts,
+  so the window stays at quota length and `Retry-After` is computed
+  from the real oldest entry. A client that honors `Retry-After` and
+  waits it out is accepted on its next attempt.
+- The request-body deadline is absolute: a single timer starts when the
+  body read begins, and a body that completes after the limit answers
+  `408` with the handler never invoked (the inter-chunk silence timeout
+  is unchanged).
+- Rejection log lines no longer carry the raw `Origin` value: the
+  unlisted-origin reason is a fixed sentence and the origin stays in
+  the sanitized `origin=` field, watch-mode lines included.
+- A `TimeoutException` thrown by your handler reports as a plain `500`
+  again: only the bridge's own handler budget produces `504`, so a
+  deliberate handler timeout no longer counts the command as orphaned.
+- The token path echoes CORS headers only for origins the origin policy
+  would echo for, as the contract states; non-browser clients are
+  unaffected.
+- The example dedup ledger no longer drops a live entry when full:
+  expired entries are swept first, and a ledger still at capacity
+  refuses new commands with a `ledger_full` outcome (the work never
+  starts) instead of repeating old work on a retry.
+- Every non-loopback `extraHosts` entry now logs the DNS-rebinding
+  opt-out warning at startup, dotless names and non-loopback IPv6
+  addresses included; the loopback literals stay silent.
+- A listener bound before a startup-step failure is closed instead of
+  leaking past the fallback: `start()` closes the bound server and
+  resets its state before trying the next port, so a failed startup
+  leaves no live listener without a reference.
+- The example's failure reply carries a fixed sentence - `The command
+  failed; see the host log` - instead of the thrown error text, so
+  environment detail from an exception never reaches the page.
+- Documentation: platform tables are dated and sourced; what a
+  browser page can use in this release, and accuracy fixes in the
+  README and SECURITY.md.
+
 ## 0.1.1
 
 - `429` replies that carry `Retry-After` (`origin_rate_limited`,
