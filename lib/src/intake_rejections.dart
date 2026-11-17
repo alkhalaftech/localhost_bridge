@@ -11,13 +11,13 @@
 /// own guards, and stay outside this table.
 library;
 
-/// One registry row: the wire status for [code] and whether the rejection,
-/// when it fires over an unread body, cuts immediately instead of spending
-/// the bounded drain window. Only the two documented paths cut immediately:
-/// the concurrency-seat busy reject and the host-authority (DNS-rebinding)
-/// reject - every unread-body rejection drains bounded instead, and every
-/// read-body rejection closes managed, so the close method itself follows
-/// the body fact, never the code.
+/// One registry row: the wire status of one rejection code and whether
+/// that rejection, when it fires over an unread body, cuts immediately
+/// instead of spending the bounded drain window. Only the two documented
+/// paths cut immediately: the concurrency-seat busy reject and the
+/// host-authority (DNS-rebinding) reject - every unread-body rejection
+/// drains bounded instead, and every read-body rejection closes managed,
+/// so the close method itself follows the body fact, never the code.
 class IntakeRejectSpec {
   /// Builds the row - [status] is the wire status, [immediateCut] marks the
   /// documented immediate-cut paths above.
