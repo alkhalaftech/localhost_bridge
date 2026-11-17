@@ -671,6 +671,19 @@ class LocalIntakeServer {
         );
         return;
       }
+      // مدخل القبول الواحد: مرة واحدة لكل طلب، بعد بوابات الشكل وقبل أي
+      // قراءة أخرى للحماية — الإسقاط خالص لا يخلف أثراً فالمهيّأ
+      // (OPTIONS) والطريقة المخالفة والمنشغل والمرفوض بالمضيف يمرّون
+      // بلا طوابع ولا أسئلة ولا سطور كما اليوم، ومن يقرأ قراراً
+      // متعلقاً بالحماية بعد هنا يقرأ السجل وحده (صدى CORS ونص الخطأ
+      // ومسار القبول والرفض) ولا يلمس كائن الحماية ثانية
+      final admission = await protection.admit(
+        origin: earlyOrigin,
+        portalToken: earlyToken,
+        fetchMode: _firstHeader(request, 'Sec-Fetch-Mode'),
+        fetchDest: _firstHeader(request, 'Sec-Fetch-Dest'),
+        path: request.uri.path,
+      );
       // الترويسات أحادية الدلالة: تعدد قيمها طلب ملغوب صريح
       // 400 وقطع، بدل استثناء valueغير الملتقط الذي يعلق المقبس بلا
       // رد أصلا. Host مستثنى: محلل dart يطويه.
@@ -686,7 +699,7 @@ class LocalIntakeServer {
           _echoCors(
             response,
             _firstHeader(request, 'Origin'),
-            admitted: protection.echoesCorsFor(_firstHeader(request, 'Origin')),
+            admitted: admission.echoesCors,
           );
           await _terminateDiscarding(
             response,
@@ -721,7 +734,7 @@ class LocalIntakeServer {
         // and the destroy after the flushed reply can still lose it on Linux
         // and macOS. Accepted loss for this path alone - and no socket is
         // left behind either way.
-        protection.noteRejection(reason, _firstHeader(request, 'Origin'));
+        admission.noteAuthorityReject(reason);
         await _terminateCutting(
           response,
           HttpStatus.forbidden,
@@ -751,11 +764,7 @@ class LocalIntakeServer {
           'X-Correlation-Id',
           _sanitizeCorrelationId(_firstHeader(request, 'X-Correlation-Id')),
         );
-        _echoCors(
-          response,
-          busyOrigin,
-          admitted: protection.echoesCorsFor(busyOrigin),
-        );
+        _echoCors(response, busyOrigin, admitted: admission.echoesCors);
         // The busy reject is an immediate cut on purpose: a saturated server
         // spends no drain windows. The reply is written to the detached
         // socket and the connection is destroyed at once - the platform
@@ -774,7 +783,7 @@ class LocalIntakeServer {
       }
       _activeRequests++;
       try {
-        await _handleRequest(request, response);
+        await _handleRequest(request, response, admission);
       } finally {
         _activeRequests--;
         if (_activeRequests <= 0) {
@@ -811,6 +820,7 @@ class LocalIntakeServer {
   Future<void> _handleRequest(
     HttpRequest request,
     HttpResponse response,
+    IntakeAdmission admission,
   ) async {
     // نكرّم ترويسة البوابة إن أرسلت X-Correlation-Id،
     // وإلا نولّد UUID v4 هنا عند الاستقبال — من هذه النقطة يخيط
@@ -832,11 +842,7 @@ class LocalIntakeServer {
         try {
           final origin = _firstHeader(request, 'Origin');
           if (request.method == 'OPTIONS') {
-            _echoCors(
-              response,
-              origin,
-              admitted: protection.echoesCorsFor(origin),
-            );
+            _echoCors(response, origin, admitted: admission.echoesCors);
             // الرد على المقبس الخام: جسم الـpreflight قد يكون معلناً وغير
             // مكتمل، والإغلاق المُدار فوقه يعلق بلا رد ولا قطع أبداً —
             // الـ204 يُكتب على المقبس المنتزع ثم تُقطع الوصلة ويُفرَّغ
@@ -877,22 +883,15 @@ class LocalIntakeServer {
             }
           }
 
-          // حماية المدخل (سياسة الأصول الموحدة): الفحص قبل
-          // قراءة الجسم؛ الرفض يحمل حالته ورمزه (الرمز عقد المطور)
-          final portalToken = _firstHeader(request, 'X-Portal-Token');
-          final rejection = await protection.check(
-            origin: origin,
-            portalToken: portalToken,
-            fetchMode: _firstHeader(request, 'Sec-Fetch-Mode'),
-            fetchDest: _firstHeader(request, 'Sec-Fetch-Dest'),
-          );
+          // بوابة القبول: الحكم مبني من مدخل القبول الواحد منذ بوابات
+          // الشكل، والتسوية هنا حصراً تهبط أثره في الموضع نفسه الذي كانت
+          // تجريه check القديمة (طوابع النوافذ، استهلاك المنحة، السؤال،
+          // تحذيرات المراقبة، وعدّ الرفض وسطره الأمني). كل من رُفض قبله
+          // — المهيّأ والطريقة المخالفة والمنشغل ومرفوض المضيف — لم
+          // يُسوِّ فلم يخلف شيئاً
+          admission.settle();
+          final rejection = admission.rejection;
           if (rejection != null) {
-            // الرمز يستجلم السطر: الرسالة وحدها لا تسمي عقد المطور،
-            // والسجل هو ما يقرأه المضيف عند تتبع رفض على السلك
-            protection.noteRejection(
-              '${rejection.code}: ${rejection.message}',
-              origin,
-            );
             // الرأس الصادق: بقايا النافذة التي رفضت الطلب كما قاسها
             // الحماية؛ الثابت 2 يبقى للسؤال المفتوح وحده (المستخدم قد
             // يجيب فورا فلا يُستعار له رأس دقائق)
@@ -907,11 +906,12 @@ class LocalIntakeServer {
             // the request), and every rejection carrying a wait budget
             // (per-origin quota or token lockout) echoes when the origin
             // qualifies for one - without ACAO the browser hides both from
-            // the retrying page and Retry-After loses its meaning.
+            // the retrying page and Retry-After loses its meaning. قاعدة
+            // قراءة الرد تُطوى من حقول السجل نفسها: رمز الرفض وحصة
+            // انتظاره والصدى الخام المسجل — لا سؤال جديد للحماية هنا
             final echoesCors =
                 rejection.code == 'origin_pending' ||
-                (rejection.retryAfterMs != null &&
-                    protection.echoesCorsFor(origin));
+                (rejection.retryAfterMs != null && admission.echoesCors);
             if (echoesCors) {
               _echoCors(response, origin, admitted: true);
             }
@@ -929,20 +929,14 @@ class LocalIntakeServer {
             );
             return;
           }
-          // الصدى بعد القبول للمؤهل وحده — عقد echoesCorsFor: التوكن
+          // الصدى بعد القبول للمؤهل وحده — قراءة من السجل: التوكن
           // يقبل عميلاً غير متصفحي أصله غير مدرج فلا يرى ACAO (لا يقرأه)،
           // والمتصفح غير المؤهل لا يصل أصلاً لغياب صدى الpreflight
-          _echoCors(
-            response,
-            origin,
-            admitted: protection.echoesCorsFor(origin),
-          );
-          // الرسائل التفصيلية للمضيف المعتمد حصرا — مسار «الكل»
+          _echoCors(response, origin, admitted: admission.echoesCors);
+          // الرسائل التفصيلية للمضيف المعتمد حصرا — قراءة من السجل (حسمها
+          // الإسقاط بمقارنة التوكن الواحدة) — ومسار «الكل»
           // يرى الرمز بلا نص المضيف (منع كشف معلومات المضيف لأي أصل)
-          final verboseErrors = protection.verboseErrorsFor(
-            origin,
-            portalToken,
-          );
+          final verboseErrors = admission.verboseErrors;
 
           // بوابة نوع المحتوى بعد القبول حصرا: الغريب لا يرى 415 قبل أن
           // ترفضه سياسة الأصول فلا يتسرب شكل السياسة — النموذج المخفي
@@ -1119,6 +1113,7 @@ class LocalIntakeServer {
                 'x-correlation-id': correlationId,
               },
               correlationId: correlationId,
+              admission: admission,
             ),
           );
           final CommandOutcome result;

@@ -1,13 +1,23 @@
 /// The pipeline's end contract: the package ends at delivering a "trusted
 /// command" - it knows neither its meaning nor any specific hardware (neutrality).
+library;
+
+import 'intake_protection.dart';
+
+/// The pipeline's end contract: the package ends at delivering a "trusted
+/// command" - it knows neither its meaning nor any specific hardware (neutrality).
 class TrustedCommand {
   /// Builds the command - the package constructs it, the host consumes it;
-  /// all four fields are required.
+  /// [source], [payloads], [headers], and [correlationId] are required.
+  /// [admission] defaults to [IntakeAdmission.unrecorded] so hosts and
+  /// tests building a command by hand keep compiling; the server always
+  /// passes the record its admission step produced.
   const TrustedCommand({
     required this.source,
     required this.payloads,
     required this.headers,
     required this.correlationId,
+    this.admission = IntakeAdmission.unrecorded,
   });
 
   /// The sender's origin as protection read it ('unknown-portal' when absent).
@@ -26,6 +36,12 @@ class TrustedCommand {
 
   /// The thread tying logs together (honored when incoming, or host-generated).
   final String correlationId;
+
+  /// The admission record the server's single admission step produced for
+  /// the request that carried this command - the accepted route, the CORS
+  /// echo decision, and the verbose-error decision in one place. A command
+  /// built outside the intake carries [IntakeAdmission.unrecorded].
+  final IntakeAdmission admission;
 }
 
 /// The host-side command execution result.
