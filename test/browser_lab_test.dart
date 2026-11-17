@@ -22,7 +22,7 @@ import 'dart:io';
 import 'package:localhost_bridge/localhost_bridge.dart';
 import 'package:test/test.dart';
 
-final (String?, String?) _labBrowser = _discoverBrowser();
+final (String?, String?, int?) _labBrowser = _discoverBrowser();
 
 /// مسار المتصفح المكتشف، أو null إن لم يوجد — حينها كل الاختبارات تتخطى
 final String? _browserPath = _labBrowser.$1;
@@ -30,17 +30,34 @@ final String? _browserPath = _labBrowser.$1;
 /// سبب التخطي الصادق، أو null إن وُجد متصفح فيعمل الاختبار فعلاً
 final String? _skipReason = _labBrowser.$2;
 
+/// رقم الإصدار الأكبر للمتصفح المكتشف إن قرأ — سيناريو Local Network
+/// Access يحتاج علم محاكاة الفضاء الذي وُلد بعد M146
+final int? _browserMajor = _labBrowser.$3;
+
 /// Locates a real Chrome/Chromium for the lab: the BRIDGE_BROWSER override
-/// first, then PATH, then the standard install locations. Returns the path
-/// and, when nothing is found, the honest skip reason the tests report.
-(String?, String?) _discoverBrowser() {
+/// first, then PATH, then the standard install locations. Returns the
+/// path, the honest skip reason when nothing is found, and the browser's
+/// major version when it can be read (the Local Network Access scenario
+/// needs the address-space override flag born after M146).
+(String?, String?, int?) _discoverBrowser() {
+  int? majorOf(String path) {
+    try {
+      final out = Process.runSync(path, const ['--version']);
+      final m = RegExp(r'(\d+)\.').firstMatch(out.stdout as String);
+      return m == null ? null : int.tryParse(m.group(1)!);
+    } on Object {
+      return null;
+    }
+  }
+
   final override = Platform.environment['BRIDGE_BROWSER']?.trim();
   if (override != null && override.isNotEmpty) {
-    if (File(override).existsSync()) return (override, null);
+    if (File(override).existsSync()) return (override, null, majorOf(override));
     return (
       null,
       'BRIDGE_BROWSER="$override" does not exist on this host - the lab '
           'needs a real Chrome/Chromium executable at that path',
+      null,
     );
   }
   // البحث في PATH: الأسماء المعتادة، وباللاحقة التنفيذية على ويندوز
@@ -57,7 +74,9 @@ final String? _skipReason = _labBrowser.$2;
     if (dir.trim().isEmpty) continue;
     for (final name in names) {
       final candidate = '$dir${Platform.pathSeparator}$name';
-      if (File(candidate).existsSync()) return (candidate, null);
+      if (File(candidate).existsSync()) {
+        return (candidate, null, majorOf(candidate));
+      }
     }
   }
   // المواضع القياسية للتثبيت حين لا يكون المتصفح على PATH
@@ -90,7 +109,9 @@ final String? _skipReason = _labBrowser.$2;
     ],
   ];
   for (final candidate in wellKnown) {
-    if (File(candidate).existsSync()) return (candidate, null);
+    if (File(candidate).existsSync()) {
+      return (candidate, null, majorOf(candidate));
+    }
   }
   return (
     null,
@@ -98,6 +119,7 @@ final String? _skipReason = _labBrowser.$2;
         'install locations; set BRIDGE_BROWSER to the browser path to run '
         'here) - the lab then runs where a system browser exists, such as '
         'the CI browser-lab job whose image ships Google Chrome',
+    null,
   );
 }
 
@@ -221,7 +243,11 @@ String _flat(String dom) => dom.replaceAll('\r\n', '\n');
 /// dumped DOM: scripts run, virtual time advances the page's async work,
 /// then the serialized DOM is printed to stdout. When BRIDGE_LAB_EVIDENCE_DIR
 /// is set, the full dump is also written there verbatim (one file per call).
-Future<String> _dumpDom(String url, String evidenceFile) async {
+Future<String> _dumpDom(
+  String url,
+  String evidenceFile, {
+  List<String> extraArgs = const [],
+}) async {
   final userDataDir = await Directory.systemTemp.createTemp(
     'bridge-browser-lab-',
   );
@@ -239,6 +265,7 @@ Future<String> _dumpDom(String url, String evidenceFile) async {
         '--user-data-dir=${userDataDir.path}',
         // ثبات معروف على لينكس في الحاويات: ذاكرة مشتركة صغيرة تعطل الجلسة
         '--disable-dev-shm-usage',
+        ...extraArgs,
         // الوثائق الرسمية (انظر ترويسة الملف)
         '--dump-dom',
         '--virtual-time-budget=20000',
@@ -528,4 +555,70 @@ void main() {
     expect(strangerStatus, 204);
     expect(strangerHeaders['access-control-allow-origin'], isNull);
   }, skip: _skipReason);
+
+  test(
+    'a page Chrome maps to public cannot reach the loopback bridge '
+    'without the Local Network Access permission',
+    () async {
+      // سيناريو Local Network Access بالزوج الحاسم على الصفحة نفسها:
+      // بعلم محاكاة الفضاء (--ip-address-space-overrides، وثيقة كروم
+      // الرسمية لمصادر LNA) تُعامل صفحة المختبر كصفحة من الإنترنت،
+      // وإرسالها إلى جسر loopback يحتاج إذن local-network-access
+      // الذي لا يمنحه headless فيحجب المتصفح الإرسال كلياً. وبلا العلم
+      // تعبر الصفحة نفسها على الجسر نفسه — فالفرق الوحيد بين الجولتين
+      // هو فحص LNA لا الجسر. العلم وُلد بعد M146 فالمتصفح الأقدم يتخطى
+      // الصادق
+      final (pageServer, admitted, _, pagePort, admittedPort, _, token) =
+          await lab();
+      addTearDown(pageServer.close);
+      addTearDown(admitted.stop);
+      final blocked = _flat(
+        await _dumpDom(
+          'http://127.0.0.1:$pagePort/',
+          'j124-lna-public-dom.txt',
+          extraArgs: [
+            '--ip-address-space-overrides=127.0.0.1:$pagePort=public',
+          ],
+        ),
+      );
+      expect(
+        blocked,
+        contains('LAB-TOKENED:THREW\n'),
+        reason:
+            'the public-mapped page needs the local-network-access '
+            'permission to reach a loopback bridge - headless grants none, '
+            'so the browser blocks the send entirely',
+      );
+      final control = _flat(
+        await _dumpDom(
+          'http://127.0.0.1:$pagePort/',
+          'j124-lna-control-dom.txt',
+        ),
+      );
+      expect(
+        control,
+        contains('LAB-TOKENED:200:true:no-error\n'),
+        reason:
+            'the same page and bridge cross without the mapping - the pair '
+            'proves the block is the LNA check, not the bridge',
+      );
+      // وجواب الإذن ليس طريقاً بديلاً للجسر: من عبر بلا إذن (تحكم) يُقبل
+      // بالسياسة نفسها التي تُجيب صفحة loopback العادية
+      final (status, body, _) = await _send(
+        admittedPort,
+        origin: 'http://127.0.0.1:$pagePort',
+        headers: {'X-Bridge-Token': token},
+      );
+      expect(status, 200);
+      expect(body, contains('"ok":true'));
+    },
+    skip:
+        _skipReason ??
+        (_browserMajor == null || _browserMajor! < 146
+            ? 'the Local Network Access scenario needs the '
+                  '--ip-address-space-overrides era (born after M146): no '
+                  'usable browser, or one too old to simulate a public page '
+                  'reaching loopback'
+            : null),
+  );
 }
