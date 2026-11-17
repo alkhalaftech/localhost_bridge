@@ -82,6 +82,26 @@ jobs:
       - name: analyze
         run: dart analyze --fatal-infos
 
+      # The retired intake names never come back: lib carries exactly the
+      # two documented rejection-site mentions of the legacy header (the
+      # deprecation warning must name the old name to refuse it), and
+      # neither the old generator nor the old origin literal survives
+      # anywhere in lib. A third mention - or one outside the server
+      # file - fails the run.
+      - name: legacy intake names are gone from lib
+        run: |
+          gen="$(grep -rn 'generatePortalToken' lib | wc -l)"
+          unk="$(grep -rn 'unknown-portal' lib | wc -l)"
+          legacy="$(grep -rn 'X-Portal-Token' lib | wc -l)"
+          srv="$(grep -c 'X-Portal-Token' lib/src/local_intake_server.dart)"
+          echo "gen=$gen unk=$unk legacy=$legacy srv=$srv"
+          if [ "$gen" -eq 0 ] && [ "$unk" -eq 0 ] && [ "$legacy" -eq "$srv" ] && [ "$srv" -eq 2 ]; then
+            echo "legacy intake names: only the two documented rejection sites remain."
+          else
+            echo "::error::a retired intake name reappeared in lib (gen=$gen unk=$unk legacy=$legacy srv=$srv - expected gen=0 unk=0 legacy=srv=2)."
+            exit 1
+          fi
+
       - name: test
         run: dart test
 
