@@ -616,12 +616,17 @@ class LocalIntakeServer {
           'X-Correlation-Id',
           _sanitizeCorrelationId(_firstHeader(request, 'X-Correlation-Id')),
         );
-        await _terminateDiscarding(
+        await _reply(
           response,
-          HttpStatus.badRequest,
-          'origin_too_long',
-          'Origin header exceeds the allowed length ($_maxOriginChars '
-              'characters)',
+          status: HttpStatus.badRequest,
+          json: {
+            'ok': false,
+            'error': 'origin_too_long',
+            'message':
+                'Origin header exceeds the allowed length '
+                '($_maxOriginChars characters)',
+          },
+          bodyFullyRead: false,
         );
         return;
       }
@@ -641,11 +646,15 @@ class LocalIntakeServer {
           'X-Correlation-Id',
           _sanitizeCorrelationId(_firstHeader(request, 'X-Correlation-Id')),
         );
-        await _terminateDiscarding(
+        await _reply(
           response,
-          HttpStatus.badRequest,
-          'origin_malformed',
-          'Origin header must be scheme://host[:port]',
+          status: HttpStatus.badRequest,
+          json: const {
+            'ok': false,
+            'error': 'origin_malformed',
+            'message': 'Origin header must be scheme://host[:port]',
+          },
+          bodyFullyRead: false,
         );
         return;
       }
@@ -662,12 +671,17 @@ class LocalIntakeServer {
           'X-Correlation-Id',
           _sanitizeCorrelationId(_firstHeader(request, 'X-Correlation-Id')),
         );
-        await _terminateDiscarding(
+        await _reply(
           response,
-          HttpStatus.badRequest,
-          'token_too_long',
-          'X-Portal-Token header exceeds the allowed length '
-              '($_maxTokenHeaderBytes bytes)',
+          status: HttpStatus.badRequest,
+          json: {
+            'ok': false,
+            'error': 'token_too_long',
+            'message':
+                'X-Portal-Token header exceeds the allowed length '
+                '($_maxTokenHeaderBytes bytes)',
+          },
+          bodyFullyRead: false,
         );
         return;
       }
@@ -701,11 +715,17 @@ class LocalIntakeServer {
             _firstHeader(request, 'Origin'),
             admitted: admission.echoesCors,
           );
-          await _terminateDiscarding(
+          await _reply(
             response,
-            HttpStatus.badRequest,
-            'duplicate_header',
-            'Header "$name" was sent more than once — send exactly one value',
+            status: HttpStatus.badRequest,
+            json: {
+              'ok': false,
+              'error': 'duplicate_header',
+              'message':
+                  'Header "$name" was sent more than once — send '
+                  'exactly one value',
+            },
+            bodyFullyRead: false,
           );
           return;
         }
@@ -735,11 +755,17 @@ class LocalIntakeServer {
         // and macOS. Accepted loss for this path alone - and no socket is
         // left behind either way.
         admission.noteAuthorityReject(reason);
-        await _terminateCutting(
+        await _reply(
           response,
-          HttpStatus.forbidden,
-          'blocked_by_protection',
-          reason,
+          status: HttpStatus.forbidden,
+          json: {
+            'ok': false,
+            'error': 'blocked_by_protection',
+            'message': reason,
+          },
+          bodyFullyRead: false,
+          // القطع الفوري: المسار الموثق الثاني — محاولة إعادة ربط DNS
+          immediateCut: true,
         );
         return;
       }
@@ -773,11 +799,17 @@ class LocalIntakeServer {
         // already looks like. That loss stays accepted and documented for
         // this path alone; the 413 gate keeps the draining terminate, and no
         // socket survives the busy reply either way.
-        await _terminateCutting(
+        await _reply(
           response,
-          HttpStatus.serviceUnavailable,
-          'server_busy',
-          'The server is busy right now — please retry shortly',
+          status: HttpStatus.serviceUnavailable,
+          json: const {
+            'ok': false,
+            'error': 'server_busy',
+            'message': 'The server is busy right now — please retry shortly',
+          },
+          bodyFullyRead: false,
+          // القطع الفوري: المسار الموثق الأول — الانشغال فوق السقف
+          immediateCut: true,
         );
         return;
       }
@@ -803,17 +835,19 @@ class LocalIntakeServer {
         stackTrace: stack,
         category: BridgeCategory.network,
       );
-      try {
-        await _json(response, HttpStatus.internalServerError, {
+      await _reply(
+        response,
+        status: HttpStatus.internalServerError,
+        json: const {
           'ok': false,
           'error': 'internal',
           'message': 'Internal server error',
-        });
-      } catch (_) {
-        try {
-          await _closeGuarded(response);
-        } catch (_) {}
-      }
+        },
+        bodyFullyRead: true,
+        // شبكة الأمان حصراً: فشل الرد يليه إغلاق ثانٍ تحت الحارس —
+        // داخل مخرج الرد الواحد لا في يد هذا المسار
+        safetyRetry: true,
+      );
     }
   }
 
@@ -847,7 +881,12 @@ class LocalIntakeServer {
             // مكتمل، والإغلاق المُدار فوقه يعلق بلا رد ولا قطع أبداً —
             // الـ204 يُكتب على المقبس المنتزع ثم تُقطع الوصلة ويُفرَّغ
             // البقية بالتفريغ المحدود في خلفية بلا مقعد.
-            await _terminateNoContent(response);
+            await _reply(
+              response,
+              status: HttpStatus.noContent,
+              json: null,
+              bodyFullyRead: false,
+            );
             return;
           }
           if (request.method != 'POST') {
@@ -857,11 +896,15 @@ class LocalIntakeServer {
             // والهدم عند الإغلاق يبتلع الرد على لينكس/ماك.
             // مسار المقبس الخام: الرد يُكتب ويُغسل أولا ثم يُقطع، والجسم
             // غير المقروء يُفرَّغ بالصبر المحدود في خلفية بلا مقعد.
-            await _terminateDiscarding(
+            await _reply(
               response,
-              HttpStatus.methodNotAllowed,
-              'method_not_allowed',
-              'Send the command as a POST request',
+              status: HttpStatus.methodNotAllowed,
+              json: const {
+                'ok': false,
+                'error': 'method_not_allowed',
+                'message': 'Send the command as a POST request',
+              },
+              bodyFullyRead: false,
             );
             return;
           }
@@ -921,11 +964,15 @@ class LocalIntakeServer {
             // (origin_pending وحملة Retry-After ذات صدى CORS). الترويسات
             // المضبوطة أعلاه (Retry-After وصدى CORS ومعرف الارتباط) تُنسخ
             // كما هي، والقطع بعد غسل الرد بتفريغ محدود بلا حجز مقعد.
-            await _terminateDiscarding(
+            await _reply(
               response,
-              rejection.status,
-              rejection.code,
-              rejection.message,
+              status: rejection.status,
+              json: {
+                'ok': false,
+                'error': rejection.code,
+                'message': rejection.message,
+              },
+              bodyFullyRead: false,
             );
             return;
           }
@@ -954,12 +1001,17 @@ class LocalIntakeServer {
             if (!config.allowedContentTypes.contains(mediaType)) {
               // قطع بعد الرد كما في بقية الرفوض المبكرة: الجسم غير مقروء
               // والإغلاق المُدار فوقه يعلق أو يهدم — المقبس الخام يرد ثم يقطع.
-              await _terminateDiscarding(
+              await _reply(
                 response,
-                HttpStatus.unsupportedMediaType,
-                'unsupported_media_type',
-                'Content-Type must be one of: '
-                    '${config.allowedContentTypes.join(', ')}',
+                status: HttpStatus.unsupportedMediaType,
+                json: {
+                  'ok': false,
+                  'error': 'unsupported_media_type',
+                  'message':
+                      'Content-Type must be one of: '
+                      '${config.allowedContentTypes.join(', ')}',
+                },
+                bodyFullyRead: false,
               );
               return;
             }
@@ -970,11 +1022,15 @@ class LocalIntakeServer {
           final te = _firstHeader(request, HttpHeaders.transferEncodingHeader);
           final cl = request.contentLength;
           if ((te == null || te.isEmpty) && cl > config.maxBodyBytes) {
-            await _terminateDiscarding(
+            await _reply(
               response,
-              HttpStatus.requestEntityTooLarge,
-              'payload_too_large',
-              'Request body exceeds the allowed limit ($_mbLabel)',
+              status: HttpStatus.requestEntityTooLarge,
+              json: {
+                'ok': false,
+                'error': 'payload_too_large',
+                'message': 'Request body exceeds the allowed limit ($_mbLabel)',
+              },
+              bodyFullyRead: false,
             );
             return;
           }
@@ -986,25 +1042,45 @@ class LocalIntakeServer {
           final outcome = await _readBody(request);
           if (outcome.error != null) {
             if (outcome.error is _BodyTooLargeException) {
-              await _terminate(
+              // الجسم أُفرغ حتى النهاية فيُحسب مقروءاً عند الإطار —
+              // الإغلاق المُدار تحت حارسه نظيف
+              await _reply(
                 response,
-                HttpStatus.requestEntityTooLarge,
-                'payload_too_large',
-                'Request body exceeds the allowed limit ($_mbLabel)',
+                status: HttpStatus.requestEntityTooLarge,
+                json: {
+                  'ok': false,
+                  'error': 'payload_too_large',
+                  'message':
+                      'Request body exceeds the allowed limit ($_mbLabel)',
+                },
+                bodyFullyRead: true,
+                forceConnectionClose: true,
               );
             } else if (outcome.error is TimeoutException) {
-              await _terminate(
+              // المهلة توقف الاشتراك (لا تلغيه) — الرد المُدار يمر فوق
+              // الجسم الموقوف ثم يغلق تحت الحارس
+              await _reply(
                 response,
-                HttpStatus.requestTimeout,
-                'request_timeout',
-                'Timed out waiting for the complete request body',
+                status: HttpStatus.requestTimeout,
+                json: const {
+                  'ok': false,
+                  'error': 'request_timeout',
+                  'message': 'Timed out waiting for the complete request body',
+                },
+                bodyFullyRead: true,
+                forceConnectionClose: true,
               );
             } else if (outcome.error is FormatException) {
-              await _terminate(
+              await _reply(
                 response,
-                HttpStatus.badRequest,
-                'invalid_utf8',
-                'The request body is not valid UTF-8',
+                status: HttpStatus.badRequest,
+                json: const {
+                  'ok': false,
+                  'error': 'invalid_utf8',
+                  'message': 'The request body is not valid UTF-8',
+                },
+                bodyFullyRead: true,
+                forceConnectionClose: true,
               );
             } else if (outcome.error is HttpException) {
               // خطأ المحلل على الحافة: HttpException الذي يبلغ هذه النقطة
@@ -1016,11 +1092,15 @@ class LocalIntakeServer {
               // (رموزنا الثلاثة أعلاه). رفض شكل سلكي يُرد 400 ويُقطع على
               // المقبس الخام بنمط الرفض المبكر: لا شبكة أمان فيصير 500
               // وسجل انهيار على خطأ شكل من العميل، ولا اتصال باقٍ بعد الرد.
-              await _terminateDiscarding(
+              await _reply(
                 response,
-                HttpStatus.badRequest,
-                'bad_request',
-                'The HTTP parser rejected this request',
+                status: HttpStatus.badRequest,
+                json: const {
+                  'ok': false,
+                  'error': 'bad_request',
+                  'message': 'The HTTP parser rejected this request',
+                },
+                bodyFullyRead: false,
               );
             } else {
               // خطأ مقبس أثناء الجسم ليس علة صيغة عند العميل: يُطلق
@@ -1035,14 +1115,20 @@ class LocalIntakeServer {
             config.maxJsonElements,
             config.maxJsonDepth,
           )) {
-            await _terminate(
+            await _reply(
               response,
-              HttpStatus.requestEntityTooLarge,
-              'payload_too_complex',
-              'Request body has too many JSON elements or is nested too '
-                  'deeply (over ${config.maxJsonElements} elements or '
-                  '${config.maxJsonDepth} deep) — send fewer, shallower '
-                  'elements',
+              status: HttpStatus.requestEntityTooLarge,
+              json: {
+                'ok': false,
+                'error': 'payload_too_complex',
+                'message':
+                    'Request body has too many JSON elements or is '
+                    'nested too deeply (over ${config.maxJsonElements} '
+                    'elements or ${config.maxJsonDepth} deep) — send fewer, '
+                    'shallower elements',
+              },
+              bodyFullyRead: true,
+              forceConnectionClose: true,
             );
             return;
           }
@@ -1050,24 +1136,35 @@ class LocalIntakeServer {
           try {
             payloads = _extractPayloads(body);
           } on _UnsupportedPayloadShapeException {
-            // رفض شكل الحمولة يقطع الاتصال بعد الرد كالرفض المبكر —
-            // الجسم مقروء كاملا فالإغلاق المُدار نظيف، وpersistentConnection
-            // = false ينهي الاتصال فلا يبقى مقبول رفضا مع اتصال حي.
-            await _terminate(
+            // رفض شكل الحمولة يقطع الاتصال بعد الرد — الجسم مقروء كاملا
+            // فالإغلاق المُدار نظيف وحسم الاتصال معه فلا يبقى مقبول رفضا
+            // مع اتصال حي.
+            await _reply(
               response,
-              HttpStatus.badRequest,
-              'unsupported_payload_shape',
-              'JSON body has a known-but-unsupported '
-                  'shape (object without known command keys)',
+              status: HttpStatus.badRequest,
+              json: const {
+                'ok': false,
+                'error': 'unsupported_payload_shape',
+                'message':
+                    'JSON body has a known-but-unsupported '
+                    'shape (object without known command keys)',
+              },
+              bodyFullyRead: true,
+              forceConnectionClose: true,
             );
             return;
           }
           if (payloads.isEmpty) {
-            await _terminate(
+            await _reply(
               response,
-              HttpStatus.badRequest,
-              'empty_payload',
-              'No valid command payload found in the request',
+              status: HttpStatus.badRequest,
+              json: const {
+                'ok': false,
+                'error': 'empty_payload',
+                'message': 'No valid command payload found in the request',
+              },
+              bodyFullyRead: true,
+              forceConnectionClose: true,
             );
             return;
           }
@@ -1088,11 +1185,18 @@ class LocalIntakeServer {
             if (line != null) {
               telemetry.warn(line, category: BridgeCategory.network);
             }
-            await _terminate(
+            await _reply(
               response,
-              HttpStatus.serviceUnavailable,
-              'server_busy',
-              'The server is busy right now — please retry shortly',
+              status: HttpStatus.serviceUnavailable,
+              json: const {
+                'ok': false,
+                'error': 'server_busy',
+                'message':
+                    'The server is busy right now — please retry '
+                    'shortly',
+              },
+              bodyFullyRead: true,
+              forceConnectionClose: true,
             );
             return;
           }
@@ -1145,19 +1249,24 @@ class LocalIntakeServer {
             if (line != null) {
               telemetry.warn(line, category: BridgeCategory.network);
             }
-            await _terminate(
+            await _reply(
               response,
-              HttpStatus.gatewayTimeout,
-              'handler_timeout',
-              'The command handler exceeded its time budget',
+              status: HttpStatus.gatewayTimeout,
+              json: const {
+                'ok': false,
+                'error': 'handler_timeout',
+                'message': 'The command handler exceeded its time budget',
+              },
+              bodyFullyRead: true,
+              forceConnectionClose: true,
             );
             return;
           }
 
-          await _json(
+          await _reply(
             response,
-            result.ok ? HttpStatus.ok : HttpStatus.internalServerError,
-            {
+            status: result.ok ? HttpStatus.ok : HttpStatus.internalServerError,
+            json: {
               'ok': result.ok,
               if (!result.ok)
                 'error': result.errorCode ?? config.fallbackErrorCode,
@@ -1165,6 +1274,7 @@ class LocalIntakeServer {
               if (!result.ok && verboseErrors)
                 'message': result.errorMessage ?? 'Command execution failed',
             },
+            bodyFullyRead: true,
           );
         } catch (error, stack) {
           telemetry.error(
@@ -1173,11 +1283,16 @@ class LocalIntakeServer {
             stackTrace: stack,
             category: BridgeCategory.network,
           );
-          await _json(response, HttpStatus.internalServerError, {
-            'ok': false,
-            'error': 'internal',
-            'message': 'Internal server error',
-          });
+          await _reply(
+            response,
+            status: HttpStatus.internalServerError,
+            json: const {
+              'ok': false,
+              'error': 'internal',
+              'message': 'Internal server error',
+            },
+            bodyFullyRead: true,
+          );
         }
       },
       context: {
@@ -1234,13 +1349,9 @@ class LocalIntakeServer {
         }
         await Future<void>.delayed(_totalCutYield);
         if (settled) return;
-        try {
-          final socket = await response.detachSocket(writeHeaders: false);
-          socket.destroy();
-        } on Object {
-          // الرد أغلق أو انتُزع من قبل — لا مقبس لهذه الدورة يُقطع،
-          // وتحرر المقعد حاصل بالعودة من المهلة في كل الأحوال
-        }
+        // القطع عبر البدأة الواحدة — مهلة القطع الكلية لا تكتب قطعها
+        // بيدها، وهي ليست رداً (لا تكتب شيئاً) فليست من مخرج الرد
+        await _cutResponseSocket(response);
       },
     );
   }
@@ -1425,86 +1536,86 @@ class LocalIntakeServer {
     HttpStatus.noContent: 'No Content',
   };
 
-  /// Rejects a request over the RAW socket - the classic lingering close:
-  /// a body that was never listened to, or one the parser rejected mid-read
-  /// (the framework cancels its own reading on that error, so no complete
-  /// body was ever received here). Measured reason: the framework destroys the
-  /// connection at response.close() on Linux and macOS even when the body was
-  /// fully drained first (the reply is written and the client still sees a
-  /// broken pipe), so no reply can travel over the managed response - and a
-  /// managed close over a body that never finishes hangs forever, holding the
-  /// caller's concurrency seat. Instead the socket is detached before anything
-  /// is written; the hand-built reply - the same JSON shape _terminate writes,
-  /// current headers copied, framing headers rebuilt from the exact body - is
-  /// flushed, and the write side closes FIRST. The returned future completes
-  /// at that point: the caller is never held for the sender's leftover bytes.
-  /// The read side stays open and the parser hands its unparsed remainder to
-  /// the detached socket, so the bounded drain (the discard window, the
-  /// four-body budget) counts and drops bytes on THAT stream in the
-  /// background - detached from every seat - until done, an error, or either
-  /// bound; past them the hard cut stays, reply included. destroy() always
-  /// ends the socket.
-  Future<void> _terminateDiscarding(
-    HttpResponse response,
-    int status,
-    String code,
-    String message,
-  ) async {
-    final body = utf8.encode(
-      jsonEncode({'ok': false, 'error': code, 'message': message}),
-    );
-    Socket socket;
-    try {
-      socket = await _detachAndReply(response, status, body);
-    } on Object {
-      // العميل انقطع قبل الرد أو أثناءه: لا ما يوصَل ولا جسم يُفرَّغ —
-      // الدمّر تم من الداخل
+  /// مخرج الرد الواحد: كل رد في الخادم يمر من هنا حصراً، وطريقة الإغلاق
+  /// تحسم من حقيقة واحدة: هل قُرئ الجسم كاملاً؟
+  /// - المقروء ([bodyFullyRead]) يُغلق بالطريقة المُدارة تحت حارسها؛
+  ///   والرفضُ منه يحسم الاتصال ([forceConnectionClose]) في لا يبقى مقبول
+  ///   رفضاً مع اتصال حي.
+  /// - غير المقروء يمرّ بالمقبس المنتزع: بالتفريغ المحدود، أو بالقطع
+  ///   الفوري للمسارين الموثقين حصراً ([immediateCut]: الانشغال وHost) —
+  ///   الرد اليدوي نفسه يُكتب ويُغسل وإغلاق الكتابة أولاً، ثم إما نافذة
+  ///   التفريغ بلا مقعد أو الدمّر حالاً، ولا ناجي من الاثنين؛ أو بلا جسم
+  ///   ([json] = null) للـ204.
+  /// لا مسار ردٍّ يختار إغلاقه بنفسه بعد اليوم — القرار كلُّه هنا من
+  /// الحقيقة الواحدة، والقيم (الحالة والجسم) تمر من المواضع إليه.
+  Future<void> _reply(
+    HttpResponse response, {
+    required int status,
+    required Map<String, Object>? json,
+    required bool bodyFullyRead,
+    bool forceConnectionClose = false,
+    bool immediateCut = false,
+    bool safetyRetry = false,
+  }) async {
+    if (!bodyFullyRead) {
+      if (json == null) {
+        // الـ204 بلا جسم: الترويسات الجارية تُنسخ والتأطيرية Content-Length: 0
+        try {
+          final socket = await _detachAndReply(response, status, null);
+          _discardDetached(socket);
+        } on Object {
+          // العميل انقطع قبل الرد أو أثناءه: الدمّر تم من الداخل
+        }
+        return;
+      }
+      final body = utf8.encode(jsonEncode(json));
+      try {
+        final socket = await _detachAndReply(response, status, body);
+        if (immediateCut) {
+          socket.destroy();
+        } else {
+          _discardDetached(socket);
+        }
+      } on Object {
+        // العميل انقطع قبل الرد أو أثناءه: الدمّر تم من الداخل
+      }
       return;
     }
-    // التفريغ في خلفية بلا مقعد: الدالة تعود بعد غسل الرد وإغلاق
-    // الكتابة فيتحرر مقعد المستدعي فورا، وبقية المهاجم لا تحجز شيئا.
-    _discardDetached(socket);
+    // الإغلاق المُدار تحت حارسه
+    if (forceConnectionClose) {
+      response.persistentConnection = false;
+    }
+    if (safetyRetry) {
+      try {
+        response.statusCode = status;
+        response.write(jsonEncode(json!));
+        await _closeGuarded(response);
+      } on Object {
+        // شبكة _handle الأمانية حصراً: الرد فشل — الإغلاق الثاني تحت
+        // الحارس نفسه يمتلكه مخرج الرد لا يدُ هذا المسار
+        try {
+          await _closeGuarded(response);
+        } on Object {
+          // والثاني فشل أيضاً: لا ثالث ممكن — الدمّر تم من الداخل
+        }
+      }
+      return;
+    }
+    response.statusCode = status;
+    response.write(jsonEncode(json!));
+    await _closeGuarded(response);
   }
 
-  /// The immediate-cut twin of [_terminateDiscarding] - the busy 503 and the
-  /// Host-authority reject keep their documented immediate cut: the same
-  /// hand-built reply on the detached socket, but the destroy lands at once.
-  /// No drain window is spent, the sender's leftover bytes buy nothing, the
-  /// accepted reply loss on Linux and macOS is unchanged - and no socket
-  /// survives the reply either way.
-  Future<void> _terminateCutting(
-    HttpResponse response,
-    int status,
-    String code,
-    String message,
-  ) async {
-    final body = utf8.encode(
-      jsonEncode({'ok': false, 'error': code, 'message': message}),
-    );
+  /// بدأة القطع الواحدة: انتزاع المقبس ودمّره — تشترك فيها مهلة القطع
+  /// الكلية وحارس الإغلاق المُدار، فلا واحد منهما يكتب قطعه بيده. ليست
+  /// رداً (لا تكتب شيئاً) فليست من مخرج الرد، وهي أخيراً على كل حال:
+  /// الرد المغلق أو المنتزع سابقاً لا قطعة ثانية له.
+  Future<void> _cutResponseSocket(HttpResponse response) async {
     try {
-      final socket = await _detachAndReply(response, status, body);
+      final socket = await response.detachSocket(writeHeaders: false);
       socket.destroy();
     } on Object {
-      // الدمّر تم من الداخل
-    }
-  }
-
-  /// The preflight reply on the detached socket: `204 No Content` carries no
-  /// body, the current headers (the CORS echo and the correlation id) are
-  /// copied as they stand, the connection cuts after the reply, and the
-  /// unread remainder of the preflight body drains bounded in the background
-  /// exactly like every other pre-body cut - an OPTIONS whose declared body
-  /// never completes must not leave a hanging socket behind either.
-  Future<void> _terminateNoContent(HttpResponse response) async {
-    try {
-      final socket = await _detachAndReply(
-        response,
-        HttpStatus.noContent,
-        null,
-      );
-      _discardDetached(socket);
-    } on Object {
-      // الدمّر تم من الداخل
+      // الرد أغلق أو انتُزع من قبل — لا قطعة إضافية ممكنة
     }
   }
 
@@ -1522,8 +1633,8 @@ class LocalIntakeServer {
   ) async {
     final socket = await response.detachSocket(writeHeaders: false);
     try {
-      // الرد اليدوي بنفس شكل _terminate: نفس الجسم، ونفس الترويسات الجارية
-      // عدا التأطيرية التي تُبنى هنا من طول الجسم الفعلي.
+      // الرد اليدوي بنفس شكل الرد المُدار: نفس الجسم، ونفس الترويسات
+      // الجارية عدا التأطيرية التي تُبنى هنا من طول الجسم الفعلي.
       final head = StringBuffer()
         ..write(
           'HTTP/1.1 $status ${_terminateReasons[status] ?? 'Rejected'}'
@@ -1835,16 +1946,6 @@ class LocalIntakeServer {
     response.headers.contentType = ContentType.json;
   }
 
-  Future<void> _json(
-    HttpResponse response,
-    int status,
-    Map<String, Object> body,
-  ) async {
-    response.statusCode = status;
-    response.write(jsonEncode(body));
-    await _closeGuarded(response);
-  }
-
   /// The managed close with its safety net: the close is the course for
   /// every reply over a consumed body, and the guard only covers the
   /// residual hang - a close that has not completed within the drain window
@@ -1852,7 +1953,7 @@ class LocalIntakeServer {
   /// a live socket past its window. A close that already claimed the socket
   /// keeps its course untouched (the detach throws and is swallowed), and a
   /// late error from the pending close is consumed here instead of surfacing
-  /// as an orphan zone error.
+  /// as an orphan zone error. القطع عبر بدأة القطع الواحدة لا بيده.
   Future<void> _closeGuarded(HttpResponse response) async {
     final closing = response.close();
     try {
@@ -1860,46 +1961,8 @@ class LocalIntakeServer {
       return;
     } on TimeoutException {
       await Future<void>.delayed(_totalCutYield);
-      try {
-        final socket = await response.detachSocket(writeHeaders: false);
-        socket.destroy();
-      } on Object {
-        // الرد أغلق أو انتُزع من قبل — لا قطعة إضافية ممكنة
-      }
+      await _cutResponseSocket(response);
       unawaited(closing.catchError((Object _, StackTrace _) {}));
     }
-  }
-
-  /// A final reply after which the connection is cut - limit errors (413/408/503)
-  /// close it so the sender cannot keep pushing an already-rejected request,
-  /// and so do the post-read payload-shape rejects (payload_too_complex,
-  /// unsupported_payload_shape, empty payload): their body was consumed, so
-  /// the managed close is clean and the reply is delivered before the
-  /// connection ends - no rejected request ever leaves a reusable connection.
-  /// The managed close carries its own safety net ([_closeGuarded]): a close
-  /// that does not complete within the drain window gets its socket detached
-  /// and destroyed.
-  /// Every pre-body reject (405, the origin shape and token gates, duplicate
-  /// headers, the Host-authority reject, the busy 503, the 204 preflight)
-  /// never reaches this path: their body was never read, and a managed close
-  /// over it hangs on a sender that never finishes - they travel
-  /// [_terminateDiscarding] (the bounded drain) or [_terminateCutting] (the
-  /// busy 503 and the Host-authority reject, the immediate cut) instead.
-  /// All of these sit outside the protection rejection counter and its
-  /// structured log by design - the counter counts security rejections
-  /// (origin and token decisions) only, and every one of these paths answers
-  /// with its own explicit reply.
-  Future<void> _terminate(
-    HttpResponse response,
-    int status,
-    String code,
-    String message,
-  ) async {
-    response.persistentConnection = false;
-    await _json(response, status, {
-      'ok': false,
-      'error': code,
-      'message': message,
-    });
   }
 }
