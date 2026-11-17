@@ -2,8 +2,10 @@
 
 - Added: a single admission step - `IntakeProtection.admit` answers one
   request with one `IntakeAdmission` record that carries the accepted
-  route, the CORS echo decision, and the verbose-error decision, and
-  `TrustedCommand.admission` delivers that record to the host.
+  route, the CORS echo decision, and the verbose-error decision,
+  `TrustedCommand.admission` delivers that record to the host, and
+  `intakeRejectionRegistry` is the single table behind every rejection
+  code on the wire.
 - Deprecated: the per-question protection probes (`check`,
   `echoesCorsFor`, `verboseErrorsFor`, `noteRejection`, `logRejection`,
   and `normalize`) in favor of the admission record; removal is planned
