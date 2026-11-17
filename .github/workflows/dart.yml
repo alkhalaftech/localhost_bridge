@@ -2,9 +2,11 @@
 # This file lives inside the package tree; the package root is the
 # repository root. All paths below are therefore repository-root relative.
 # Public repositories get free macOS and Windows minutes, so the full
-# matrix runs on every push to main and on every pull request here.
-# Tag pushes trigger nothing: a tag usually points at old code, and the
-# release gates below already run on the main branch.
+# matrix runs on every push to main and on every pull request here, and
+# push to the v0.2.0-dev branch (the 0.2.0 release-candidate staging
+# branch) runs the same pipeline. Tag pushes trigger nothing: a tag
+# usually points at old code, and the release gates below already run on
+# the main branch.
 # The weekly schedule entry loads everywhere this file does, but every
 # job bails out unless the repository variable SCHEDULED_CI is set to
 # "true". A repository that wants the weekly run sets that one variable;
@@ -18,6 +20,8 @@ on:
   push:
     branches:
       - main
+      # 0.2.0 release-candidate staging: same pipeline, nothing special
+      - v0.2.0-dev
   pull_request:
   workflow_dispatch:
   schedule:
@@ -80,6 +84,48 @@ jobs:
 
       - name: test
         run: dart test
+
+  browser-lab:
+    # The real-browser lab (test/browser_lab_test.dart): a system
+    # Chrome/Chromium driven headlessly proves the three pre-pairing
+    # browser scenarios - the tokened page crosses and reads the reply,
+    # the unpaired page gets no readable verdict while the wire carries
+    # the literal code, and the preflight round trip announces the token
+    # header with the new name alone. Zero packages added: the lab uses
+    # whatever Chrome/Chromium the host has, and skips itself honestly
+    # when there is none, so this job pins the runner image that actually
+    # runs it - the ubuntu-latest image ships Google Chrome and Chromium
+    # preinstalled (the runner-images README lists both).
+    if: github.event_name != 'schedule' || vars.SCHEDULED_CI == 'true'
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+
+      - uses: dart-lang/setup-dart@6afc89df92d6eb3834022f73cd65adc8cdfcb92d # v1.8.1
+        with:
+          sdk: stable
+
+      # Name the browser the lab ran on: the discovery order of the test
+      # itself, echoed here so a green run records which engine proved it.
+      - name: browsers on the runner image
+        run: |
+          found=""
+          for b in google-chrome google-chrome-stable chromium chromium-browser; do
+            if command -v "$b" >/dev/null 2>&1; then
+              echo "$b: $("$b" --version 2>/dev/null || echo 'present')"
+              found="$b"
+            fi
+          done
+          if [ -z "$found" ]; then
+            echo "::warning::no system Chrome/Chromium found - the lab will skip itself"
+          fi
+
+      - name: resolve packages
+        run: dart pub get
+
+      - name: browser lab
+        run: dart test test/browser_lab_test.dart
 
   release-doc-gate:
     if: github.event_name != 'schedule' || vars.SCHEDULED_CI == 'true'
