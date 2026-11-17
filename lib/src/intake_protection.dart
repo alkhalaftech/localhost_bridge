@@ -117,240 +117,6 @@ class IntakeRejection {
   final int? retryAfterMs;
 }
 
-/// The acceptance route one request took through the protection layers -
-/// the recorded value in [IntakeAdmission.acceptedPath]. Six routes exist
-/// and an accepted admission names exactly one: the host's list, a saved
-/// always-allow consent from discovery, a consumed one-time grant, the
-/// hardened allow-all path, a correct token alone, or a correct token over
-/// a listed origin.
-enum IntakeAdmissionPath {
-  /// The origin matches the host's allowlist (full origin, bare host, or
-  /// `*.domain` pattern).
-  listed,
-
-  /// Discovery answered `allowAlways` for this origin earlier and the
-  /// decision is still remembered for the session.
-  savedConsent,
-
-  /// A discovery `allowOnce` grant was valid and this request consumed it.
-  onceGrant,
-
-  /// The hardened allow-all path with its origin and send-method hardening.
-  allowAll,
-
-  /// The token alone admitted the request: a correct token over an origin
-  /// the policy does not qualify (or with no Origin at all).
-  token,
-
-  /// Both layers agreed: a correct token over a listed origin.
-  originWithToken,
-}
-
-/// The one admission record for one request - the single projection of the
-/// protection state that replaces the per-question probes. Built by
-/// [IntakeProtection.admit]; every field is final and settled at build
-/// time, so the caller reads the record and never probes the protection
-/// object again for this request.
-///
-/// The projection is deliberately side-effect free: a caller that never
-/// calls [settle] leaves no state behind - that is what keeps preflights,
-/// shape-gate rejects, and busy rejects stamp-free. [settle] lands the
-/// decision's state effects exactly where the old admission gate stood.
-class IntakeAdmission {
-  const IntakeAdmission._({
-    required this.rejection,
-    required this.acceptedPath,
-    required this.echoesCors,
-    required this.verboseErrors,
-    required this.origin,
-    required this.normalizedOrigin,
-    required this.path,
-    _AdmissionDecision? decision,
-    IntakeProtection? owner,
-  }) : _decision = decision,
-       _owner = owner;
-
-  /// The hand-built placeholder for a [TrustedCommand] constructed outside
-  /// the intake (host tests): no rejection, no path, no decisions - and
-  /// [settle] and [noteAuthorityReject] refuse it loudly.
-  static const IntakeAdmission unrecorded = IntakeAdmission._(
-    rejection: null,
-    acceptedPath: null,
-    echoesCors: false,
-    verboseErrors: false,
-    origin: null,
-    normalizedOrigin: null,
-    path: null,
-  );
-
-  /// The policy rejection when the request was refused - null when it was
-  /// accepted. The status, code, and message are the wire contract the
-  /// caller replies with.
-  final IntakeRejection? rejection;
-
-  /// The route that accepted the request - null when [rejection] is
-  /// non-null.
-  final IntakeAdmissionPath? acceptedPath;
-
-  /// Whether the reply to this request may carry the CORS echo. For an
-  /// accepted request this is the qualified-origin decision; for a
-  /// rejection it folds the consent-question rule (always echo) and the
-  /// wait-budget rule (echo when the origin qualifies) into one recorded
-  /// value.
-  final bool echoesCors;
-
-  /// Whether the reply may carry host error text for this sender - a
-  /// correct token (whose miss window is not locked) or a listed origin.
-  final bool verboseErrors;
-
-  /// The Origin request fact this admission was built from - the value the
-  /// counter and the security log key this request by.
-  final String? origin;
-
-  /// [origin] lower-cased with trailing slashes stripped - the canonical
-  /// key every per-origin window in the protection uses.
-  final String? normalizedOrigin;
-
-  /// The request path fact this admission was built from.
-  final String? path;
-
-  final _AdmissionDecision? _decision;
-  final IntakeProtection? _owner;
-
-  /// Lands this admission's state effects - the token miss stamp or miss
-  /// window clear, the quota stamp (or its withdrawal on a rejection), the
-  /// one-time grant consumption, the consent question, the report-only
-  /// would-reject line, and the counted, throttled security line for a
-  /// rejection. The server calls it exactly once, at the acceptance gate;
-  /// a request answered from a pure read (preflight, shape-gate reject,
-  /// busy reject) never settles, so it leaves no state behind - the same
-  /// property the old gate position gave.
-  ///
-  /// Throws [StateError] on a hand-built [IntakeAdmission.unrecorded] or a
-  /// second settle of the same record.
-  void settle() {
-    final owner = _owner;
-    final decision = _decision;
-    if (owner == null || decision == null) {
-      throw StateError(
-        'this admission was not built by IntakeProtection.admit - '
-        'nothing to settle',
-      );
-    }
-    if (decision.settled) {
-      throw StateError(
-        'this admission was already settled - one settle per request',
-      );
-    }
-    decision.settled = true;
-    owner._applyDecision(decision, origin);
-    final rejection = decision.rejection;
-    if (rejection != null) {
-      // العد والسطر الأمني هنا حصراً كما كانت noteRejection من الخادم في
-      // موضع بوابة القبول — check القديمة لا تعد أبداً
-      owner._noteAuthority('${rejection.code}: ${rejection.message}', origin);
-    }
-  }
-
-  /// Counts and logs a rejection decided outside the protection patterns -
-  /// the host-authority rejects - through the same counter and throttled
-  /// security line the protection's own rejections use: denial is never
-  /// silent. Throws [StateError] on a hand-built
-  /// [IntakeAdmission.unrecorded].
-  void noteAuthorityReject(String reason) {
-    final owner = _owner;
-    if (owner == null || _decision == null) {
-      throw StateError(
-        'this admission was not built by IntakeProtection.admit - '
-        'no counter behind it',
-      );
-    }
-    owner._noteAuthority(reason, origin);
-  }
-}
-
-/// The recorded decision one admission projection produced - the verdict
-/// plus the deferred state effects [IntakeAdmission.settle] lands.
-/// Internal to this library: the record exposes the fields, never the
-/// effect bookkeeping.
-class _AdmissionDecision {
-  _AdmissionDecision({
-    required this.rejection,
-    required this.acceptedPath,
-    required this.echoesCors,
-    required this.verboseErrors,
-    required this.stampMs,
-    required this.key,
-    this.tokenAttempt = false,
-    this.tokenCompared = false,
-    this.tokenMatched = false,
-    this.quotaLimit = 0,
-    this.grantExisted = false,
-    this.reachedAskTrim = false,
-    this.fireAsk = false,
-    this.reportOnlyLine,
-  });
-
-  final IntakeRejection? rejection;
-  final IntakeAdmissionPath? acceptedPath;
-  final bool echoesCors;
-  final bool verboseErrors;
-
-  /// The projection's clock reading - every stamp settle lands carries it,
-  /// so the effects match what the old inline gate wrote at this position.
-  final int stampMs;
-
-  /// The canonical origin key for the grant and the ask (empty when the
-  /// request carried no origin).
-  final String key;
-
-  /// Whether the token block ran (a token was supplied and a secret is
-  /// configured) - its window fetch owns the periodic sweep, exactly like
-  /// the old gate.
-  final bool tokenAttempt;
-
-  /// Whether the token was compared - false under the lock and when the
-  /// header was absent, so a locked or absent token is never compared.
-  final bool tokenCompared;
-
-  /// Whether the comparison matched - a match clears the miss window.
-  final bool tokenMatched;
-
-  /// The quota limit that governed the branch (0 = the branch ran no
-  /// quota) - settle re-runs the same mutating quota call so the stamp, or
-  /// its withdrawal on a would-reject, lands as before.
-  final int quotaLimit;
-
-  /// A one-time grant existed for the origin (valid or expired) - settle
-  /// consumes it either way, like the old gate.
-  final bool grantExisted;
-
-  /// The discovery branch reached the ask-budget trim point - settle runs
-  /// the real trim there.
-  final bool reachedAskTrim;
-
-  /// The consent question fires on settle.
-  final bool fireAsk;
-
-  /// The full report-only would-reject line - settle warns it verbatim.
-  final String? reportOnlyLine;
-
-  /// One-shot guard: a record settles once.
-  bool settled = false;
-}
-
-/// The after-the-token-layer projection - verdict plus the branch effect
-/// flags, mirroring the acceptance order branch by branch.
-class _BeyondOutcome {
-  IntakeRejection? rejection;
-  IntakeAdmissionPath? accepted;
-  int quotaLimit = 0;
-  bool grantExisted = false;
-  bool reachedAskTrim = false;
-  bool fireAsk = false;
-  String? reportOnlyLine;
-}
-
 /// Optional protection for the local command intake - host-configured.
 ///
 /// The default risk (the allow-all value): a 127.0.0.1 intake accepting POST
@@ -849,13 +615,8 @@ class IntakeProtection {
   }
 
   /// Lower-cases an Origin value and strips trailing slashes - the canonical
-  /// key for every per-origin window in this object.
-  /// Kept for hosts until the planned removal: the admission record carries
-  /// the canonical form as [IntakeAdmission.normalizedOrigin].
-  @Deprecated(
-    'Read IntakeAdmission.normalizedOrigin from the record built by '
-    'admit() (removal planned in 0.3.0)',
-  )
+  /// key for every per-origin window in this object. Used by this package's
+  /// server, not a stable host-facing interface.
   static String normalize(String origin) =>
       _stripTrailingSlashes(origin.toLowerCase());
 
@@ -866,475 +627,65 @@ class IntakeProtection {
     return uri != null && uri.scheme == 'https' && uri.host.isNotEmpty;
   }
 
-  /// Accept the request - null means allowed; [IntakeRejection] carries
-  /// status, code, and message. Order: the token layer passes on its own,
-  /// then the list, then allow-all with its hardening, then discovery or an
-  /// explicit reject.
-  /// Kept for hosts until the planned removal: the package's own server
-  /// builds the admission record with [admit] instead.
-  @Deprecated(
-    'Build the one admission record with admit() and read its rejection '
-    'field - the record carries the verdict, the CORS echo, and the '
-    'verbose-error decision together (removal planned in 0.3.0)',
-  )
+  /// Accept the request - null means allowed; [IntakeRejection] carries status,
+  /// code, and message. Order: the token layer passes on its own, then the list,
+  /// then allow-all with its hardening, then discovery or an explicit reject.
+  /// Used by this package's server, not a stable host-facing interface.
   Future<IntakeRejection?> check({
     String? origin,
     String? portalToken,
     String? fetchMode,
     String? fetchDest,
   }) async {
-    // الإهمال يبقى بالسلوك القديم حرفاً: الإسقاط ثم إرضاء أثره فوراً في
-    // هذا الموضع (طوابع النوافذ واستهلاك المنحة والسؤال وتحذيرات
-    // المراقبة) — بلا عدّ: عدّ الرفض كان من خارج check (noteRejection من
-    // الخادم) وما زال
-    final decision = _project(origin, portalToken, fetchMode, fetchDest);
-    _applyDecision(decision, origin);
-    return decision.rejection;
-  }
-
-  /// The one admission step: projects the whole request decision against
-  /// the live policy state in a single pass and returns the record. No
-  /// state is touched here - the projection is a pure read; the caller
-  /// lands the effects with [IntakeAdmission.settle] at its acceptance
-  /// gate, so requests answered from the record alone (a preflight, a
-  /// shape-gate reject, a busy reject) leave no stamps, no grants, no
-  /// questions, and no rejection lines behind.
-  ///
-  /// The token is compared at most once per request: the comparison happens
-  /// here and its outcome is recorded, so the verbose-error decision reads
-  /// the record instead of ever comparing again.
-  Future<IntakeAdmission> admit({
-    String? origin,
-    String? portalToken,
-    String? fetchMode,
-    String? fetchDest,
-    String path = '/',
-  }) async {
-    final decision = _project(origin, portalToken, fetchMode, fetchDest);
-    return IntakeAdmission._(
-      rejection: decision.rejection,
-      acceptedPath: decision.acceptedPath,
-      echoesCors: decision.echoesCors,
-      verboseErrors: decision.verboseErrors,
-      origin: origin,
-      normalizedOrigin: origin == null ? null : normalize(origin),
-      path: path,
-      decision: decision,
-      owner: this,
-    );
-  }
-
-  /// The pure decision projection behind both [admit] and the deprecated
-  /// [check]: one pass over the token layer and the acceptance order,
-  /// recording the verdict and the branch effects - and never mutating a
-  /// thing.
-  _AdmissionDecision _project(
-    String? origin,
-    String? portalToken,
-    String? fetchMode,
-    String? fetchDest,
-  ) {
-    final now = _now;
-    final key = origin == null ? '' : normalize(origin);
-
     // الخمول التام قرارا نهائيا على كل المسارات (لا نصف حي): المدرج
     // والتوكن والحصص كلها تتوقف — برمز مستقل لا يوهم المطور بأن
-    // إدراج الأصل ينفع، وبلا أثر تسوية إطلاقاً
+    // إدراج الأصل ينفع
     if (_disposed) {
-      return _AdmissionDecision(
-        rejection: const IntakeRejection(
-          503,
-          'protection_disposed',
-          'The protection object is disposed — create a new one',
-        ),
-        acceptedPath: null,
-        echoesCors: false,
-        verboseErrors: false,
-        stampMs: now,
-        key: key,
+      return const IntakeRejection(
+        503,
+        'protection_disposed',
+        'The protection object is disposed — create a new one',
       );
     }
-
-    var tokenAttempt = false;
-    var tokenCompared = false;
-    var tokenMatched = false;
-    IntakeRejection? rejection;
-    IntakeAdmissionPath? accepted;
-    final beyond = _BeyondOutcome();
-
-    // (0) طبقة التوكن المستقلة — قراءة خالصة. القفل يفحص قبل المقارنة:
-    // المقفول يُرد 429 حتى بتوكن صحيح — فلا مقارنة صحيحة تسقط حاجز القفل
-    // عن التخمين — والصحيح من نافذة غير مقفولة يصفرها ويعبر فورا،
-    // والمقارنة تجري هنا مرة واحدة على الأكثر لكل طلب
+    // (0) طبقة التوكن المستقلة. القفل يفحص قبل المقارنة: المقفول يُرد
+    // 429 حتى بتوكن صحيح — فلا مقارنة صحيحة تسقط حاجز القفل عن التخمين
+    // — والصحيح من نافذة غير مقفولة يصفرها ويعبر فورا.
     if (_token.isNotEmpty && portalToken != null && portalToken.isNotEmpty) {
-      tokenAttempt = true;
-      final live = _liveTokenMisses(origin, now);
-      if (live.length >= _tokenLockThreshold) {
+      final now = _now;
+      final window = _tokenMissWindow(origin, now);
+      if (window.length >= _tokenLockThreshold) {
         // القفل يمنع المقارنة وحدها: التوكن يُعامل كأنه غائب وتُقيَّم
         // سياسة الأصول — البوابة المدرجة تعبر رغم إخفاقات مهاجم مجهول،
         // ومن ترفضه السياسة أصلًا يُرَدّ 429 (لا 403: كان يحاول التخمين).
         // والسؤال الجديد لا يُفتح من وراء القفل: mayAskConsent=false
-        _projectBeyondToken(
+        // يمنع فروع الاكتشاف من إطلاق نافذة موافقة لطلب مقفل
+        final verdict = await _checkBeyondToken(
           origin,
-          key,
           fetchMode,
           fetchDest,
-          now: now,
           mayAskConsent: false,
-          out: beyond,
         );
-        if (beyond.rejection == null) {
-          accepted = beyond.accepted;
-        } else {
-          // الرأس الصادق: بقايا نافذة القفل نفسها — أقدم إخفاق يخرج من
-          // النافذة فتنكسر، فانتظار الذكرى لا «ثانيتين» لكل الرفوض
-          final lockWaitMs = live.isEmpty
-              ? _tokenLockWindowMs
-              : _tokenLockWindowMs - (now - live.first) + 500;
-          rejection = IntakeRejection(
-            429,
-            'token_locked',
-            'Too many failed token attempts — retry after a short wait',
-            retryAfterMs: lockWaitMs < 1000 ? 1000 : lockWaitMs,
-          );
-        }
-      } else {
-        tokenCompared = true;
-        tokenMatched = _fixedTimeEquals(portalToken, _token);
-        if (tokenMatched) {
-          // الصحيح يعبر فورا — ما بعد التوكن لا يجري أصلاً كاليوم،
-          // ومسار القبول: التوكن وحده على أصل غير مؤهل، والطبقتان معاً
-          // على أصل مدرج
-          accepted = _isListed(origin)
-              ? IntakeAdmissionPath.originWithToken
-              : IntakeAdmissionPath.token;
-        } else {
-          // الإخفاق يُختم عند التسوية ثم يُقيَّم ما بعد التوكن كاملاً
-          _projectBeyondToken(
-            origin,
-            key,
-            fetchMode,
-            fetchDest,
-            now: now,
-            mayAskConsent: true,
-            out: beyond,
-          );
-          rejection = beyond.rejection;
-          accepted = beyond.accepted;
-        }
-      }
-    } else {
-      _projectBeyondToken(
-        origin,
-        key,
-        fetchMode,
-        fetchDest,
-        now: now,
-        mayAskConsent: true,
-        out: beyond,
-      );
-      rejection = beyond.rejection;
-      accepted = beyond.accepted;
-    }
-
-    // صدى CORS: قرار الأهلية الخام نفسه الذي كانت echoesCorsFor تجيبه —
-    // هو ما تقرأه بوابات الخادم (الترويسة المكررة والانشغال والمهيّأ)
-    // والقبول معاً؛ وقاعدة طيّ الرفض (السؤال دائماً ورفض الانتظار
-    // للمؤهل) قاعدة قراءة ردٍّ تطبقها بوابة القبول من حقول السجل نفسها
-    final echoesCors = echoesCorsFor(origin);
-    // نص الخطأ: توكن صحيح (على نافذة غير مقفولة — المقارنة أعلاه دليلها)
-    // أو أصل مدرج؛ يُقرأ من السجل فلا مقارنة ثانية على أي طلب
-    final verboseErrors = (tokenCompared && tokenMatched) || _isListed(origin);
-
-    return _AdmissionDecision(
-      rejection: rejection,
-      acceptedPath: accepted,
-      echoesCors: echoesCors,
-      verboseErrors: verboseErrors,
-      stampMs: now,
-      key: key,
-      tokenAttempt: tokenAttempt,
-      tokenCompared: tokenCompared,
-      tokenMatched: tokenMatched,
-      quotaLimit: beyond.quotaLimit,
-      grantExisted: beyond.grantExisted,
-      reachedAskTrim: beyond.reachedAskTrim,
-      fireAsk: beyond.fireAsk,
-      reportOnlyLine: beyond.reportOnlyLine,
-    );
-  }
-
-  /// The after-the-token-layer projection into [out] - the acceptance order
-  /// branch by branch (list, allow-all, discovery, explicit reject) with
-  /// every state effect recorded, none performed.
-  void _projectBeyondToken(
-    String? origin,
-    String key,
-    String? fetchMode,
-    String? fetchDest, {
-    required int now,
-    required bool mayAskConsent,
-    required _BeyondOutcome out,
-  }) {
-    // (1) القائمة — المخزّن دائماً (موافقة الاكتشاف المحفوظة) قبل الأنماط
-    if (_isListed(origin)) {
-      final listedViaConsent =
-          origin != null && _consents[key] == OriginConsent.allowAlways;
-      // ترويستا الإرسال الحاضرتان بقيمة مخالفة نموذج مخفي أو إرسال
-      // no-cors بلا شك — تُرفضان هنا كالمسارين المتصفحيين
-      final mismatched = _fetchMetadataMismatch(fetchMode, fetchDest);
-      if (mismatched != null) {
-        out.rejection = mismatched;
-        return;
-      }
-      final listedQuota = _policy.listedPerOriginPerMinute;
-      if (listedQuota > 0) {
-        final wouldReject = _quotaWouldReject(origin, listedQuota, now);
-        out.quotaLimit = listedQuota;
-        if (wouldReject != null) {
-          if (!_policy.reportOnly) {
-            out.rejection = wouldReject;
-            return;
-          }
-          out.reportOnlyLine =
-              'intake report-only: would reject — ${wouldReject.code}: '
-              '${wouldReject.message} (origin=${originForLog(origin) ?? 'none'})';
-        }
-      }
-      out.accepted = listedViaConsent
-          ? IntakeAdmissionPath.savedConsent
-          : IntakeAdmissionPath.listed;
-      return;
-    }
-
-    // (2) مسار «الكل» — تحصيناته ملازمة له، والوضع المراقب يُعفّي الحصة
-    // وحدها
-    if (_policy.allowAllHardened) {
-      final blocked = _browserRequestBlocked(origin, fetchMode, fetchDest);
-      if (blocked != null) {
-        out.rejection = blocked;
-        return;
-      }
-      out.quotaLimit = _policy.perOriginPerMinute;
-      final wouldReject = _quotaWouldReject(origin, null, now);
-      if (wouldReject != null) {
-        if (_policy.reportOnly) {
-          out.reportOnlyLine =
-              'intake report-only: would reject — ${wouldReject.code}: '
-              '${wouldReject.message} (origin=${originForLog(origin) ?? 'none'})';
-          out.accepted = IntakeAdmissionPath.allowAll;
-          return;
-        }
-        out.rejection = wouldReject;
-        return;
-      }
-      out.accepted = IntakeAdmissionPath.allowAll;
-      return;
-    }
-
-    // (3) الاكتشاف — أصل متصفحي صالح غير مدرج يسأل المضيف مرة، وتحصينات
-    // المتصفح أولا، والمنحة والسقوف بترتيبها القديم
-    if (_policy.onUnknownOrigin != null &&
-        origin != null &&
-        origin.isNotEmpty &&
-        _validBrowserOrigin(origin)) {
-      final preBlocked = _browserRequestBlocked(origin, fetchMode, fetchDest);
-      if (preBlocked != null) {
-        out.rejection = preBlocked;
-        return;
-      }
-      final remembered = _consents[key];
-      if (remembered == OriginConsent.reject) {
-        out.rejection = const IntakeRejection(
-          403,
-          'origin_declined',
-          'The host declined this origin',
+        if (verdict == null) return null;
+        // الرأس الصادق: بقايا نافذة القفل نفسها — أقدم إخفاق يخرج من
+        // النافذة فتنكسر، فانتظار الذكرى لا «ثانيتين» لكل الرفوض
+        final lockWaitMs = window.isEmpty
+            ? _tokenLockWindowMs
+            : _tokenLockWindowMs - (now - window.first) + 500;
+        return IntakeRejection(
+          429,
+          'token_locked',
+          'Too many failed token attempts — retry after a short wait',
+          retryAfterMs: lockWaitMs < 1000 ? 1000 : lockWaitMs,
         );
-        return;
       }
-      // منحة سماح-مرة: طلب واحد خلال نافذتها القصيرة ثم تُستهلك —
-      // والمنتهية تُستهلك أيضاً كاليوم ثم يعبر الطلب إلى السقوف
-      final grant = _onceGrants[key];
-      if (grant != null) {
-        out.grantExisted = true;
-        if (now <= grant) {
-          out.accepted = IntakeAdmissionPath.onceGrant;
-          return;
-        }
+      if (_fixedTimeEquals(portalToken, _token)) {
+        window.clear();
+        return null;
       }
-      if (_pendingAsks.length >= _maxPendingAsks) {
-        out.rejection = const IntakeRejection(
-          403,
-          'origin_pending',
-          'Too many consent windows are open — answer or dismiss '
-              'them, then retry',
-        );
-        return;
-      }
-      out.reachedAskTrim = true;
-      final liveFires = _liveAskFires(now);
-      if (liveFires.length >= _maxAskFiresPerWindow) {
-        final budgetWaitMs = _askBudgetWindowMs - (now - liveFires.first) + 500;
-        out.rejection = IntakeRejection(
-          403,
-          'origin_pending',
-          'Too many consent questions lately — retry after a short wait',
-          retryAfterMs: budgetWaitMs < 1000 ? 1000 : budgetWaitMs,
-        );
-        return;
-      }
-      // الطلب المقفل لا يفتح سؤال موافقة جديداً
-      if (!mayAskConsent) {
-        out.rejection = const IntakeRejection(
-          403,
-          'origin_pending',
-          'The origin is locked; no new consent question opens for it',
-        );
-        return;
-      }
-      out.fireAsk = true;
-      out.rejection = const IntakeRejection(
-        403,
-        'origin_pending',
-        'Consent requested — retry shortly after the host answers '
-            '(see Retry-After)',
-      );
-      return;
+      window.addLast(now);
     }
 
-    // (4) لا مدرج ولا «كل» — الرفض الصريح بلا صمت
-    if (_policy.onUnknownOrigin != null) {
-      out.rejection = const IntakeRejection(
-        403,
-        'origin_unknown',
-        'Origin is not listed and cannot be confirmed — '
-            'no discovery callback is available for non-browser requests',
-      );
-      return;
-    }
-    out.rejection = const IntakeRejection(
-      403,
-      'origin_not_listed',
-      'Origin is not on the allowed list',
-    );
-  }
-
-  /// Lands the recorded decision's state effects - the exact mutations the
-  /// old inline gate performed at this position, in the same order, driven
-  /// by the recorded branch flags against the same (un interleave-able)
-  /// state. Pure reads never reach here.
-  void _applyDecision(_AdmissionDecision d, String? origin) {
-    final now = d.stampMs;
-    if (d.tokenAttempt) {
-      // الجلب نفسه يجري إنشاء النافذة وكنسها الدوري كما في بوابة القديم،
-      // والمطابقة تصفر النافذة والإخفاق يُختم
-      final window = _tokenMissWindow(origin, now);
-      if (d.tokenCompared) {
-        if (d.tokenMatched) {
-          window.clear();
-        } else {
-          window.addLast(now);
-        }
-      }
-    }
-    if (d.quotaLimit > 0) {
-      // الحكم المسجل هو المعتمد: هذه الدالة هنا لأثرها (الطابع أو سحبه
-      // مع التقليم والكنس الدوري) لا لحكمها
-      _originQuotaVerdict(origin, d.quotaLimit, now);
-    }
-    if (d.grantExisted) {
-      _onceGrants.remove(d.key);
-    }
-    if (d.reachedAskTrim) {
-      // تقليم ميزانية الأسئلة الجديدة — نفس المشي من الأمام بنفس الشرط
-      while (_askFireStamps.isNotEmpty &&
-          now - _askFireStamps.first > _askBudgetWindowMs) {
-        _askFireStamps.removeFirst();
-      }
-    }
-    if (d.fireAsk) {
-      _fireAsk(d.key, origin!);
-    }
-    final line = d.reportOnlyLine;
-    if (line != null) {
-      telemetry?.warn(line, category: BridgeCategory.security);
-    }
-  }
-
-  /// The shared counter+log path: the protection's own rejections (from
-  /// [IntakeAdmission.settle]) and the host-authority ones (via
-  /// [IntakeAdmission.noteAuthorityReject]) alike.
-  void _noteAuthority(String reason, String? origin) {
-    _countRejection();
-    logRejection(reason, origin);
-  }
-
-  /// Read-only peek at the live (unexpired) stamps of [origin]'s miss
-  /// window - the same front-trim walk the mutating fetch performs, without
-  /// creating the window or touching the sweep bookkeeping.
-  List<int> _liveTokenMisses(String? origin, int now) {
-    final Queue<int>? window = origin == null
-        ? _anonTokenMisses
-        : _tokenMissWindows[normalize(origin)];
-    if (window == null) return const <int>[];
-    final live = <int>[];
-    var trimming = true;
-    for (final ts in window) {
-      if (trimming && now - ts > _tokenLockWindowMs) continue;
-      trimming = false;
-      live.add(ts);
-    }
-    return live;
-  }
-
-  /// Read-only peek at the per-origin quota verdict: the same front-trim,
-  /// stamp, and compare the mutating quota call performs - no window
-  /// creation, no sweep, no stamp.
-  IntakeRejection? _quotaWouldReject(
-    String? origin,
-    int? limitOverride,
-    int now,
-  ) {
-    if (origin == null) return null;
-    final window = _originWindows[normalize(origin)];
-    final limit = limitOverride ?? _policy.perOriginPerMinute;
-    var live = 0;
-    int? firstLive;
-    var trimming = true;
-    if (window != null) {
-      for (final ts in window) {
-        if (trimming && now - ts > _windowMs) continue;
-        trimming = false;
-        firstLive ??= ts;
-        live++;
-      }
-    }
-    if (live + 1 > limit) {
-      // بقايا نافذة الحصة: أقدم طلب حي يخرج منها فتفرغ خانة للتابع
-      final quotaWaitMs = firstLive == null
-          ? _windowMs
-          : _windowMs - (now - firstLive) + 500;
-      return IntakeRejection(
-        429,
-        'origin_rate_limited',
-        'Rate limit exceeded for this origin — retry after a short wait',
-        retryAfterMs: quotaWaitMs < 1000 ? 1000 : quotaWaitMs,
-      );
-    }
-    return null;
-  }
-
-  /// Read-only peek at the live ask-fire stamps - the same front-trim walk
-  /// the mutating budget trim performs.
-  List<int> _liveAskFires(int now) {
-    final live = <int>[];
-    var trimming = true;
-    for (final ts in _askFireStamps) {
-      if (trimming && now - ts > _askBudgetWindowMs) continue;
-      trimming = false;
-      live.add(ts);
-    }
-    return live;
+    return _checkBeyondToken(origin, fetchMode, fetchDest);
   }
 
   /// The miss window a token attempt counts against: per-origin for web
@@ -1392,6 +743,166 @@ class IntakeProtection {
       }
     }
     return window;
+  }
+
+  /// Acceptance after the token layer: the list, then allow-all with its hardening, then discovery.
+  ///
+  /// [mayAskConsent] is false behind the token lockout: a locked request
+  /// whose origin the policy does not accept is refused without opening a
+  /// new consent question - the caller answers `429 token_locked` for it.
+  Future<IntakeRejection?> _checkBeyondToken(
+    String? origin,
+    String? fetchMode,
+    String? fetchDest, {
+    bool mayAskConsent = true,
+  }) async {
+    // (1) القائمة — المدرج يعبر (ومنه من حُفظ سماحه الدائم بالاكتشاف)،
+    // ومع حصة اختيارية إن فعّلها المضيف: المدرج المخترق وحده من
+    // يملأ المقاعد بلا حد، فالحصة هنا تحصر ضرره بنافذته ولا تمس
+    // بقية المدرجين
+    if (_isListed(origin)) {
+      // ترويستا الإرسال الحاضرتان بقيمة مخالفة نموذج مخفي أو إرسال
+      // no-cors بلا شك — تُرفضان هنا كالمسارين المتصفحيين
+      // (نموذج text/plain يمر بوابة الأنواع المسموحة فيغلقه هذا
+      // الفحص). غيابهما يبقى ممراً هنا: العملاء غير المتصفحات المدرجة
+      // لا يرسلونهما
+      final mismatched = _fetchMetadataMismatch(fetchMode, fetchDest);
+      if (mismatched != null) return mismatched;
+      final listedQuota = _policy.listedPerOriginPerMinute;
+      if (listedQuota > 0) {
+        final quota = _originQuotaVerdict(origin, listedQuota);
+        if (quota != null) {
+          // وضع المراقبة يحرس الحصتين معاً — حصة المدرج حصة كحصة
+          // «الكل»: تُسجل كان-سيرفض ويُخدم الطلب
+          if (!_policy.reportOnly) return quota;
+          telemetry?.warn(
+            'intake report-only: would reject — ${quota.code}: '
+            '${quota.message} (origin=${originForLog(origin) ?? 'none'})',
+            category: BridgeCategory.security,
+          );
+        }
+      }
+      return null;
+    }
+
+    // (2) مسار «الكل» — تحصيناته ملازمة له. فحوص شكل الطلب (أصل صالح
+    // + ترويستا Sec-Fetch) تنفَّذ دائماً حتى في وضع المراقبة: لا fetch
+    // شرعيا يفشلها قط فمراقبتها لا تقيس شيئا، وإعفاؤها يفتح الإرسال
+    // الصامت (نموذج مخفي/beacon بلا حاجة لقراءة الرد). الوضع المراقب
+    // يُعفّي الحصة وحدها — هي محل القياس يوم التبديل.
+    if (_policy.allowAllHardened) {
+      final blocked = _browserRequestBlocked(origin, fetchMode, fetchDest);
+      if (blocked != null) return blocked;
+      final quota = _originQuotaVerdict(origin);
+      if (quota == null) return null;
+      if (_policy.reportOnly) {
+        telemetry?.warn(
+          'intake report-only: would reject — ${quota.code}: '
+          '${quota.message} (origin=${originForLog(origin) ?? 'none'})',
+          category: BridgeCategory.security,
+        );
+        return null;
+      }
+      return quota;
+    }
+
+    // (3) الاكتشاف — أصل متصفحي صالح غير مدرج يسأل المضيف مرة (شرط 4).
+    // تحصينات المتصفح أولا: لا يُسأل
+    // المستخدم عن نموذج مخفي ولا عن أصل غير https — السؤال للمتصفح
+    // الصادق وحده، ونافذته مهلوسة ومسقوفة كي لا تكون وسيلة إغراق
+    if (_policy.onUnknownOrigin != null &&
+        origin != null &&
+        origin.isNotEmpty &&
+        _validBrowserOrigin(origin)) {
+      final preBlocked = _browserRequestBlocked(origin, fetchMode, fetchDest);
+      if (preBlocked != null) return preBlocked;
+      final key = normalize(origin);
+      final remembered = _consents[key];
+      if (remembered == OriginConsent.reject) {
+        return const IntakeRejection(
+          403,
+          'origin_declined',
+          'The host declined this origin',
+        );
+      }
+      // منحة سماح-مرة: طلب واحد خلال نافذتها القصيرة ثم تُستهلك — لا
+      // تمرير دفعي لكل المنتظرين (الجواب الواحد لا يجيز غير الطلب
+      // الذي استهلكها)
+      final grant = _onceGrants[key];
+      if (grant != null) {
+        _onceGrants.remove(key);
+        if (_now <= grant) return null;
+      }
+      // السؤال غير المعطِّل: الطلب يطلق النافذة ويعود فورا — لا منتظر
+      // يمسك مقعد خادم (المقاعد الستة عشر ميزانية العمل الحي كلها:
+      // من يمسك مقعداً بلا عمل يعطل المدرج إلى المهلة الكلية)،
+      // والنافذة تبقى محجوزة حتى الجواب أو أقصى عمرها.
+      // السقف هنا وحده — بعد المنحة والمرفوض المحفوظ كي لا يحجبهما
+      // مهاجم يشغل النوافذ الثلاث
+      if (_pendingAsks.length >= _maxPendingAsks) {
+        return const IntakeRejection(
+          403,
+          'origin_pending',
+          'Too many consent windows are open — answer or dismiss '
+              'them, then retry',
+        );
+      }
+      // ميزانية الأسئلة الجديدة زمنيا: سقف النوافذ الثلاث يقيد اللحظة
+      // لا الزمن — تدوير النطاقات الفرعية يفتح أسئلة بلا نهاية. فوق
+      // الميزانية يعود origin_pending بلا سؤال جديد حتى يفرغ كبارها
+      final fireNow = _now;
+      while (_askFireStamps.isNotEmpty &&
+          fireNow - _askFireStamps.first > _askBudgetWindowMs) {
+        _askFireStamps.removeFirst();
+      }
+      if (_askFireStamps.length >= _maxAskFiresPerWindow) {
+        // بقايا نافذة الميزانية نفسها (عشر دقائق): أقدم سؤال يخرج منها
+        // فتتفرغ خانة — الرأس يقول الانتظار الحقيقي لا ثابتاً مضللا
+        final budgetWaitMs =
+            _askBudgetWindowMs - (fireNow - _askFireStamps.first) + 500;
+        return IntakeRejection(
+          403,
+          'origin_pending',
+          'Too many consent questions lately — retry after a short wait',
+          retryAfterMs: budgetWaitMs < 1000 ? 1000 : budgetWaitMs,
+        );
+      }
+      // الطلب المقفل لا يفتح سؤال موافقة جديداً: نوافذ الموافقة لا تُطلَق
+      // من وراء قفل تخمين التوكن حتى لو كانت ميزانية الأسئلة تسمح —
+      // رفضه هنا غير صفري فيحوله الاستدعاءُ المقفلُ إلى 429 token_locked
+      if (!mayAskConsent) {
+        return const IntakeRejection(
+          403,
+          'origin_pending',
+          'The origin is locked; no new consent question opens for it',
+        );
+      }
+      _fireAsk(key, origin);
+      return const IntakeRejection(
+        403,
+        'origin_pending',
+        'Consent requested — retry shortly after the host answers '
+            '(see Retry-After)',
+      );
+    }
+
+    // (4) لا مدرج ولا «كل» — الرفض الصريح بلا صمت
+    if (_policy.onUnknownOrigin != null) {
+      return const IntakeRejection(
+        403,
+        'origin_unknown',
+        'Origin is not listed and cannot be confirmed — '
+            'no discovery callback is available for non-browser requests',
+      );
+    }
+    // الأصل قيمة يتحكم فيها الخصم: الرسالة ثابتة بلا استيفاء — القيمة
+    // تجري في حقل origin= المعقم وحده (الخادم يمرر الرسالة سبباً إلى
+    // noteRejection فأي قيمة خام هنا تُنسخ حرفياً إلى السجل)
+    return const IntakeRejection(
+      403,
+      'origin_not_listed',
+      'Origin is not on the allowed list',
+    );
   }
 
   /// Launch a question window or join the open one's queue - without waiting.
@@ -1578,16 +1089,11 @@ class IntakeProtection {
   /// counts). A rejected request's stamp is withdrawn right away, so
   /// rejections never occupy the window and the honest wait is measured
   /// from the oldest admitted request; watching passes through the same
-  /// branch, so a would-reject leaves no stamp either. [nowOverride] lets
-  /// the settle path stamp with the projection's own clock reading.
-  IntakeRejection? _originQuotaVerdict(
-    String? origin, [
-    int? limitOverride,
-    int? nowOverride,
-  ]) {
+  /// branch, so a would-reject leaves no stamp either.
+  IntakeRejection? _originQuotaVerdict(String? origin, [int? limitOverride]) {
     if (origin == null) return null;
     final key = normalize(origin);
-    final now = nowOverride ?? _now;
+    final now = _now;
     var window = _originWindows[key];
     if (window == null) {
       window = Queue<int>();
@@ -1657,12 +1163,7 @@ class IntakeProtection {
   /// Anyone else gets no ACAO header at all, so the browser blocks reading
   /// the reply: echoing to everyone equaled '*' and would open token
   /// guessing from any page.
-  /// Kept for hosts until the planned removal: the admission record
-  /// carries the decision as [IntakeAdmission.echoesCors] instead.
-  @Deprecated(
-    'Read IntakeAdmission.echoesCors from the record built by admit() '
-    '(removal planned in 0.3.0)',
-  )
+  /// Used by this package's server, not a stable host-facing interface.
   bool echoesCorsFor(String? origin) {
     if (origin == null || origin.isEmpty) return false;
     if (_isListed(origin)) return true;
@@ -1691,14 +1192,7 @@ class IntakeProtection {
   /// too - this decision never compares a token whose window [check] is
   /// refusing on, so a locked origin cannot probe the token through the
   /// host error text.
-  /// Kept for hosts until the planned removal: the admission record
-  /// carries the decision as [IntakeAdmission.verboseErrors] - built with
-  /// the single comparison [admit] already ran - so no caller compares a
-  /// second time.
-  @Deprecated(
-    'Read IntakeAdmission.verboseErrors from the record built by admit() '
-    '(removal planned in 0.3.0)',
-  )
+  /// Used by this package's server, not a stable host-facing interface.
   bool verboseErrorsFor(String? origin, String? portalToken) {
     if (!_tokenWindowLocked(origin) &&
         _token.isNotEmpty &&
@@ -1733,30 +1227,16 @@ class IntakeProtection {
 
   /// A rejection from outside the protection patterns (host authorities) goes
   /// through the same counter and log path - denial is never silent.
-  /// Kept for hosts until the planned removal: the admission record counts
-  /// its own rejections on [IntakeAdmission.settle], and rejections decided
-  /// outside the protection go through
-  /// [IntakeAdmission.noteAuthorityReject].
-  @Deprecated(
-    'The admission record counts and logs its own rejections on settle(); '
-    'for rejections decided outside the protection use '
-    'IntakeAdmission.noteAuthorityReject (removal planned in 0.3.0)',
-  )
+  /// Used by this package's server, not a stable host-facing interface.
   void noteRejection(String reason, [String? origin]) {
-    _noteAuthority(reason, origin);
+    _countRejection();
+    logRejection(reason, origin);
   }
 
   /// Writes one throttled security-log line for a rejection (the counter
   /// lives in [noteRejection]): at most one line per second, with the
-  /// suppressed count folded into the next emitted line.
-  /// Kept for hosts until the planned removal: the admission record writes
-  /// its rejection line on settle, and
-  /// [IntakeAdmission.noteAuthorityReject] routes the external ones here.
-  @Deprecated(
-    'The admission record writes the rejection line on settle(); for '
-    'rejections decided outside the protection use '
-    'IntakeAdmission.noteAuthorityReject (removal planned in 0.3.0)',
-  )
+  /// suppressed count folded into the next emitted line. Used by this
+  /// package's server, not a stable host-facing interface.
   void logRejection(String? reason, String? origin) {
     // عدم الصمت مع كبح الطوفان: سطر واحد في الثانية كحد أقصى بنمط خنق
     // معرف الارتباط — كل رفض يعدّ عدّا (فوق) والسطر يخرج بما كُتم بعده
@@ -1822,18 +1302,6 @@ class IntakeProtection {
     _askSequence.clear();
   }
 
-  /// How many constant-time token comparisons this object has run since
-  /// construction. Observability seam - the read-only counter that pins the
-  /// admission contract "a token is compared at most once per request": the
-  /// projection compares once and the record carries the outcome, so a full
-  /// server request over the admission path lands exactly one here. A test
-  /// reads deltas across requests; the wire behavior never reads it.
-  int _tokenComparisons = 0;
-
-  /// The read-only count of token comparisons so far - see
-  /// [_tokenComparisons].
-  int get tokenComparisonCount => _tokenComparisons;
-
   /// Constant-time comparison - no timing leak of length or first-diff position.
   ///
   /// Checking length before the loop leaked the token length early: a reject
@@ -1852,7 +1320,6 @@ class IntakeProtection {
       256; // حشوة الدنيا — الحلقة تمتد لطول السر المضبوط إن زاد
 
   bool _fixedTimeEquals(String supplied, String secret) {
-    _tokenComparisons++;
     final ab = utf8.encode(supplied);
     final bb = utf8.encode(secret);
     var diff = ab.length ^ bb.length;

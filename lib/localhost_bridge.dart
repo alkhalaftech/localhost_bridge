@@ -8,6 +8,5 @@ export 'src/arrival_guard.dart';
 export 'src/bridge_config.dart';
 export 'src/bridge_telemetry.dart';
 export 'src/intake_protection.dart';
-export 'src/intake_rejections.dart';
 export 'src/local_intake_server.dart';
 export 'src/trusted_command.dart';
