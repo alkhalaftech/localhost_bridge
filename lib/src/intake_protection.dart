@@ -512,6 +512,17 @@ class IntakeProtection {
   /// lives in update() alone: a legitimately saved state keeps loading at
   /// startup with a rotation warning (see updateFromSaved).
   static const _minTokenDistinctChars = 8;
+
+  /// The `X-Bridge-Token` header length cap the intake enforces on the
+  /// wire, in UTF-8 bytes: the same number the server's token-length gate
+  /// refuses with `400 token_too_long` before any comparison. update()
+  /// refuses a configured token over this ceiling with the same number,
+  /// so a correct token that every request would reject at the gate can
+  /// never sit configured silently - the constant-time comparison would
+  /// never see it. One constant, both sides of the wire. The value is
+  /// internal, the name public, so a host configuring tokens can read the
+  /// ceiling it must stay under.
+  static const maxBridgeTokenHeaderBytes = 1024;
   final Queue<int> _anonTokenMisses = Queue<int>();
 
   /// Origin quota windows: stamps trimmed from the front of a queue, and the
@@ -566,8 +577,12 @@ class IntakeProtection {
   /// sessions is the host's business).
   ///
   /// Throws [ArgumentError] for a configured token below the length floor
-  /// of 32 UTF-8 bytes BEFORE anything is applied, so a host that catches
-  /// the error keeps its previous protection state untouched.
+  /// of 32 UTF-8 bytes, or over the [maxBridgeTokenHeaderBytes] header cap
+  /// the intake enforces on the wire (such a token would be refused by
+  /// every request before any comparison - a correct secret that can
+  /// never match must not sit configured silently), BEFORE anything is
+  /// applied, so a host that catches the error keeps its previous
+  /// protection state untouched.
   /// The character-diversity floor refuses the same way, for a token the
   /// call passes explicitly; a token INHERITED from the current state
   /// (a policy-only call) is exempt - it is the same legitimately saved
@@ -596,6 +611,22 @@ class IntakeProtection {
         'is $tokenBytes bytes (UTF-8) - a bridge token needs at least '
             '$_minTokenBytes random bytes (generateBridgeToken produces one); '
             'a short token is guessable from a web page',
+      );
+    }
+    // سقف ترويسة التوكن: توكن مضبوط فوق ما تقبله الترويسة على السلك
+    // يستحيل مطابقته — كل طلب حامل له يُرد token_too_long قبل أي
+    // مقارنة فيظل سرٌّ صحيح منضبطاً بلا أثر (نقض عملي لـ«الصحيح لا
+    // يُرفض أبداً»). الرفض وقت الإعداد بلا أثر جانبي كأخويه، والرسالة
+    // تسمي البديل
+    if (tokenBytes > maxBridgeTokenHeaderBytes) {
+      throw ArgumentError.value(
+        tokenBytes,
+        'token',
+        'is $tokenBytes bytes (UTF-8) - over the '
+            '$maxBridgeTokenHeaderBytes-byte header cap the intake '
+            'enforces on the wire (token_too_long), so no request could '
+            'ever match it; use generateBridgeToken, whose tokens sit '
+            'far below the cap',
       );
     }
     // فحص التنوع فوق أرضية الطول: توكن متطابق المحارف أو فقيرها قابل

@@ -543,7 +543,8 @@ class LocalIntakeServer {
   /// Origin gate - and this gate precedes the single-value header gate and
   /// the method gate, the same order the Origin gates keep. Real tokens
   /// (`generateBridgeToken` produces 64 hex characters) sit far below it.
-  static const _maxTokenHeaderBytes = 1024;
+  static const _maxTokenHeaderBytes =
+      IntakeProtection.maxBridgeTokenHeaderBytes;
 
   /// The pacing window in milliseconds for every throttled warning line
   /// (the reserved-path observation, the seat-busy reject, the

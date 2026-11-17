@@ -467,4 +467,55 @@ void main() {
       );
     },
   );
+
+  test('update() refuses a configured token over the 1,024-byte header cap '
+      '- a correct token no request could match must not sit configured '
+      'silently', () {
+    // سقف الترويسة طرفاً بالطرفين: المقارنة الزمنية-الثابتة لا ترى
+    // الترويسة الأطول من السقف أصلاً (بوابة token_too_long تردّها قبل
+    // أي مقارنة)، فتوكن مضبوط فوق السقف يستحيل مطابقته على السلك ويظل
+    // منضبطاً بصمت — النقض العملي لـ«الصحيح لا يُرفض أبداً». الرفض
+    // وقت الإعداد برسالة تسمي الطول والبديل، بلا أثر جانبي: ما كان
+    // مضبوطاً قبله باقٍ فعالاً
+    final alphabet = 'abcdefghijklmnopqrstuvwxyz0123456789ABCDEF';
+    final overCap = List.generate(
+      1100,
+      (i) => alphabet[i % alphabet.length],
+    ).join();
+    final p = IntakeProtection()..update(token: _t64);
+    Object? caught;
+    try {
+      p.update(token: overCap);
+    } catch (e) {
+      caught = e;
+    }
+    expect(caught, isArgumentError);
+    expect(
+      '$caught',
+      contains('generateBridgeToken'),
+      reason: 'the error names the alternative the host should reach for',
+    );
+    expect(
+      '$caught',
+      contains('1024'),
+      reason: 'the error names the ceiling the wire enforces',
+    );
+    // والرمي بلا أثر جانبي: التوكن السابق السليم باقٍ يطابق
+    expect(
+      p.admit(origin: null, bridgeToken: _t64).then((a) => a.acceptedPath),
+      completion(IntakeAdmissionPath.token),
+      reason: 'the refused update leaves the previous token untouched',
+    );
+    // وعند السقف بالضبط يمر الإعداد: السقف حدٌّ أقصى مشمول لا مستثنى
+    final atCap = List.generate(
+      IntakeProtection.maxBridgeTokenHeaderBytes,
+      (i) => alphabet[i % alphabet.length],
+    ).join();
+    final at = IntakeProtection()..update(token: atCap);
+    expect(
+      at.admit(origin: null, bridgeToken: atCap).then((a) => a.acceptedPath),
+      completion(IntakeAdmissionPath.token),
+      reason: 'a token exactly at the cap configures and matches',
+    );
+  });
 }
