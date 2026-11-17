@@ -92,7 +92,7 @@ void main() {
       expect(
         await t.check(
           origin: null,
-          portalToken:
+          bridgeToken:
               'a3f1c52e94b7d068f5e2a9c4b1d7e8036f9a2c5e8b1d7f04a6c9e2d5f8b3a1c7',
         ),
         isNull,
@@ -545,18 +545,18 @@ void main() {
         expect(
           await p.check(
             origin: null,
-            portalToken:
+            bridgeToken:
                 'a3f1c52e94b7d068f5e2a9c4b1d7e8036f9a2c5e8b1d7f04a6c9e2d5f8b3a1c7',
           ),
           isNull,
         );
         expect(
-          await p.check(origin: 'https://portal.example', portalToken: 'WRONG'),
+          await p.check(origin: 'https://portal.example', bridgeToken: 'WRONG'),
           isNull,
           reason: 'a listed origin is enough',
         );
         expect(
-          await p.check(origin: 'https://other.example', portalToken: 'x'),
+          await p.check(origin: 'https://other.example', bridgeToken: 'x'),
           isNotNull,
         );
       },
@@ -570,7 +570,7 @@ void main() {
           final p = IntakeProtection()
             ..update(policy: const OriginPolicy(), token: token);
           expect(
-            await p.check(origin: null, portalToken: token),
+            await p.check(origin: null, bridgeToken: token),
             isNull,
             reason: 'a correct token of length $len must be accepted',
           );
@@ -632,7 +632,7 @@ void main() {
           reason: 'a settings warning does not pollute the rejection counter',
         );
         expect(
-          await p.check(origin: null, portalToken: overPadToken),
+          await p.check(origin: null, bridgeToken: overPadToken),
           isNull,
           reason: 'full-length comparison - accepted as is',
         );
@@ -1636,7 +1636,7 @@ void main() {
         final sw = Stopwatch()..start();
         // خمسة إخفاقات من أصل واحد تكفي لميزانيته وحده — بلا نوم
         for (var i = 0; i < 5; i++) {
-          await p.check(origin: 'https://guess.example', portalToken: 'WRONG');
+          await p.check(origin: 'https://guess.example', bridgeToken: 'WRONG');
         }
         sw.stop();
         expect(
@@ -1648,7 +1648,7 @@ void main() {
         // للتخمين الخاطئ لا للصحيح
         final sixthWrong = await p.check(
           origin: 'https://guess.example',
-          portalToken: 'WRONG',
+          bridgeToken: 'WRONG',
         );
         expect(sixthWrong!.status, 429);
         expect(sixthWrong.code, 'token_locked');
@@ -1656,7 +1656,7 @@ void main() {
         // إشارة لا رافض، وما فوق الميزانية رفضٌ للخاطئ لا للصحيح
         final correctAfterFlood = await p.check(
           origin: 'https://guess.example',
-          portalToken:
+          bridgeToken:
               'a3f1c52e94b7d068f5e2a9c4b1d7e8036f9a2c5e8b1d7f04a6c9e2d5f8b3a1c7',
         );
         expect(
@@ -1668,7 +1668,7 @@ void main() {
         // للبوابة الشرعية
         final other = await p.check(
           origin: 'https://legit.example',
-          portalToken:
+          bridgeToken:
               'a3f1c52e94b7d068f5e2a9c4b1d7e8036f9a2c5e8b1d7f04a6c9e2d5f8b3a1c7',
         );
         expect(
@@ -1679,7 +1679,7 @@ void main() {
               'legitimate origin',
         );
         // وبلا أصل: نافذة مشتركة مستقلة — التكامل المحلي لم ينفق بعد
-        final anon = await p.check(origin: null, portalToken: 'WRONG');
+        final anon = await p.check(origin: null, bridgeToken: 'WRONG');
         expect(
           anon!.code,
           isNot('token_locked'),
@@ -1688,7 +1688,7 @@ void main() {
         expect(
           await p.check(
             origin: null,
-            portalToken:
+            bridgeToken:
                 'a3f1c52e94b7d068f5e2a9c4b1d7e8036f9a2c5e8b1d7f04a6c9e2d5f8b3a1c7',
           ),
           isNull,
@@ -1707,11 +1707,11 @@ void main() {
                 'a3f1c52e94b7d068f5e2a9c4b1d7e8036f9a2c5e8b1d7f04a6c9e2d5f8b3a1c7',
           );
         for (var i = 0; i < 5; i++) {
-          await p.check(origin: null, portalToken: 'WRONG');
+          await p.check(origin: null, bridgeToken: 'WRONG');
         }
         // الخاطئ السادس فوق الميزانية المشتركة: يُرد — والصحيح بعده
         // يُقارن ويُقبَل أياً كان تاريخ الإخفاقات
-        final wrongSixth = await p.check(origin: null, portalToken: 'WRONG');
+        final wrongSixth = await p.check(origin: null, bridgeToken: 'WRONG');
         expect(
           wrongSixth!.code,
           'token_locked',
@@ -1722,7 +1722,7 @@ void main() {
         expect(
           await p.check(
             origin: null,
-            portalToken:
+            bridgeToken:
                 'a3f1c52e94b7d068f5e2a9c4b1d7e8036f9a2c5e8b1d7f04a6c9e2d5f8b3a1c7',
           ),
           isNull,
@@ -1731,7 +1731,7 @@ void main() {
         expect(
           await p.check(
             origin: 'https://web.example',
-            portalToken:
+            bridgeToken:
                 'a3f1c52e94b7d068f5e2a9c4b1d7e8036f9a2c5e8b1d7f04a6c9e2d5f8b3a1c7',
           ),
           isNull,
@@ -1817,7 +1817,7 @@ void main() {
           reason: 'the new allowlist was not applied - the old one still rules',
         );
         expect(
-          p.check(origin: 'https://evil.example', portalToken: t64),
+          p.check(origin: 'https://evil.example', bridgeToken: t64),
           completion(isNull),
           reason:
               'the old token still works - the failed update changed nothing',
@@ -1842,7 +1842,7 @@ void main() {
         ),
       );
       expect(
-        await p.check(origin: 'https://elsewhere.example', portalToken: t64),
+        await p.check(origin: 'https://elsewhere.example', bridgeToken: t64),
         isNull,
         reason: 'the token layer survives a policy-only update',
       );
@@ -1860,7 +1860,7 @@ void main() {
       expect(
         await p.check(
           origin: 'https://elsewhere.example',
-          portalToken: other64,
+          bridgeToken: other64,
         ),
         isNull,
         reason: 'the new token is active alongside the kept list',
@@ -1879,7 +1879,7 @@ void main() {
           reason:
               'boot says once that the token layer is off, never crash-loops',
         );
-        final verdict = await p.check(origin: null, portalToken: 'SHORT');
+        final verdict = await p.check(origin: null, bridgeToken: 'SHORT');
         expect(
           verdict,
           isNotNull,
@@ -2928,7 +2928,7 @@ void main() {
         for (var i = 0; i < 1000; i++) {
           final r = await p.check(
             origin: 'https://stale$i.example',
-            portalToken: 'WRONG',
+            bridgeToken: 'WRONG',
           );
           expect(r!.code, 'origin_not_listed');
         }
@@ -2937,7 +2937,7 @@ void main() {
         expect(
           (await p.check(
             origin: 'https://fresh.example',
-            portalToken: 'WRONG',
+            bridgeToken: 'WRONG',
           ))!.code,
           'origin_not_listed',
         );
@@ -2947,20 +2947,20 @@ void main() {
         expect(
           await p.check(
             origin: 'https://stale0.example',
-            portalToken:
+            bridgeToken:
                 'a3f1c52e94b7d068f5e2a9c4b1d7e8036f9a2c5e8b1d7f04a6c9e2d5f8b3a1c7',
           ),
           isNull,
           reason: 'an expired window never haunts its origin',
         );
         for (var i = 0; i < 5; i++) {
-          await p.check(origin: 'https://stale0.example', portalToken: 'WRONG');
+          await p.check(origin: 'https://stale0.example', bridgeToken: 'WRONG');
         }
         // الخاطئ السادس فوق الميزانية المنفقة يُرد بانتظار يحسب
         // الإخفاقات الطازجة وحدها فالمعلن صادق — والصحيح بعده يُقبل
         final locked = await p.check(
           origin: 'https://stale0.example',
-          portalToken: 'WRONG',
+          bridgeToken: 'WRONG',
         );
         expect(locked!.code, 'token_locked');
         expect(
@@ -2973,7 +2973,7 @@ void main() {
         expect(
           await p.check(
             origin: 'https://stale0.example',
-            portalToken:
+            bridgeToken:
                 'a3f1c52e94b7d068f5e2a9c4b1d7e8036f9a2c5e8b1d7f04a6c9e2d5f8b3a1c7',
           ),
           isNull,
@@ -2997,7 +2997,7 @@ void main() {
       for (var i = 0; i < 5; i++) {
         await p.check(
           origin: 'https://guess.example',
-          portalToken: 'WRONG',
+          bridgeToken: 'WRONG',
           fetchMode: 'cors',
           fetchDest: 'empty',
         );
@@ -3009,7 +3009,7 @@ void main() {
       expect(
         await p.check(
           origin: 'https://guess.example',
-          portalToken: t64,
+          bridgeToken: t64,
           fetchMode: 'cors',
           fetchDest: 'empty',
         ),
@@ -3026,10 +3026,10 @@ void main() {
       // النافذة المشتركة للطلبات بلا Origin تحكم القرار نفسه: الصحيح
       // يُقبل ولا يُخفى نصه
       for (var i = 0; i < 5; i++) {
-        await p.check(origin: null, portalToken: 'WRONG');
+        await p.check(origin: null, bridgeToken: 'WRONG');
       }
       expect(
-        await p.check(origin: null, portalToken: t64),
+        await p.check(origin: null, bridgeToken: t64),
         isNull,
         reason: 'the shared originless window never refuses the correct token',
       );
@@ -3078,7 +3078,7 @@ void main() {
         for (var i = 0; i < 5; i++) {
           await p.check(
             origin: 'https://guess.example',
-            portalToken: 'WRONG',
+            bridgeToken: 'WRONG',
             fetchMode: 'cors',
             fetchDest: 'empty',
           );
@@ -3087,7 +3087,7 @@ void main() {
         expect(
           await p.check(
             origin: 'https://guess.example',
-            portalToken: t64,
+            bridgeToken: t64,
             fetchMode: 'cors',
             fetchDest: 'empty',
           ),
@@ -3122,7 +3122,7 @@ void main() {
           expect(
             (await p.check(
               origin: 'https://fresh.example',
-              portalToken: 'WRONG',
+              bridgeToken: 'WRONG',
               fetchMode: 'cors',
               fetchDest: 'empty',
             ))!.code,
@@ -3136,7 +3136,7 @@ void main() {
         // ميزانية الأسئلة تسمح — والصحيح فوق الميزانية نفسها يُقبل
         final sixth = await p.check(
           origin: 'https://fresh.example',
-          portalToken: 'WRONG',
+          bridgeToken: 'WRONG',
           fetchMode: 'cors',
           fetchDest: 'empty',
         );
@@ -3152,7 +3152,7 @@ void main() {
         expect(
           await p.check(
             origin: 'https://fresh.example',
-            portalToken: t64,
+            bridgeToken: t64,
             fetchMode: 'cors',
             fetchDest: 'empty',
           ),

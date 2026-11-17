@@ -248,13 +248,15 @@ void main() {
 
   test('no legacy intake name survives in lib outside its rejection site', () {
     // عقد بوابات CI محلياً: المولّد والرمز القديمان صفرٌ في lib إطلاقاً،
-    // واسم الترويسة القديم لا يظهر إلا في موضع رفضه الموثق الوحيد (كشف
-    // الاسم المتقاعد وتحذيره في الخادم) — أي ظهور ثالث أو في ملف آخر
-    // يعني عودة الاسم القديم واجهةً فيفشل الباب
+    // وهجاء الوسيط المتقاعد (portalToken) صفر كذلك — واجهة الحزمة
+    // المنشورة تحمل bridgeToken حصراً — واسم الترويسة القديم لا يظهر إلا
+    // في موضع رفضه الموثق الوحيد (كشف الاسم المتقاعد وتحذيره في الخادم)
+    // — أي ظهور ثالث أو في ملف آخر يعني عودة الاسم القديم واجهةً فيفشل
+    // الباب
     final generatorHits = <String>[];
     final legacyByFile = <String, int>{};
     const retiredHeader = 'X-Portal-Token';
-    final pattern = RegExp('generatePortalToken|unknown-portal');
+    final pattern = RegExp('generatePortalToken|unknown-portal|portalToken');
     for (final e in Directory('lib').listSync(recursive: true)) {
       if (e is! File || !e.path.endsWith('.dart')) continue;
       final lines = e.readAsLinesSync();
@@ -271,8 +273,9 @@ void main() {
       generatorHits,
       isEmpty,
       reason:
-          'generatePortalToken and unknown-portal must stay removed: '
-          '$generatorHits',
+          'generatePortalToken, unknown-portal, and the portalToken '
+          'parameter spelling must stay removed - the interface carries '
+          'bridgeToken: $generatorHits',
     );
     expect(
       legacyByFile.keys,

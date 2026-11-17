@@ -398,14 +398,14 @@ void main() {
         final p = IntakeProtection(telemetry: rec)
           ..update(policy: const OriginPolicy(), token: secret);
         expect(
-          await p.check(origin: null, portalToken: secret),
+          await p.check(origin: null, bridgeToken: secret),
           isNull,
           reason: 'the correct secret of $len bytes passes the comparison',
         );
         final wrongFirst =
             '${secret[0] == '9' ? '0' : '9'}${secret.substring(1)}';
         expect(
-          await p.check(origin: null, portalToken: wrongFirst),
+          await p.check(origin: null, bridgeToken: wrongFirst),
           isNotNull,
           reason: 'a difference at the first byte of $len bytes is caught',
         );
@@ -413,12 +413,12 @@ void main() {
         final wrongLast =
             '${secret.substring(0, len - 1)}${last == 'z' ? 'y' : 'z'}';
         expect(
-          await p.check(origin: null, portalToken: wrongLast),
+          await p.check(origin: null, bridgeToken: wrongLast),
           isNotNull,
           reason: 'a difference at the last byte of $len bytes is caught',
         );
         expect(
-          await p.check(origin: null, portalToken: '$secret-tail'),
+          await p.check(origin: null, bridgeToken: '$secret-tail'),
           isNotNull,
           reason:
               'a longer token with a correct prefix is caught by the '
@@ -427,7 +427,7 @@ void main() {
         expect(
           await p.check(
             origin: null,
-            portalToken: secret.substring(0, len - 1),
+            bridgeToken: secret.substring(0, len - 1),
           ),
           isNotNull,
           reason:
@@ -435,7 +435,7 @@ void main() {
               'length term',
         );
         expect(
-          await p.check(origin: null, portalToken: wrongLast),
+          await p.check(origin: null, bridgeToken: wrongLast),
           isNotNull,
           reason:
               'an equal-length token differing at the tail is compared '
@@ -449,19 +449,19 @@ void main() {
       final p = IntakeProtection(telemetry: rec)
         ..update(policy: const OriginPolicy(), token: arabic);
       expect(
-        await p.check(origin: null, portalToken: arabic),
+        await p.check(origin: null, bridgeToken: arabic),
         isNull,
         reason: 'the multi-byte secret matches byte for byte',
       );
       expect(
-        await p.check(origin: null, portalToken: '$arabicس'),
+        await p.check(origin: null, bridgeToken: '$arabicس'),
         isNotNull,
         reason: 'one more character than the multi-byte secret is caught',
       );
       // طول متطرف عبر المقارنة: البايتات فوق مدى الحلقة تسقط في
       // المُراكِم فلا مرور لطول متضخم مهما كان
       expect(
-        await p.check(origin: null, portalToken: 'a' * (1 << 20)),
+        await p.check(origin: null, bridgeToken: 'a' * (1 << 20)),
         isNotNull,
         reason: 'a megabyte token is refused by the comparison itself',
       );

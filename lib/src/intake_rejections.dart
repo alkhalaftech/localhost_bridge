@@ -11,13 +11,26 @@
 /// own guards, and stay outside this table.
 library;
 
-/// One registry row: the wire status of one rejection code and whether
-/// that rejection, when it fires over an unread body, cuts immediately
-/// instead of spending the bounded drain window. Only the two documented
-/// paths cut immediately: the concurrency-seat busy reject and the
-/// host-authority (DNS-rebinding) reject - every unread-body rejection
-/// drains bounded instead, and every read-body rejection closes managed,
-/// so the close method itself follows the body fact, never the code.
+/// One registry row: the wire status of one rejection code and how the
+/// connection closes when that rejection fires over an unread body. Every
+/// unread-body rejection is reply-first: the reply is written and flushed
+/// on the detached socket and its write side closed, and only then does
+/// the unread remainder drain bounded in the background (holding no
+/// concurrency seat) before the destroy - the reply precedes every drain
+/// byte, on the bounded-drain rows and on the counter-path
+/// `payload_too_large` alike (the body crossed the cap mid-read and the
+/// answer leaves at the crossing moment).
+///
+/// [immediateCut] marks the two documented rows that skip the drain and
+/// destroy right after the flushed reply - the concurrency-seat busy
+/// reject and the host-authority (DNS-rebinding) reject: a saturated
+/// server spends no drain windows, and a rebinding probe deserves none.
+/// These are the README's honest-exception paths where the code may never
+/// reach the caller; they are the exceptions, not the rule. A rejection
+/// of an already-read body closes managed instead. The close therefore
+/// follows the body fact plus this row together - never the call site's
+/// choice, and never one universal flavor: the two immediate-cut rows
+/// are the documented exceptions to the drain.
 class IntakeRejectSpec {
   /// Builds the row - [status] is the wire status, [immediateCut] marks the
   /// documented immediate-cut paths above.
@@ -27,10 +40,11 @@ class IntakeRejectSpec {
   /// source the server replies from and the test pins the wire against.
   final int status;
 
-  /// Whether this code, firing over an unread body, destroys the connection
-  /// at once (the accepted reply-loss paths: `server_busy` at the seat gate
-  /// and `blocked_by_protection`). False keeps the bounded drain - the
-  /// reply is still flushed first either way.
+  /// Whether this code, firing over an unread body, skips the bounded
+  /// background drain and destroys the connection right after the flushed
+  /// reply (the accepted reply-loss paths named above: `server_busy` at
+  /// the seat gate and `blocked_by_protection`). False keeps the bounded
+  /// drain - the reply still goes out first either way.
   final bool immediateCut;
 }
 

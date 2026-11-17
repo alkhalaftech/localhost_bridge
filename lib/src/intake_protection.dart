@@ -568,6 +568,12 @@ class IntakeProtection {
   /// Throws [ArgumentError] for a configured token below the length floor
   /// of 32 UTF-8 bytes BEFORE anything is applied, so a host that catches
   /// the error keeps its previous protection state untouched.
+  /// The character-diversity floor refuses the same way, for a token the
+  /// call passes explicitly; a token INHERITED from the current state
+  /// (a policy-only call) is exempt - it is the same legitimately saved
+  /// state [updateFromSaved] loads with a rotation warning, and refusing
+  /// it here would lock a host out of every policy update until it
+  /// rotated the key.
   /// The error names the offending length, never the token itself.
   /// The policy's numbers are validated the same way and at the same point:
   /// a negative quota and a non-positive ask timeout are configuration
@@ -594,9 +600,15 @@ class IntakeProtection {
     }
     // فحص التنوع فوق أرضية الطول: توكن متطابق المحارف أو فقيرها قابل
     // للتخمين بنظرة واحدة — الرفض وقت الإعداد بلا أثر جانبي كأخيه
-    // الطولي، والرمي قبل _apply فمن يلتقطه يبقى على حالته السابقة
+    // الطولي، والرمي قبل _apply فمن يلتقطه يبقى على حالته السابقة.
+    // والأرضية على المُمرَّر صراحةً حصراً: التوكن الموروث (استدعاء بلا
+    // token على كائن أُقلع من حالة محفوظة شرعية) هو ذاته ما أعفاها
+    // updateFromSaved من الرفض عند الإقلاع بتحذير تدوير — ورفُضه هنا
+    // كان يحبس المضيف خارج كل تحديث سياسة حتى يدوّر المفتاح، فينقلب
+    // الإعفاء المعلن فخاً صامتاً
     final distinctChars = effectiveToken.trim().runes.toSet().length;
-    if (tokenBytes >= _minTokenBytes &&
+    if (token != null &&
+        tokenBytes >= _minTokenBytes &&
         distinctChars < _minTokenDistinctChars) {
       throw ArgumentError.value(
         distinctChars,
@@ -941,7 +953,7 @@ class IntakeProtection {
   )
   Future<IntakeRejection?> check({
     String? origin,
-    String? portalToken,
+    String? bridgeToken,
     String? fetchMode,
     String? fetchDest,
   }) async {
@@ -949,7 +961,7 @@ class IntakeProtection {
     // هذا الموضع (طوابع النوافذ واستهلاك المنحة والسؤال وتحذيرات
     // المراقبة) — بلا عدّ: عدّ الرفض كان من خارج check (noteRejection من
     // الخادم) وما زال
-    final decision = _project(origin, portalToken, fetchMode, fetchDest);
+    final decision = _project(origin, bridgeToken, fetchMode, fetchDest);
     _applyDecision(decision, origin);
     return decision.rejection;
   }
@@ -967,12 +979,12 @@ class IntakeProtection {
   /// the record instead of ever comparing again.
   Future<IntakeAdmission> admit({
     String? origin,
-    String? portalToken,
+    String? bridgeToken,
     String? fetchMode,
     String? fetchDest,
     String path = '/',
   }) async {
-    final decision = _project(origin, portalToken, fetchMode, fetchDest);
+    final decision = _project(origin, bridgeToken, fetchMode, fetchDest);
     return IntakeAdmission._(
       rejection: decision.rejection,
       acceptedPath: decision.acceptedPath,
@@ -992,7 +1004,7 @@ class IntakeProtection {
   /// thing.
   _AdmissionDecision _project(
     String? origin,
-    String? portalToken,
+    String? bridgeToken,
     String? fetchMode,
     String? fetchDest,
   ) {
@@ -1033,10 +1045,10 @@ class IntakeProtection {
     // وفوق ميزانية التخمين الخاطئ لا يفتح الخاطئ سؤال موافقة ولا يُقبل
     // إلا بتأهل الأصل — وإلا فرفض الانتظار الصادق بلا طابع جديد فالنافذة
     // تنكسر بصدق. والمقارنة مرة واحدة على الأكثر لكل طلب هنا
-    if (_token.isNotEmpty && portalToken != null && portalToken.isNotEmpty) {
+    if (_token.isNotEmpty && bridgeToken != null && bridgeToken.isNotEmpty) {
       tokenAttempt = true;
       tokenCompared = true;
-      tokenMatched = _fixedTimeEquals(portalToken, _token);
+      tokenMatched = _fixedTimeEquals(bridgeToken, _token);
       final liveMisses = _liveTokenMisses(origin, now);
       budgetSpent = liveMisses.length >= _tokenGuessBudget;
       if (tokenMatched) {
@@ -1783,11 +1795,11 @@ class IntakeProtection {
     'Read IntakeAdmission.verboseErrors from the record built by admit() '
     '(removal planned in 0.3.0)',
   )
-  bool verboseErrorsFor(String? origin, String? portalToken) {
+  bool verboseErrorsFor(String? origin, String? bridgeToken) {
     if (_token.isNotEmpty &&
-        portalToken != null &&
-        portalToken.isNotEmpty &&
-        _fixedTimeEquals(portalToken, _token)) {
+        bridgeToken != null &&
+        bridgeToken.isNotEmpty &&
+        _fixedTimeEquals(bridgeToken, _token)) {
       return true;
     }
     return _isListed(origin);

@@ -99,7 +99,7 @@ void main() {
       ..updateFromSaved(savedMode: 'token', token: 'a' * 64);
     // لا رفض لحالة محفوظة شرعية عند الترقية: التوكن باقٍ عاملاً
     expect(
-      p.check(origin: null, portalToken: 'a' * 64),
+      p.check(origin: null, bridgeToken: 'a' * 64),
       completion(isNull),
       reason: 'the upgrade must not switch the saved layer off',
     );
@@ -109,5 +109,36 @@ void main() {
         .toList();
     expect(diversityWarns, hasLength(1));
     expect(diversityWarns.single, contains('generateBridgeToken'));
+  });
+
+  test('a policy update on the same object keeps the inherited saved token '
+      'working - the diversity floor never locks the host out of updates', () {
+    // السلسلة الحية كاملة على الكائن نفسه: إقلاع من حالة محفوظة بتوكن
+    // طويل فقير التنوع (يُقبل بتحذير تدوير)، ثم update() سياسةً بلا
+    // token — التوكن الموروث معفى من أرضية التنوع فلا يرمي الخطأ،
+    // والطبقة باقية فعالة بعده: من يعفي الإقلاع لا يحبس التحديث
+    final rec = _Rec();
+    final p = IntakeProtection(telemetry: rec)
+      ..updateFromSaved(savedMode: 'token', token: 'a' * 64);
+    // تحديث السياسة وحده على الكائن نفسه: لا ArgumentError مهما كان
+    // تنوع التوكن الموروث
+    p.update(policy: const OriginPolicy(allowed: ['https://portal.example']));
+    // والطبقة باقية فعالة: التوكن المحفوظ نفسه يعبر بعد التحديث
+    expect(
+      p.admit(origin: null, bridgeToken: 'a' * 64).then((a) => a.acceptedPath),
+      completion(IntakeAdmissionPath.token),
+      reason: 'the inherited saved token stays the live secret',
+    );
+    // وupdate() بتوكن صريح فقير التنوع باقٍ يرفض — الإعفاء للموروث حصراً
+    expect(
+      () => p.update(token: 'a' * 64),
+      throwsArgumentError,
+      reason: 'an explicitly passed low-diversity token is still refused',
+    );
+    // والالتقاط يبقى على التوكن الموروث: الطبقة لم تُمس بالرمي
+    expect(
+      p.admit(origin: null, bridgeToken: 'a' * 64).then((a) => a.acceptedPath),
+      completion(IntakeAdmissionPath.token),
+    );
   });
 }

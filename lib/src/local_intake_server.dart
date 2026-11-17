@@ -707,7 +707,7 @@ class LocalIntakeServer {
       // ومسار القبول والرفض) ولا يلمس كائن الحماية ثانية
       final admission = await protection.admit(
         origin: earlyOrigin,
-        portalToken: earlyToken,
+        bridgeToken: earlyToken,
         fetchMode: _firstHeader(request, 'Sec-Fetch-Mode'),
         fetchDest: _firstHeader(request, 'Sec-Fetch-Dest'),
         path: request.uri.path,
@@ -1026,13 +1026,17 @@ class LocalIntakeServer {
           final outcome = await _readBody(request);
           if (outcome.error != null) {
             if (outcome.error is _BodyTooLargeException) {
-              // الجسم أُفرغ حتى النهاية فيُحسب مقروءاً عند الإطار —
-              // الإغلاق المُدار تحت حارسه نظيف
+              // الرفض سُلّم لحظة تجاوز السقف، والرد الآن على مسار «الرد
+              // أولاً» نفسه الذي تسلكه بوابات ما قبل الجسم: يُكتب على
+              // المقبس المنتزع ويُغسل ويُغلق جهة الكتابة، والبقية تُفرَّغ
+              // بالحدود القائمة في خلفية بلا مقعد ثم يُقطع. الاستثناء
+              // الموثق في README يبقى لمن لا يتوقف ولا يقرأ — لكن لا
+              // مسار يقطع قبل كتابة الرد.
               await _replyRejection(
                 response,
                 code: 'payload_too_large',
                 message: 'Request body exceeds the allowed limit ($_mbLabel)',
-                bodyFullyRead: true,
+                bodyFullyRead: false,
               );
             } else if (outcome.error is TimeoutException) {
               // المهلة توقف الاشتراك (لا تلغيه) — الرد المُدار يمر فوق
@@ -1303,16 +1307,15 @@ class LocalIntakeServer {
   ///
   /// Stopping pauses the subscription instead of cancelling it: cancelling a
   /// body subscription makes HttpServer destroy the connection at once and
-  /// swallow the reply before delivery (measured directly on HttpServer), while
-  /// an unconsumed body lets the reply through and then closes - the reject contract itself: honest reply plus cut.
-  /// Reads the request body up to the byte cap and hands the caller an
-  /// [_BodyOutcome]. On the over-cap rejection the SAME single subscription
-  /// (a dart:io body allows exactly one listener) switches to a discard
-  /// phase, and the rejection is handed back only once the remainder was
-  /// drained: the framework destroys a response that closes while its own
-  /// accounting sees an unread body, so replying before the drain would
-  /// let that destroy swallow the reply (a reset on Linux and macOS). A
-  /// sender past the drain bounds keeps the hard cut, reply included.
+  /// swallow the reply before delivery (measured directly on HttpServer).
+  /// Every rejection handed back here takes the reply-first route the
+  /// pre-body gates take: the reply is written and flushed on the detached
+  /// socket, then the unread remainder drains bounded in the background
+  /// (no seat), then the connection is destroyed. The over-cap rejection
+  /// in particular is handed back at the crossing moment - the reply
+  /// precedes every drain byte, and no path cuts before the reply is on
+  /// the wire; only a sender that never reads the reply keeps the
+  /// documented loss window of the README's honest exceptions.
   Future<_BodyOutcome> _readBody(HttpRequest request) async {
     // copy:false: لا نسخة عند add — النسخة الوحيدة عند
     // takeBytes؛ ومخازن مقاطس dart:io طازجة لكل حدث فلا مشاركة
@@ -1321,38 +1324,12 @@ class LocalIntakeServer {
     final deadlineMs = _now + effectiveTimeout.inMilliseconds;
     final done = Completer<_BodyOutcome>();
     StreamSubscription? subscription;
-    Timer? cutTimer;
     // الموعد المطلق مؤقّت واحد يبدأ مع القراءة: فحص onData وحده
     // يقبل جسماً يكتمل بعد موعده (onDone بلا فحص) ومهلة الصمت تقيس بين
     // حدثين لا مجموع العمر — المؤقت يحسم بالموعد أياً كان إيقاع
     // وصول الأحداث، ويلغى في كل طريق حسم.
     Timer? deadlineTimer;
     var settled = false;
-    var discarding = false;
-    var discardedBytes = 0;
-    var drainDeadlineMs = 0;
-    Object? rejection;
-
-    // حسم الرفض لا يُحمَّل إلا بعد انتهاء التفريغ (نهاية الإرسال أو
-    // قطع الحد) — الرد بعده يجد الجسم مقروءاً بمحاسبة الإطار فيغلق
-    // نظيفاً بدل هدمه.
-    void finishDrain() {
-      deadlineTimer?.cancel();
-      deadlineTimer = null;
-      cutTimer?.cancel();
-      cutTimer = null;
-      if (settled && !done.isCompleted) {
-        done.complete(_BodyOutcome.rejected(rejection));
-      }
-    }
-
-    // القطع الفوري: صبر التفريغ انتهى أو المرسل تجاوز الحدود — إلغاء
-    // الاشتراك يهدم الاتصال (المقاس على HttpServer) والبقية تبقى غير
-    // مقروءة؛ من لا يتوقف يستحق القطع.
-    void cutNow() {
-      unawaited(subscription?.cancel());
-      finishDrain();
-    }
 
     void settle(Object? error, [String? body]) {
       if (settled) return;
@@ -1364,24 +1341,17 @@ class LocalIntakeServer {
         done.complete(_BodyOutcome.ok(body!));
         return;
       }
-      // الرفض يحرر المخزن في الحال — لا ينتظر خروج النطاق
-      builder.clear();
-      if (error is _BodyTooLargeException) {
-        // وضع الرمي: نفس الاشتراك يستمر يقرأ ويحصي البقية (بلا تخزين)
-        // حتى نهاية الإرسال أو أحد حدي التفريغ، ثم يُحمَّل الرفض.
-        settled = true;
-        rejection = error;
-        discarding = true;
-        // الموعد يُؤسر عند بدء التفريغ لا عند كل مقطع — getter يعيد الحساب
-        // من _now لحظته فيصير الشرط ملازماً كاذباً أبداً.
-        drainDeadlineMs = _now + _discardWindow.inMilliseconds;
-        cutTimer = Timer(_discardWindow, cutNow);
-        return;
-      }
-      // المهلة والانقطاع: إيقاف مؤقت لا إلغاء — المرسل الصامت لم يترك
-      // بيانات غير مقروءة أصلاً؛ والمقطر الذي عبر الموعد المطلق قد
-      // يترك بايتات في الطريق فيغلق الإطار هدماً (بقية
-      // مقيسة مقبولة: رد 408 قد يضيع على لينكس عند مقطر لا يتوقف).
+      // الرفض يحرر المخزن في الحال — لا ينتظر خروج النطاق. وكل الرفوض
+      // من هنا على المسار نفسه: إيقاف مؤقت لا إلغاء — الإلغاء يهدم
+      // الاتصال (المقاس على HttpServer) فيبتلع الرد قبل كتابته، والإيقاف
+      // يوقف الاستهلاك فينتزع مخرج الرد المقبس ويصغي هو (تفريغ محدود
+      // في خلفية بلا مقعد) ثم يقطع. ورفض العدّاد (413) يُسلَّم لحظة
+      // تجاوز السقف لا بعد التفريغ: الرد أولاً ثم تفريغ البقية
+      // بالحدود القائمة ثم القطع — تصميم «الرد أولاً» نفسه الذي تسلكه
+      // بوابات ما قبل الجسم، فلا مسار يقطع قبل كتابة الرد. والمهلة
+      // والانقطاع كذلك: المرسل الصامت لم يترك بيانات غير مقروءة أصلاً،
+      // والمقطر الذي عبر الموعد المطلق قد يترك بايتات في الطريق
+      // تُفرَّغ محدوداً بعد الرد.
       settled = true;
       subscription?.pause();
       done.complete(_BodyOutcome.rejected(error));
@@ -1398,14 +1368,6 @@ class LocalIntakeServer {
         .timeout(effectiveTimeout)
         .listen(
           (chunk) {
-            if (discarding) {
-              discardedBytes += chunk.length;
-              if (discardedBytes > _discardBudgetBytes ||
-                  _now >= drainDeadlineMs) {
-                cutNow();
-              }
-              return;
-            }
             if (_now >= deadlineMs) {
               settle(
                 TimeoutException(
@@ -1421,10 +1383,6 @@ class LocalIntakeServer {
             }
           },
           onDone: () {
-            if (discarding) {
-              finishDrain();
-              return;
-            }
             // الاكتمال بعد الموعد رفض مهلة لا قبول متأخر — onDone بلا
             // هذا الفحص يمرر جسماً عجز موعده كاملاً إلى الفك
             if (_now >= deadlineMs) {
@@ -1443,12 +1401,6 @@ class LocalIntakeServer {
             }
           },
           onError: (Object error) {
-            if (discarding) {
-              // المقبس مات والعميل معه — لا معنى لانتظار المؤقت: الحسم
-              // فوراً وتحرير المقعد.
-              finishDrain();
-              return;
-            }
             settle(error);
           },
         );

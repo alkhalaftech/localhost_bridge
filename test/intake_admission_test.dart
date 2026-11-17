@@ -161,7 +161,7 @@ void main() {
         ..update(policy: const OriginPolicy(), token: _t64);
       final a = await pr.admit(
         origin: 'https://stranger.example',
-        portalToken: _t64,
+        bridgeToken: _t64,
       );
       expect(a.rejection, isNull);
       expect(a.acceptedPath, IntakeAdmissionPath.token);
@@ -184,7 +184,7 @@ void main() {
         );
       final a = await pr.admit(
         origin: 'https://portal.example',
-        portalToken: _t64,
+        bridgeToken: _t64,
       );
       expect(a.rejection, isNull);
       expect(a.acceptedPath, IntakeAdmissionPath.originWithToken);
@@ -290,14 +290,14 @@ void main() {
       for (var i = 0; i < 5; i++) {
         final a = await pr.admit(
           origin: 'https://guess.example',
-          portalToken: 'WRONG$i',
+          bridgeToken: 'WRONG$i',
         );
         a.settle();
         expect(pr.tokenComparisonCount, i + 1);
       }
       final overBudget = await pr.admit(
         origin: 'https://guess.example',
-        portalToken: 'WRONG6',
+        bridgeToken: 'WRONG6',
       );
       expect(overBudget.rejection?.code, 'token_locked');
       expect(
@@ -310,7 +310,7 @@ void main() {
       // والصحيح فوق الميزانية نفسها: مقارنة واحدة وقبول بلا رفض
       final correct = await pr.admit(
         origin: 'https://guess.example',
-        portalToken: _t64,
+        bridgeToken: _t64,
       );
       correct.settle();
       expect(

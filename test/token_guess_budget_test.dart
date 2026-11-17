@@ -55,28 +55,28 @@ void main() {
     for (var i = 0; i < 500; i++) {
       final r = await p.check(
         origin: 'https://flooder.example',
-        portalToken: 'WRONG$i',
+        bridgeToken: 'WRONG$i',
       );
       expect(r!.code, isNot('accepted'), reason: 'unlisted origin is refused');
     }
     for (var i = 0; i < 500; i++) {
-      await p.check(origin: null, portalToken: 'WRONG$i');
+      await p.check(origin: null, bridgeToken: 'WRONG$i');
     }
     // الصحيح من المرسل المفيض نفسه: يُقارن ويُقبل — النافذة لا ترفضه
     expect(
-      await p.check(origin: 'https://flooder.example', portalToken: _t64),
+      await p.check(origin: 'https://flooder.example', bridgeToken: _t64),
       isNull,
       reason: 'the correct token is accepted whatever the failure history',
     );
     // والصحيح بلا أصل فوق النافذة المشتركة المفيضة: يُقبل كذلك
     expect(
-      await p.check(origin: null, portalToken: _t64),
+      await p.check(origin: null, bridgeToken: _t64),
       isNull,
       reason: 'the shared originless window never refuses the correct token',
     );
     // والصحيح من أصل لم يخفق قط: يُقبل كما كان
     expect(
-      await p.check(origin: 'https://innocent.example', portalToken: _t64),
+      await p.check(origin: 'https://innocent.example', bridgeToken: _t64),
       isNull,
     );
   });
@@ -90,7 +90,7 @@ void main() {
       final p = IntakeProtection(nowMs: () => now, telemetry: rec)
         ..update(token: _t64);
       for (var i = 0; i < 1000; i++) {
-        await p.check(origin: null, portalToken: 'W$i');
+        await p.check(origin: null, bridgeToken: 'W$i');
       }
       final budgetLines = rec.warns
           .where((w) => w.contains('guess budget'))
@@ -100,7 +100,7 @@ void main() {
       expect(budgetLines.single, contains('60 seconds'));
       // والسطر التالي بعد النافذة يحمل عدد المكتوم — حجم الفيضان مرئي
       now += 1001;
-      await p.check(origin: null, portalToken: 'W-late');
+      await p.check(origin: null, bridgeToken: 'W-late');
       final after = rec.warns.where((w) => w.contains('guess budget'));
       expect(after, hasLength(2));
       expect(after.last, contains('+994 more suppressed'));
@@ -114,14 +114,14 @@ void main() {
       var now = 0;
       final p = IntakeProtection(nowMs: () => now)..update(token: _t64);
       for (var i = 0; i < 5; i++) {
-        await p.check(origin: 'https://a.example', portalToken: 'W');
+        await p.check(origin: 'https://a.example', bridgeToken: 'W');
         now++;
       }
       // السادس الخاطئ فوق الميزانية: 429 بانتظار صادق — خمسة إخفاقات
       // طازجة داخل نافذة الستين ثانية فالبقية نحو ستين ثانية
       final sixth = await p.check(
         origin: 'https://a.example',
-        portalToken: 'W',
+        bridgeToken: 'W',
       );
       now++;
       expect(sixth!.status, 429);
@@ -134,18 +134,18 @@ void main() {
       // والصحيح يعبر ويصفر النافذة فتبدأ الميزانية من جديد: الإخفاقات
       // الخمسة التالية لا تقفل — القفلة من السادس بعد التصوير لا من الأول
       expect(
-        await p.check(origin: 'https://a.example', portalToken: _t64),
+        await p.check(origin: 'https://a.example', bridgeToken: _t64),
         isNull,
         reason: 'a match clears the miss window',
       );
       for (var i = 0; i < 5; i++) {
-        final r = await p.check(origin: 'https://a.example', portalToken: 'W');
+        final r = await p.check(origin: 'https://a.example', bridgeToken: 'W');
         now++;
         expect(r!.code, isNot('token_locked'), reason: 'the budget restarted');
       }
       final lockedAgain = await p.check(
         origin: 'https://a.example',
-        portalToken: 'W',
+        bridgeToken: 'W',
       );
       expect(lockedAgain!.code, 'token_locked');
     },

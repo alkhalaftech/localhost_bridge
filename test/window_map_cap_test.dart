@@ -17,12 +17,12 @@ void main() {
       final p = IntakeProtection(nowMs: () => now)..update(token: _token);
       // خمسة إخفاقات من أصل ثابت: مدخله هو الأقدم في الخريطة
       for (var i = 0; i < 5; i++) {
-        await p.check(origin: 'https://fixed.example', portalToken: 'WRONG');
+        await p.check(origin: 'https://fixed.example', bridgeToken: 'WRONG');
         now++;
       }
       // فيضان يبلغ السقف: الإدراج الأخير فوق السقف يطرد الأقدم إدراجاً
       for (var i = 0; i < 10000; i++) {
-        await p.check(origin: 'https://flood$i.example', portalToken: 'WRONG');
+        await p.check(origin: 'https://flood$i.example', bridgeToken: 'WRONG');
         now++;
       }
       // ذاكرة الأصل الثابت خرجت مع نافذته المطرودة: خمسة إخفاقات جديدة
@@ -30,7 +30,7 @@ void main() {
       for (var i = 0; i < 5; i++) {
         final r = await p.check(
           origin: 'https://fixed.example',
-          portalToken: 'WRONG',
+          bridgeToken: 'WRONG',
         );
         now++;
         expect(
@@ -42,7 +42,7 @@ void main() {
       // والنافذة الجديدة تقفل من السادس — السقف حصر الخريطة لا القفل
       final sixth = await p.check(
         origin: 'https://fixed.example',
-        portalToken: 'WRONG',
+        bridgeToken: 'WRONG',
       );
       now++;
       expect(sixth!.code, 'token_locked');
@@ -121,37 +121,37 @@ void main() {
       // إدراجه آخر الطابور عند طرد نافذته فتتقدم الفيضانات نحوه ولا
       // تبلغه قبل إخفاقه السادس — القفل يتكون تحت الفيضان نفسه
       for (var i = 0; i < 10000; i++) {
-        await p.check(origin: 'https://fill$i.example', portalToken: 'WRONG');
+        await p.check(origin: 'https://fill$i.example', bridgeToken: 'WRONG');
         now++;
       }
       Future<void> chunk(int n, String tag) async {
         for (var i = 0; i < n; i++) {
-          await p.check(origin: 'https://$tag$i.example', portalToken: 'WRONG');
+          await p.check(origin: 'https://$tag$i.example', bridgeToken: 'WRONG');
           now++;
         }
       }
 
-      await p.check(origin: 'https://fixed.example', portalToken: 'WRONG');
+      await p.check(origin: 'https://fixed.example', bridgeToken: 'WRONG');
       now++;
       await chunk(2000, 'waveA');
-      await p.check(origin: 'https://fixed.example', portalToken: 'WRONG');
+      await p.check(origin: 'https://fixed.example', bridgeToken: 'WRONG');
       now++;
       await chunk(2000, 'waveB');
-      await p.check(origin: 'https://fixed.example', portalToken: 'WRONG');
+      await p.check(origin: 'https://fixed.example', bridgeToken: 'WRONG');
       now++;
       await chunk(2000, 'waveC');
-      await p.check(origin: 'https://fixed.example', portalToken: 'WRONG');
+      await p.check(origin: 'https://fixed.example', bridgeToken: 'WRONG');
       now++;
       await chunk(2000, 'waveD');
       // الفيضان يصرف كل ما يسبق الأصل الثابت فيصير أولاً: إخفاقه
       // الخامس هنا هو لحظة الطلب الجاري — نافذته حية لا يطرد عندها
       await chunk(1999, 'waveE');
-      await p.check(origin: 'https://fixed.example', portalToken: 'WRONG');
+      await p.check(origin: 'https://fixed.example', bridgeToken: 'WRONG');
       now++;
       // والسادس يرد القفل رغم الفيضان المحيط
       final sixth = await p.check(
         origin: 'https://fixed.example',
-        portalToken: 'WRONG',
+        bridgeToken: 'WRONG',
       );
       now++;
       expect(sixth!.code, 'token_locked');

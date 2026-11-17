@@ -162,11 +162,11 @@ void main() {
                 'a3f1c52e94b7d068f5e2a9c4b1d7e8036f9a2c5e8b1d7f04a6c9e2d5f8b3a1c7',
           );
         for (var i = 0; i < 5; i++) {
-          await p.check(origin: 'https://evil.example', portalToken: 'WRONG');
+          await p.check(origin: 'https://evil.example', bridgeToken: 'WRONG');
         }
         final listed = await p.check(
           origin: 'https://portal.example',
-          portalToken: 'WRONG',
+          bridgeToken: 'WRONG',
         );
         expect(
           listed,
@@ -187,12 +187,12 @@ void main() {
                 'a3f1c52e94b7d068f5e2a9c4b1d7e8036f9a2c5e8b1d7f04a6c9e2d5f8b3a1c7',
           );
         for (var i = 0; i < 5; i++) {
-          await p.check(origin: 'https://evil.example', portalToken: 'WRONG');
+          await p.check(origin: 'https://evil.example', bridgeToken: 'WRONG');
         }
         // الخاطئ السادس فوق الميزانية يُرد — والرمز باق للتخمين الخاطئ
         final wrongSixth = await p.check(
           origin: 'https://evil.example',
-          portalToken: 'WRONG',
+          bridgeToken: 'WRONG',
         );
         expect(wrongSixth!.status, 429);
         expect(
@@ -206,7 +206,7 @@ void main() {
         // الخاطئ لا رافض للصحيح
         final accepted = await p.check(
           origin: 'https://evil.example',
-          portalToken:
+          bridgeToken:
               'a3f1c52e94b7d068f5e2a9c4b1d7e8036f9a2c5e8b1d7f04a6c9e2d5f8b3a1c7',
         );
         expect(
@@ -218,7 +218,7 @@ void main() {
         );
         final other = await p.check(
           origin: 'https://x.example',
-          portalToken:
+          bridgeToken:
               'a3f1c52e94b7d068f5e2a9c4b1d7e8036f9a2c5e8b1d7f04a6c9e2d5f8b3a1c7',
         );
         expect(
@@ -244,7 +244,7 @@ void main() {
         for (var i = 1; i <= 5; i++) {
           final r = await p.check(
             origin: 'https://a.example',
-            portalToken: 'W',
+            bridgeToken: 'W',
           );
           expect(
             r!.code,
@@ -254,7 +254,7 @@ void main() {
         }
         final sixth = await p.check(
           origin: 'https://a.example',
-          portalToken: 'W',
+          bridgeToken: 'W',
         );
         expect(
           sixth!.code,
@@ -264,7 +264,7 @@ void main() {
         fakeNow = 60_001;
         final after = await p.check(
           origin: 'https://a.example',
-          portalToken: 'W',
+          bridgeToken: 'W',
         );
         expect(
           after!.code,
@@ -282,27 +282,27 @@ void main() {
               'a3f1c52e94b7d068f5e2a9c4b1d7e8036f9a2c5e8b1d7f04a6c9e2d5f8b3a1c7',
         );
       for (var i = 0; i < 5; i++) {
-        await p.check(origin: null, portalToken: 'W');
+        await p.check(origin: null, bridgeToken: 'W');
       }
       expect(
-        (await p.check(origin: 'https://a.example', portalToken: 'W'))!.code,
+        (await p.check(origin: 'https://a.example', bridgeToken: 'W'))!.code,
         isNot('token_locked'),
         reason: 'an originless budget does not touch web origins',
       );
       for (var i = 0; i < 5; i++) {
-        await p.check(origin: 'https://b.example', portalToken: 'W');
+        await p.check(origin: 'https://b.example', bridgeToken: 'W');
       }
       // نافذة بلا-أصل ما زالت منفقة الميزانية بلا إخفاقات ويب إضافية:
       // الخاطئ يُرد والصحيح يُقارن ويُقبَل
       expect(
-        (await p.check(origin: null, portalToken: 'W'))!.status,
+        (await p.check(origin: null, bridgeToken: 'W'))!.status,
         429,
         reason: 'the originless window is separate from the web one',
       );
       expect(
         await p.check(
           origin: null,
-          portalToken:
+          bridgeToken:
               'a3f1c52e94b7d068f5e2a9c4b1d7e8036f9a2c5e8b1d7f04a6c9e2d5f8b3a1c7',
         ),
         isNull,
@@ -1017,7 +1017,7 @@ void main() {
         );
         final token = await p.check(
           origin: null,
-          portalToken:
+          bridgeToken:
               'a3f1c52e94b7d068f5e2a9c4b1d7e8036f9a2c5e8b1d7f04a6c9e2d5f8b3a1c7',
         );
         expect(
@@ -1131,7 +1131,7 @@ void main() {
           final p = IntakeProtection()
             ..update(policy: const OriginPolicy(), token: token);
           expect(
-            await p.check(origin: null, portalToken: token),
+            await p.check(origin: null, bridgeToken: token),
             isNull,
             reason:
                 'a correct token of length $len passes through the comparison pad',
@@ -1139,7 +1139,7 @@ void main() {
           // الفرق داخل نافذة المقارنة (البايت الأول) — يرفض دائما
           final wrong = (token[0] == '9' ? '0' : '9') + token.substring(1);
           expect(
-            await p.check(origin: 'https://w.example', portalToken: wrong),
+            await p.check(origin: 'https://w.example', bridgeToken: wrong),
             isNotNull,
             reason:
                 'a wrong token of length $len is rejected (a difference inside the pad)',
@@ -1149,7 +1149,7 @@ void main() {
           if (len > 256) {
             final beyond = '${token.substring(0, 256)}z';
             expect(
-              await p.check(origin: null, portalToken: beyond),
+              await p.check(origin: null, bridgeToken: beyond),
               isNotNull,
               reason:
                   'a difference past 256 is compared - a correct-prefix token is rejected',
@@ -1161,7 +1161,7 @@ void main() {
         // عن البايتات لا المحارف
         final arabic = 'سشصضطظعغفق' * 4; // 40 محرفاً × 2 بايت
         final p = IntakeProtection()..update(token: arabic);
-        expect(await p.check(origin: null, portalToken: arabic), isNull);
+        expect(await p.check(origin: null, bridgeToken: arabic), isNull);
       },
     );
 
@@ -1174,7 +1174,7 @@ void main() {
       expect(
         await p.check(
           origin: null,
-          portalToken:
+          bridgeToken:
               'a3f1c52e94b7d068f5e2a9c4b1d7e8036f9a2c5e8b1d7f04a6c9e2d5f8b3a1c7',
         ),
         isNull,
@@ -1183,7 +1183,7 @@ void main() {
       expect(
         await p.check(
           origin: 'https://w.example',
-          portalToken:
+          bridgeToken:
               ' a3f1c52e94b7d068f5e2a9c4b1d7e8036f9a2c5e8b1d7f04a6c9e2d5f8b3a1c7',
         ),
         isNotNull,
@@ -1198,7 +1198,7 @@ void main() {
       expect(
         await q.check(
           origin: 'https://w.example',
-          portalToken:
+          bridgeToken:
               'a3f1c52e94b7d068f5e2a9c4b1d7e8036f9a2c5e8b1d7f04a6c9e2d5f8b3a1c7 ',
         ),
         isNotNull,
@@ -1212,7 +1212,7 @@ void main() {
         final p = IntakeProtection()..update(token: '');
         // لا نافذة قفل ولا مطابقة — الترويسة غائبة المعنى
         expect(
-          await p.check(origin: null, portalToken: 'ANY'),
+          await p.check(origin: null, bridgeToken: 'ANY'),
           isNotNull,
           reason: 'no token layer - evaluation falls to the policy',
         );
