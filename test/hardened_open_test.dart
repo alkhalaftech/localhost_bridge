@@ -710,7 +710,7 @@ void main() {
       // الpreflight مهما كان الأصل
       final tokenPreflight = await preflight(
         'https://portal.example',
-        ask: 'Content-Type, X-Portal-Token',
+        ask: 'Content-Type, X-Bridge-Token',
       );
       expect(tokenPreflight['status'], 204);
       expect(
@@ -793,7 +793,7 @@ void main() {
             post(
               p,
               origin: 'https://a.example',
-              extra: 'X-Portal-Token: wrong$i\r\n',
+              extra: 'X-Bridge-Token: wrong$i\r\n',
             ),
           ))['status'],
           403,
@@ -804,7 +804,7 @@ void main() {
         post(
           p,
           origin: 'https://a.example',
-          extra: 'X-Portal-Token: wrong\r\n',
+          extra: 'X-Bridge-Token: wrong\r\n',
         ),
       );
       expect(locked['status'], 429);

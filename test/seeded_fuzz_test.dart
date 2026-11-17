@@ -153,7 +153,7 @@ List<int> _request({
   if (!omitOrigin && origin != null) head.write('Origin: $origin\r\n');
   if (fetchMode != null) head.write('Sec-Fetch-Mode: $fetchMode\r\n');
   if (fetchDest != null) head.write('Sec-Fetch-Dest: $fetchDest\r\n');
-  if (token != null) head.write('X-Portal-Token: $token\r\n');
+  if (token != null) head.write('X-Bridge-Token: $token\r\n');
   for (final line in extraHeaderLines) {
     head.write('$line\r\n');
   }
@@ -312,7 +312,7 @@ _Case _listedCase(Random rng, int index) {
     };
     final extra = switch (name) {
       0 => ['Origin: $_listedOrigin'],
-      1 => ['X-Portal-Token: $_t64'],
+      1 => ['X-Bridge-Token: $_t64'],
       _ => ['X-Correlation-Id: dup-a', 'X-Correlation-Id: dup-b'],
     };
     return _Case.reject(

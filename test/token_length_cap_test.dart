@@ -136,7 +136,7 @@ String _request(
   final h = StringBuffer()
     ..write('$method / HTTP/1.1\r\nHost: 127.0.0.1:$port\r\n');
   if (origin != null) h.write('Origin: $origin\r\n');
-  if (token != null) h.write('X-Portal-Token: $token\r\n');
+  if (token != null) h.write('X-Bridge-Token: $token\r\n');
   if (method == 'POST') {
     h.write('Content-Type: application/json\r\n');
     h.write('Content-Length: ${_goodBody.length}\r\n\r\n$_goodBody');

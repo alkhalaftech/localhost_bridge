@@ -16,7 +16,7 @@ final _outPath = '${Directory.systemTemp.path}/bridge-wire-new.json';
 const _timeout = Duration(milliseconds: 700);
 
 /// A realistic configured token: 32 random bytes hex-encoded - the floor
-/// update() enforces and the shape generatePortalToken() produces.
+/// update() enforces and the shape generateBridgeToken() produces.
 const _t64 = 'a3f1c52e94b7d068f5e2a9c4b1d7e8036f9a2c5e8b1d7f04a6c9e2d5f8b3a1c7';
 
 class _Rec extends BridgeTelemetry {
@@ -274,7 +274,7 @@ void main() {
           ..writeln('Content-Type: application/json')
           ..writeln('Content-Length: ${utf8.encode(body).length}');
         if (origin != null) h.writeln('Origin: $origin');
-        if (token != null) h.writeln('X-Portal-Token: $token');
+        if (token != null) h.writeln('X-Bridge-Token: $token');
         h.write('\r\n');
         return h.toString() + body;
       }
@@ -355,7 +355,7 @@ void main() {
         );
         await cap(
           '06_silence_timeout',
-          'POST / HTTP/1.1\r\nHost: 127.0.0.1:$p\r\nContent-Length: 500\r\nOrigin: https://portal.example\r\nX-Portal-Token: a3f1c52e94b7d068f5e2a9c4b1d7e8036f9a2c5e8b1d7f04a6c9e2d5f8b3a1c7\r\n\r\n',
+          'POST / HTTP/1.1\r\nHost: 127.0.0.1:$p\r\nContent-Length: 500\r\nOrigin: https://portal.example\r\nX-Bridge-Token: a3f1c52e94b7d068f5e2a9c4b1d7e8036f9a2c5e8b1d7f04a6c9e2d5f8b3a1c7\r\n\r\n',
           'جسم واعد لا يصل',
         );
         await cap(
@@ -414,7 +414,7 @@ void main() {
 
         await cap(
           '13_absolute_form',
-          'POST http://evil.com/ HTTP/1.1\r\nHost: 127.0.0.1:$p\r\nContent-Type: application/json\r\nContent-Length: ${utf8.encode(small).length}\r\nOrigin: https://portal.example\r\nX-Portal-Token: a3f1c52e94b7d068f5e2a9c4b1d7e8036f9a2c5e8b1d7f04a6c9e2d5f8b3a1c7\r\n\r\n$small',
+          'POST http://evil.com/ HTTP/1.1\r\nHost: 127.0.0.1:$p\r\nContent-Type: application/json\r\nContent-Length: ${utf8.encode(small).length}\r\nOrigin: https://portal.example\r\nX-Bridge-Token: a3f1c52e94b7d068f5e2a9c4b1d7e8036f9a2c5e8b1d7f04a6c9e2d5f8b3a1c7\r\n\r\n$small',
           'absolute-form',
         );
         await cap(
@@ -434,7 +434,7 @@ void main() {
           final req =
               'POST / HTTP/1.1\r\nHost: first.com\r\nHost: 127.0.0.1:$p\r\n'
               'Content-Type: application/json\r\nContent-Length: ${utf8.encode(body).length}\r\n'
-              'Origin: https://portal.example\r\nX-Portal-Token: a3f1c52e94b7d068f5e2a9c4b1d7e8036f9a2c5e8b1d7f04a6c9e2d5f8b3a1c7\r\n\r\n$body';
+              'Origin: https://portal.example\r\nX-Bridge-Token: a3f1c52e94b7d068f5e2a9c4b1d7e8036f9a2c5e8b1d7f04a6c9e2d5f8b3a1c7\r\n\r\n$body';
           final r = await _exchange(p, req);
           dump['14_duplicate_host']!['modes']![m] = {
             'request':
@@ -557,7 +557,7 @@ void main() {
           expect(h['access-control-allow-methods'], 'POST, OPTIONS');
           expect(
             h['access-control-allow-headers'],
-            'Content-Type, X-Portal-Token, X-Correlation-Id',
+            'Content-Type, X-Bridge-Token, X-Correlation-Id',
           );
           expect(
             dump['14_duplicate_host']!['modes']![m]!['response']['status'],
@@ -1107,7 +1107,7 @@ void main() {
           'Host: 127.0.0.1:${srv!.port}\r\n'
           'Origin: https://stranger.example\r\n'
           'Content-Type: application/json\r\nContent-Length: 2\r\n'
-          'X-Portal-Token: miss-value\r\n\r\n{}';
+          'X-Bridge-Token: miss-value\r\n\r\n{}';
       // خمس إخفاقات من أصل غير مدرج تملأ نافذة قفل التوكن
       for (var i = 0; i < 5; i++) {
         final r = await _exchange(srv!.port, raw());

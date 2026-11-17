@@ -137,20 +137,20 @@ keep the origin policy empty. In this release whether a browser page can
 use the token path follows the CORS echo: with an empty origin policy
 and no consent callback nothing is echoed at all, so the token stays a
 non-browser path; with a listed origin policy it is echoed for the
-listed origins themselves - a page on one can send `X-Portal-Token`
+listed origins themselves - a page on one can send `X-Bridge-Token`
 too, though it is already admitted without it; in the discovery
 and allow-all modes the preflight is answered for any valid https origin
 that has not been refused, so a page on such an origin can send
-`X-Portal-Token` as well.
+`X-Bridge-Token` as well.
 
 A local token client needs no browser at all — one `curl` is the whole
 client. Configure the token once with
-`update(token: generatePortalToken())` and share it out-of-band:
+`update(token: generateBridgeToken())` and share it out-of-band:
 
 ```bash
 curl -X POST http://127.0.0.1:9100/ \
   -H 'Content-Type: application/json' \
-  -H "X-Portal-Token: $PORTAL_TOKEN" \
+  -H "X-Bridge-Token: $PORTAL_TOKEN" \
   -d '{"data": ["your-command"]}'
 ```
 
@@ -177,7 +177,7 @@ program), the `Sec-Fetch-*` headers, and the payload.
   changed policy revokes remembered grants, not denials); once-only
   consent is not.
 - **Token layer** is an independent entry path, not a gate over the other
-  modes: presenting the right `X-Portal-Token` crosses without browser
+  modes: presenting the right `X-Bridge-Token` crosses without browser
   headers. It is the only mode that resists other local programs (other
   apps on the machine, other users on a shared host). Adding a token does
   not make it required: while any origin path admits (a listed origin,
@@ -301,7 +301,7 @@ deferred to a later release; treat it as provisional.
 JSON everywhere: `POST` with `Origin`; responses carry `X-Correlation-Id` (yours echoed back when it matches `[A-Za-z0-9._-]` and is at most 128 chars; anything else is replaced with a generated id).
 
 The `Access-Control-Allow-Headers` list is fixed — `Content-Type`,
-`X-Portal-Token`, `X-Correlation-Id` — so the page must not send any
+`X-Bridge-Token`, `X-Correlation-Id` — so the page must not send any
 other header: the preflight answer will not allow it. Commands are sent
 to `/`: in this release every path reaches the handler, and non-root
 POSTs just warn the host — so keep sending commands to `/`.
@@ -312,7 +312,7 @@ Stable error codes:
 |---|---|---|
 | 200 | — | Handler succeeded (`{"ok":true}`). |
 | 400 | `duplicate_header` / `origin_too_long` | A single-valued header was sent twice / an `Origin` header over the package's internal length cap (1,024 characters), refused before any processing. |
-| 400 | `origin_malformed` / `token_too_long` / `bad_request` | An `Origin` header that is not `scheme://host[:port]` / an `X-Portal-Token` header over the internal byte cap (1,024 bytes) / the HTTP parser rejected the request framing — all refused before your handler runs. |
+| 400 | `origin_malformed` / `token_too_long` / `bad_request` | An `Origin` header that is not `scheme://host[:port]` / an `X-Bridge-Token` header over the internal byte cap (1,024 bytes) / the HTTP parser rejected the request framing — all refused before your handler runs. |
 | 400 | `invalid_utf8` / `empty_payload` / `unsupported_payload_shape` | Body not UTF-8 / no valid command payload / JSON object without any of the known command keys. A body that fails JSON decoding altogether is **not** a 400 — it falls through as a raw text command (the tested non-JSON contract); a JSON number, boolean, or `null` body takes the same raw path. Inside a JSON array, non-string and empty-string elements drop without notice. |
 | 405 | `method_not_allowed` | Only `POST` (and `OPTIONS` preflight) are accepted. |
 | 403 | `origin_not_listed` / `origin_declined` / `origin_unknown` / `origin_blocked` / `origin_pending` | Origin policy rejection (not listed / consent declined / not confirmable / allow-all hardening / consent window open — retry after `Retry-After`). |

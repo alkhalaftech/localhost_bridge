@@ -118,7 +118,7 @@ String _post(
   final h = StringBuffer()
     ..write('POST / HTTP/1.1\r\nHost: 127.0.0.1:$port\r\n');
   if (origin != null) h.write('Origin: $origin\r\n');
-  if (token != null) h.write('X-Portal-Token: $token\r\n');
+  if (token != null) h.write('X-Bridge-Token: $token\r\n');
   h.write('Sec-Fetch-Mode: cors\r\nSec-Fetch-Dest: empty\r\n');
   if (extra != null) h.write(extra);
   h.write('Content-Type: application/json\r\n');

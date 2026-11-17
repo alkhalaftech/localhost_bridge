@@ -59,7 +59,7 @@ the Host-authority check, the origin policy, and the token layer.
   skipped, a non-CORS send cannot read the reply.
 - **Token guessing** — 32-byte length floor for a configured token
   (`update()` throws on shorter; the bound measures length, not entropy —
-  `generatePortalToken` is the recommended source of a token),
+  `generateBridgeToken` is the recommended source of a token),
   constant-time padded comparison, and a per-origin lockout (5 misses /
   60 s → `429 token_locked`) whose `Retry-After` states the real
   remaining window. The lockout pins its window to one origin: a local
@@ -85,7 +85,7 @@ the Host-authority check, the origin policy, and the token layer.
   rotation bypasses the quota and the lockout anyway; that residual is
   stated here (the request being processed never loses its own window, so
   the token lockout still forms under the flood).
-- **Header smuggling ambiguity** — duplicate `Origin`, `X-Portal-Token`,
+- **Header smuggling ambiguity** — duplicate `Origin`, `X-Bridge-Token`,
   or `X-Correlation-Id` headers are refused (`400 duplicate_header`).
 - **Information disclosure** — rejected origins get no CORS echo at all;
   host error text is visible only to authorized origins; internal errors
@@ -213,7 +213,7 @@ What remains:
   which the package does not bound.
 - **`dart:io` sets no limit on a single header's length or on the
   number of open connections.** The package caps only the headers it
-  reads (`Origin` over 1,024 characters, `X-Portal-Token` over 1,024
+  reads (`Origin` over 1,024 characters, `X-Bridge-Token` over 1,024
   bytes); the seats bound requests in flight, not sockets — idle
   connections close after `idleTimeout` (60 s default), but the count
   of active open connections stays unbounded.
@@ -292,7 +292,7 @@ on the roadmap. The names are the tests' real names.
 | Disconnect-on-rejection semantics (readable vs unreadable) | Policy rejects cut after the reply; consent and quota rejections stay CORS-readable by design | `protocol rejections cut the connection after the reply` · `an origin_pending reply is readable while the body still arrives, then the connection cuts` · `a rate-limited listed origin reply is readable with an unread body, then the connection cuts` (`early_reject_cut_test`) · `origin_rate_limited 429 echoes CORS: the page reads the code and Retry-After` · `token_locked 429 echoes CORS: the page reads the code and Retry-After` (`hardened_open_test`) |
 | Port exhaustion and bind races | Explicit `IntakeBindException`, fallback ports | `all ports busy: IntakeBindException — a plain Exception, never an Error` (`intake_health_test`) · `falls back when preferred port is busy` (`intake_payload_test`) |
 | DNS rebinding / forged `Host` | Host-authority allowlist, absolute-form refusal, explicit opt-out warnings | `replays 14 corpus cases over the wire across 3 protection modes and writes the comparison output` (cases `12_host_evil`, `13_absolute_form`) (`wire_contract_test`) · `a loopback-resolving public name warns; literal loopback stays silent` · `a public extraHost name warns about the rebinding opt-out` · `every non-loopback extraHosts entry warns - dotless names and non-loopback IPv6 included` (`intake_health_test`) |
-| Duplicate-header smuggling | `400 duplicate_header` | `duplicate X-Correlation-Id: 400 duplicate_header, connection closed, zone clean` · `repeated Origin or X-Portal-Token, even identical values: 400 duplicate_header` (`intake_health_test`) · `400 duplicate header with ACAO for listed origins — stranger gets none` (`priority_contract_test`) |
+| Duplicate-header smuggling | `400 duplicate_header` | `duplicate X-Correlation-Id: 400 duplicate_header, connection closed, zone clean` · `repeated Origin or X-Bridge-Token, even identical values: 400 duplicate_header` (`intake_health_test`) · `400 duplicate header with ACAO for listed origins — stranger gets none` (`priority_contract_test`) |
 | Consent-question flooding | 3 open windows, a 10-per-10-minutes ask budget, honest `Retry-After` | `question-budget Retry-After tells the honest multi-minute wait` (`wire_contract_test`) · `a throwing consent callback consumes the question budget` · `a late answer for an open question survives a thousand abandoned windows` (`intake_protection_test`) |
 | Slowloris / body drip | Absolute body deadline, `408`, trickling senders never hold a gate | `a request stalling mid-body is answered with 408 within the timeout` · `a chunked body completing after the deadline is rejected 408, handler untouched` · `a drip under the silence window is cut by the absolute deadline before 1.25x of it` (`intake_limits_test`) · `413 drain cut on time: a trickling sender never holds the gate` (`wire_contract_test`) |
 | 413 drain abuse | Bounded drain budget, cut past it | `413 drain is bounded: past four bodies the connection is cut` · `413 drain cut on the byte-counter path: a chunked body with no Content-Length past the cap` · `both 413 responses name the 1 MiB limit, never 0MB` (`wire_contract_test`) |

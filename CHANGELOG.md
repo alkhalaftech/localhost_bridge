@@ -1,3 +1,28 @@
+## 0.2.0
+
+- **Breaking: the three intake names are renamed, the old ones removed
+  with no deprecation window** - the token header `X-Portal-Token`
+  becomes `X-Bridge-Token`, the generator `generatePortalToken()`
+  becomes `generateBridgeToken()`, and the originless command source
+  marker `'unknown-portal'` becomes `'unknown-origin'`. A request
+  carrying `X-Portal-Token` is treated as a request without a token
+  (the bridge writes one muted warning per second naming
+  `X-Bridge-Token`, so the developer sees why the token did not
+  authenticate), the allowed CORS headers list carries `X-Bridge-Token`
+  alone, and the token length cap (`400 token_too_long`) and the
+  single-value header gate now guard the new name. See
+  MIGRATION-0.2.0.md for the three renames and the migration paths.
+- Added: a single admission step - `IntakeProtection.admit` answers one
+  request with one `IntakeAdmission` record that carries the accepted
+  route, the CORS echo decision, and the verbose-error decision,
+  `TrustedCommand.admission` delivers that record to the host, and
+  `intakeRejectionRegistry` is the single table behind every rejection
+  code on the wire.
+- Deprecated: the per-question protection probes (`check`,
+  `echoesCorsFor`, `verboseErrorsFor`, `noteRejection`, `logRejection`,
+  and `normalize`) in favor of the admission record; removal is planned
+  for 0.3.0.
+
 ## 0.1.3
 
 - Security: an early rejection (405, a Host, shape or policy reject,

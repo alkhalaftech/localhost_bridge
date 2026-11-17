@@ -279,7 +279,7 @@ void main() {
   );
 
   test(
-    'repeated Origin or X-Portal-Token, even identical values: 400 duplicate_header',
+    'repeated Origin or X-Bridge-Token, even identical values: 400 duplicate_header',
     () async {
       final srv = _server(telemetry: const SilentTelemetry());
       await srv.start(preferredPort: 0);
@@ -287,7 +287,7 @@ void main() {
 
       final cases = <String, String>{
         'origin': 'Origin: https://a.example\r\nOrigin: https://a.example\r\n',
-        'x-portal-token': 'X-Portal-Token: T1\r\nX-Portal-Token: T1\r\n',
+        'x-portal-token': 'X-Bridge-Token: T1\r\nX-Bridge-Token: T1\r\n',
       };
       for (final entry in cases.entries) {
         final r = await _send(

@@ -9,7 +9,7 @@
 //
 // شغّله من جذر الحزمة: dart run example/payment_receipt.dart
 // ثم أرسل (بالتوكن المطبوع عند الإقلاع والمرجع المطبوع معه):
-// curl -X POST -H "X-Portal-Token: $PORTAL_TOKEN" \
+// curl -X POST -H "X-Bridge-Token: $BRIDGE_TOKEN" \
 //   -H "Content-Type: application/json" \
 //   -d '{"data":["{\"action\":\"receipt\",\"ref\":\"<المرجع المطبوع>\",\"order\":\"DEMO-9\",\"totalMinor\":1250,\"currency\":\"EUR\"}"]}' \
 //   http://127.0.0.1:$PORT/
@@ -128,7 +128,7 @@ CommandOutcome _settleReceipt(String payload) {
 }
 
 Future<void> main() async {
-  final token = generatePortalToken();
+  final token = generateBridgeToken();
   final server = LocalIntakeServer(
     onCommand: (cmd) async {
       for (final payload in cmd.payloads) {

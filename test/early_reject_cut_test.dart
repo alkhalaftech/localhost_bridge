@@ -116,7 +116,7 @@ Future<(int, String, bool)> _post(
   try {
     final req = await client.open(method, '127.0.0.1', port, '/');
     if (origin != null) req.headers.set('Origin', origin);
-    if (token != null) req.headers.set('X-Portal-Token', token);
+    if (token != null) req.headers.set('X-Bridge-Token', token);
     if (browserHeaders) {
       req.headers.set('Sec-Fetch-Mode', 'cors');
       req.headers.set('Sec-Fetch-Dest', 'empty');

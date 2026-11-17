@@ -156,13 +156,13 @@ void main() async {
 التوكن وإن كانت مقبولة أصلاً بلا توكن.
 
 وعميل التوكن المحلي لا يحتاج متصفحاً — `curl` واحد هو العميل كله.
-اضبط التوكن مرة بـ`update(token: generatePortalToken())` وسلّمه للعميل
+اضبط التوكن مرة بـ`update(token: generateBridgeToken())` وسلّمه للعميل
 خارج النطاق:
 
 ```bash
 curl -X POST http://127.0.0.1:9100/ \
   -H 'Content-Type: application/json' \
-  -H "X-Portal-Token: $PORTAL_TOKEN" \
+  -H "X-Bridge-Token: $PORTAL_TOKEN" \
   -d '{"data": ["your-command"]}'
 ```
 
@@ -248,7 +248,7 @@ JSON في كل مكان: `POST` مع `Origin`، والردود تحمل `X-Corre
 معرفك يُردّ إليك إن طابق `[A-Za-z0-9._-]` وكان طوله 128 حرفاً فأقل؛ وما
 عداه يُستبدل بمعرف مولَّد.
 قائمة `Access-Control-Allow-Headers` ثابتة: `Content-Type`
-و`X-Portal-Token` و`X-Correlation-Id` — فلا ترسل صفحتك ترويسة أخرى:
+و`X-Bridge-Token` و`X-Correlation-Id` — فلا ترسل صفحتك ترويسة أخرى:
 جواب الفحص المسبق لن يسمح بها. الأوامر تُرسل إلى `/`: في هذا الإصدار كل
 مسار آخر يبلغ المعالج أيضاً — والمضيف يُنبَّه عن POST في غير الجذر —
 فأرسل أوامرك إلى `/`.
@@ -258,7 +258,7 @@ JSON في كل مكان: `POST` مع `Origin`، والردود تحمل `X-Corre
 |---|---|---|
 | 200 | — | نجاح المعالج (`{"ok":true}`). |
 | 400 | `duplicate_header` / `origin_too_long` | ترويسة أحادية أُرسلت مرتين / ترويسة `Origin` أطول من السقف الداخلي للحزمة (1,024 محرفاً)، تُرد قبل أي معالجة. |
-| 400 | `origin_malformed` / `token_too_long` / `bad_request` | ترويسة `Origin` ليست بالشكل `scheme://host[:port]` / ترويسة `X-Portal-Token` فوق السقف الداخلي (1,024 بايتاً) / محلل HTTP رفض تأطير الطلب — كلها تُرد قبل وصول معالجك. |
+| 400 | `origin_malformed` / `token_too_long` / `bad_request` | ترويسة `Origin` ليست بالشكل `scheme://host[:port]` / ترويسة `X-Bridge-Token` فوق السقف الداخلي (1,024 بايتاً) / محلل HTTP رفض تأطير الطلب — كلها تُرد قبل وصول معالجك. |
 | 400 | `invalid_utf8` / `empty_payload` / `unsupported_payload_shape` | الجسم ليس UTF-8 / لا حمولة صالحة / كائن JSON بلا مفاتيح أوامر معروفة. الجسم الذي يفشل فك JSON كلياً **ليس** 400 — يسقط نصاً خاماً كأمر (عقد «غير JSON يبقى خاماً» المختبَر)؛ والرقم والمنطقي و`null` يسلكون المسار الخام نفسه؛ وداخل مصفوفة JSON تسقط العناصر غير النصية والفارغة بلا إشعار. |
 | 405 | `method_not_allowed` | المقبول `POST` (و`OPTIONS` للفحص المسبق) حصراً. |
 | 403 | `origin_not_listed` / `origin_declined` / `origin_unknown` / `origin_blocked` / `origin_pending` | رفض سياسة الأصول (غير مدرج / موافقة مرفوضة / غير قابل للتأكيد / تحصين الكل / نافذة موافقة مفتوحة — أعِد بعد `Retry-After`). |
@@ -354,7 +354,7 @@ iframe تحتاج الصفحة إلى `allow="loopback-network"` على الوس
   و`handlerTimeout`؛ وذروة الذاكرة تحت تدوير الأصول محدودة بالسقوف لا
   بالفيض؛ و`dart:io` نفسه لا يحد طول الترويسة الواحدة ولا عدد
   الاتصالات المفتوحة — الحزمة تسقف الترويسات التي تقرؤها حصراً
-  (`Origin` عند 1,024 محرفاً و`X-Portal-Token` عند 1,024 بايتاً)
+  (`Origin` عند 1,024 محرفاً و`X-Bridge-Token` عند 1,024 بايتاً)
   والمقاعد تحد الطلبات الجارية
   لا المقابس المفتوحة، والخاملة منها تنطفئ بعد `idleTimeout` (60
   ثانية افتراضياً).

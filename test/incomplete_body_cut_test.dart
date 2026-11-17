@@ -174,7 +174,7 @@ String _postHead(
     ..write('$method / HTTP/1.1\r\n')
     ..write('Host: ${host ?? '127.0.0.1:$port'}\r\n');
   if (origin != null) b.write('Origin: $origin\r\n');
-  if (token != null) b.write('X-Portal-Token: $token\r\n');
+  if (token != null) b.write('X-Bridge-Token: $token\r\n');
   if (correlationId != null) {
     b.write('X-Correlation-Id: $correlationId\r\n');
   }

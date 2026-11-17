@@ -1,4 +1,4 @@
-// Witness of the recommended token path: generatePortalToken() is the
+// Witness of the recommended token path: generateBridgeToken() is the
 // documented way to set up the token, so its shape and uniqueness are
 // pinned here against the two gates the suite enforces elsewhere - the
 // minimum update() accepts and the token_too_long header cap.
@@ -9,9 +9,9 @@ import 'package:localhost_bridge/localhost_bridge.dart';
 
 void main() {
   test(
-    'generatePortalToken matches its documented shape: 64 hex characters',
+    'generateBridgeToken matches its documented shape: 64 hex characters',
     () {
-      final token = generatePortalToken();
+      final token = generateBridgeToken();
       expect(token.length, 64, reason: '32 random bytes rendered in hex');
       expect(
         RegExp(r'^[0-9a-f]{64}$').hasMatch(token),
@@ -33,7 +33,7 @@ void main() {
 
   test('one thousand generated tokens are pairwise distinct', () {
     final tokens = <String>{
-      for (var i = 0; i < 1000; i++) generatePortalToken(),
+      for (var i = 0; i < 1000; i++) generateBridgeToken(),
     };
     expect(
       tokens.length,
