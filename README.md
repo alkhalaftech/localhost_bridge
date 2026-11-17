@@ -570,6 +570,13 @@ nothing listens in this release, and another local program can listen on
   is a single test replaying a fourteen-case corpus across three
   protection modes; `priority_contract_test` replays 300 seeded request
   rounds) — broader randomized corpora remain on the roadmap.
+- The browser channel is proven by a real-browser lab (`browser_lab_test`)
+  that drives a system Chrome/Chromium headlessly, with zero added
+  dependencies: a page carrying the accepted token sends a command and
+  reads the reply; an unpaired page is refused with no readable verdict
+  while the wire carries the literal code; and the preflight round trip
+  announces `X-Bridge-Token`. Without a browser the lab skips itself and
+  states why; CI runs it where the runner image ships Chrome.
 - Why no TLS: on the browser path over loopback, a self-signed certificate
   trains users to click through warnings and buys nothing against the
   browser adversary model above; the transport is loopback-only and never
