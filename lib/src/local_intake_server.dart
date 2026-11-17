@@ -615,6 +615,9 @@ class LocalIntakeServer {
   Future<void> _handle(HttpRequest request) async {
     final response = request.response;
     _corsHeaders(response);
+    // رد HEAD بلا جسم: الطلب الوحيد الذي يُحظر فيه المحتوى على السلك —
+    // كل ردود المقبس الخام له تحمل الرأس وحده (التأطيرية تبقى للعلم)
+    final headOnly = request.method == 'HEAD';
     try {
       // سقف طول الأصل: القيمة يتحكم فيها الخصم وتصير مفاتيح خرائط
       // وأسئلة موافقة وحقول معالج وسياق قياس قبل أي قرار سياسة —
@@ -634,6 +637,7 @@ class LocalIntakeServer {
               'Origin header exceeds the allowed length '
               '($_maxOriginChars characters)',
           bodyFullyRead: false,
+          headOnly: headOnly,
         );
         return;
       }
@@ -658,6 +662,7 @@ class LocalIntakeServer {
           code: 'origin_malformed',
           message: 'Origin header must be scheme://host[:port]',
           bodyFullyRead: false,
+          headOnly: headOnly,
         );
         return;
       }
@@ -697,6 +702,7 @@ class LocalIntakeServer {
               'X-Bridge-Token header exceeds the allowed length '
               '($_maxTokenHeaderBytes bytes)',
           bodyFullyRead: false,
+          headOnly: headOnly,
         );
         return;
       }
@@ -737,6 +743,7 @@ class LocalIntakeServer {
                 'Header "$name" was sent more than once — send '
                 'exactly one value',
             bodyFullyRead: false,
+            headOnly: headOnly,
           );
           return;
         }
@@ -772,6 +779,7 @@ class LocalIntakeServer {
           code: 'blocked_by_protection',
           message: reason,
           bodyFullyRead: false,
+          headOnly: headOnly,
         );
         return;
       }
@@ -811,6 +819,7 @@ class LocalIntakeServer {
           code: 'server_busy',
           message: 'The server is busy right now — please retry shortly',
           bodyFullyRead: false,
+          headOnly: headOnly,
         );
         return;
       }
@@ -902,6 +911,7 @@ class LocalIntakeServer {
               code: 'method_not_allowed',
               message: 'Send the command as a POST request',
               bodyFullyRead: false,
+              headOnly: request.method == 'HEAD',
             );
             return;
           }
@@ -1446,6 +1456,7 @@ class LocalIntakeServer {
     bool forceConnectionClose = false,
     bool immediateCut = false,
     bool safetyRetry = false,
+    bool headOnly = false,
   }) async {
     if (!bodyFullyRead) {
       if (json == null) {
@@ -1460,7 +1471,12 @@ class LocalIntakeServer {
       }
       final body = utf8.encode(jsonEncode(json));
       try {
-        final socket = await _detachAndReply(response, status, body);
+        final socket = await _detachAndReply(
+          response,
+          status,
+          body,
+          headOnly: headOnly,
+        );
         if (immediateCut) {
           socket.destroy();
         } else {
@@ -1518,6 +1534,7 @@ class LocalIntakeServer {
     required String code,
     required String message,
     required bool bodyFullyRead,
+    bool headOnly = false,
   }) async {
     final spec = intakeRejectionRegistry[code];
     if (spec == null) {
@@ -1530,6 +1547,7 @@ class LocalIntakeServer {
       bodyFullyRead: bodyFullyRead,
       forceConnectionClose: bodyFullyRead,
       immediateCut: spec.immediateCut,
+      headOnly: headOnly,
     );
   }
 
@@ -1543,8 +1561,9 @@ class LocalIntakeServer {
   Future<Socket> _detachAndReply(
     HttpResponse response,
     int status,
-    List<int>? body,
-  ) async {
+    List<int>? body, {
+    bool headOnly = false,
+  }) async {
     final socket = await response.detachSocket(writeHeaders: false);
     try {
       // الرد اليدوي بنفس شكل الرد المُدار: نفس الجسم، ونفس الترويسات
@@ -1582,7 +1601,10 @@ class LocalIntakeServer {
       // الرد أولاً ثم إغلاق جهة الكتابة: الفين يصل قبل أي شيء آخر، وجهة
       // القراءة باقية كما قيس (التفريغ بعده يرى الجسم كاملاً حتى onDone).
       socket.add(utf8.encode(head.toString()));
-      if (body != null) socket.add(body);
+      // رد HEAD بلا جسم على السلك حصراً (المشرّع: لا محتوى في رد HEAD
+      // أبداً) — التأطيرية Content-Length تبقى طول الجسم الذي كان سيُكتب
+      // لعلم القارئ، والبايتات لا تُكتب والاتصال يُغلق بعدها
+      if (body != null && !headOnly) socket.add(body);
       await socket.flush();
       await socket.close();
       return socket;
