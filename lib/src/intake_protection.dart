@@ -920,6 +920,18 @@ class IntakeProtection {
 
   /// Is the origin listed? - full match, bare host, or `*.domain` pattern
   /// (the pattern covers subdomains only; the root must be listed explicitly).
+  ///
+  /// Port semantics are per entry form, and this is the settled contract:
+  /// a full origin entry matches the exact origin string the browser
+  /// sends - scheme, host, and port exactly as written, so an entry for a
+  /// non-default port must carry that port and an entry without a port
+  /// matches only the portless form (a browser omits default ports, so
+  /// `https://host` is what `https://host:443` pages send). A bare-host
+  /// entry matches the host name alone on ANY port, and a `*.domain`
+  /// entry matches its subdomains on ANY port: the page's port is chosen
+  /// by whoever serves the page, so the bare and wildcard forms gate on
+  /// the domain while the full form pins the origin. All forms keep the
+  /// scheme rule below (https, or local http under allowLocalHttp).
   bool _isListed(String? origin) {
     if (origin == null || origin.isEmpty) return false;
     if (_consents[normalize(origin)] == OriginConsent.allowAlways) {
