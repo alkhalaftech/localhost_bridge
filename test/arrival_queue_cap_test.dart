@@ -35,16 +35,6 @@ void main() {
         }
         last = d;
       }
-      // ignore: avoid_print
-      print(
-        'A9-RED-PROOF fingerprint queue length = ${g.recentInMinuteOf('solo')} '
-        '(limit+1 = 501)',
-      );
-      // ignore: avoid_print
-      print(
-        'A9-RED-PROOF last decision: dups = ${(last as ReviewArrival).dups}, '
-        'recentInMinute = ${last.recentInMinute}',
-      );
       expect(
         accepts,
         500,
@@ -60,7 +50,8 @@ void main() {
             'the fingerprint queue is held to the per-minute limit plus one - '
             'memory no longer grows with the call rate inside one window',
       );
-      final r = last;
+      // القرار الأخير حلقة تكرار حامل للعدّادين المقيدين — الصلب يقرأهما
+      final r = last as ReviewArrival;
       expect(
         r.dups,
         lessThanOrEqualTo(501),

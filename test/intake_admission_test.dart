@@ -359,6 +359,71 @@ void main() {
     },
   );
 
+  test(
+    'the handler command carries the real admission record over the wire',
+    () async {
+      // شاهد الحقل المسجل بقيمة حقيقية: TrustedCommand.admission هو سجل
+      // مدخل القبول الواحد لا العنصر النائب - القائمة المسجلة كاملة
+      // الحقول على السلك، ومسار التوكن يحمل مساره هو
+      final captured = <TrustedCommand>[];
+      final pr = IntakeProtection()
+        ..update(
+          policy: const OriginPolicy(allowed: ['https://portal.example']),
+        );
+      final srv = LocalIntakeServer(
+        telemetry: const SilentTelemetry(),
+        correlationIdGenerator: () => 'adm-rec',
+        onCommand: (cmd) async {
+          captured.add(cmd);
+          return const CommandOutcome(ok: true);
+        },
+        protection: pr,
+      );
+      final port = await srv.start(preferredPort: 0);
+      addTearDown(srv.stop);
+      final r = await _post(port, origin: 'https://portal.example');
+      expect(r['status'], 200);
+      expect(captured, hasLength(1));
+      final rec = captured.single.admission;
+      // سجل حقيقي لا العنصر النائب: حامل قرار مسجل من مدخل القبول
+      expect(identical(rec, IntakeAdmission.unrecorded), isFalse);
+      expect(rec.rejection, isNull);
+      expect(rec.acceptedPath, IntakeAdmissionPath.listed);
+      expect(rec.echoesCors, isTrue);
+      expect(rec.verboseErrors, isTrue);
+      expect(rec.origin, 'https://portal.example');
+      expect(rec.normalizedOrigin, 'https://portal.example');
+      expect(rec.path, '/');
+      // ومسار التوكن على أصل غير مدرج: السجل يسجل مساره هو لا مسار
+      // القائمة، والنص التفصيلي لصاحب التوكن الموثوق
+      final capturedToken = <TrustedCommand>[];
+      final pr2 = IntakeProtection()
+        ..update(policy: const OriginPolicy(), token: _t64);
+      final srv2 = LocalIntakeServer(
+        telemetry: const SilentTelemetry(),
+        correlationIdGenerator: () => 'adm-rec2',
+        onCommand: (cmd) async {
+          capturedToken.add(cmd);
+          return const CommandOutcome(ok: true);
+        },
+        protection: pr2,
+      );
+      final port2 = await srv2.start(preferredPort: 0);
+      addTearDown(srv2.stop);
+      final r2 = await _post(port2, token: _t64);
+      expect(r2['status'], 200);
+      expect(capturedToken, hasLength(1));
+      final rec2 = capturedToken.single.admission;
+      expect(identical(rec2, IntakeAdmission.unrecorded), isFalse);
+      expect(rec2.acceptedPath, IntakeAdmissionPath.token);
+      expect(rec2.rejection, isNull);
+      expect(rec2.verboseErrors, isTrue);
+      expect(rec2.echoesCors, isFalse);
+      expect(rec2.origin, isNull);
+      expect(rec2.path, '/');
+    },
+  );
+
   test('noteAuthorityReject routes the host-authority deny through the same '
       'counter and security line', () async {
     final rec = _Rec();

@@ -258,19 +258,24 @@ Future<String> _dumpDom(String url, String evidenceFile) async {
     }
     final evidenceDir = Platform.environment['BRIDGE_LAB_EVIDENCE_DIR'];
     if (evidenceDir != null && evidenceDir.trim().isNotEmpty) {
+      // الدليل يُبنى إن لم يوجد (recursive) — مطلب الدليل لا يُسقط
+      // إثبات المتصفح بفشل مسار
+      Directory(evidenceDir).createSync(recursive: true);
       File('$evidenceDir/$evidenceFile').writeAsStringSync(dom);
     }
     return dom;
   } finally {
-    // ملف المستخدم المؤقت يُحذف بأفضل جهد: المتصفح على ويندوز قد يمسك
-    // مقبضاً متأخراً لحظة الحذف (Access denied) فتُترك البقية لتنظيف
-    // النظام — فشل التنظيف لا يُسقط إثبات المتصفح أبداً
+    // ملف المستخدم المؤقت يُحذف بأفضل جهد وانتظار كامل: الحذف غير
+    // المنتظر يجعل خطأه يتيماً على المعزل فيُلصق باختبار عشوائي،
+    // والمتصفح على ويندوز قد يمسك مقبضاً متأخراً لحظة الحذف (Access
+    // denied) — انتظار قصير ثم محاولة ثانية منتظرة، وبقايا النظام
+    // المؤقت مقصودة إن فشلت الاثنتان
     try {
-      userDataDir.delete(recursive: true);
+      await userDataDir.delete(recursive: true);
     } on IOException {
       try {
         await Future<void>.delayed(const Duration(milliseconds: 250));
-        userDataDir.delete(recursive: true);
+        await userDataDir.delete(recursive: true);
       } on IOException {
         // بقايا مقصودة في مجلد النظام المؤقت
       }
@@ -316,19 +321,24 @@ Future<_Exchange> _send(
 }
 
 void main() {
-  // الحاوية المشتركة: صفحة من أصل حقيقي + جسر مقبول (أصل مدرج وتوكن) +
-  // جسر افتراضي (لا قائمة ولا توكن) — سيناريوهات المختبر الثلاثة كلها على
-  // الصفحة نفسها، وكل اختبار يصحح علامات سيناريوه هو وحده.
+  // الحاوية المشتركة: صفحة من أصل حقيقي + جسر مقبول + جسر افتراضي (لا
+  // قائمة ولا توكن) — سيناريوهات المختبر الثلاثة كلها على الصفحة نفسها،
+  // وكل اختبار يصحح علامات سيناريوه هو وحده. بوضع [tokenOnlyAdmitted]
+  // يُبنى الجسر المقبول بالتوكن وحده بلا قائمة: مسار التوكن هو الباب
+  // الوحيد على السلك، والصفحة لا تستطيع عبوره أصلاً (لا صدى يُجاب
+  // في هذا الوضع بالعقد الموثق) فالشاهد يثبت الوجهين.
   Future<
     (HttpServer, LocalIntakeServer, LocalIntakeServer, int, int, int, String)
   >
-  lab() async {
+  lab({bool tokenOnlyAdmitted = false}) async {
     final token = generateBridgeToken();
     // الجسر المقبول يُبنى على أصل الصفحة قبل أن تُخدم الصفحة: المنفذ
     // المعمى في HTML يحتاج منافذ الجسور جاهزة أولاً
     final pageServer = await HttpServer.bind(InternetAddress.loopbackIPv4, 0);
     final (admitted, admittedPort) = await _startBridge(
-      allowedOrigin: 'http://127.0.0.1:${pageServer.port}',
+      allowedOrigin: tokenOnlyAdmitted
+          ? null
+          : 'http://127.0.0.1:${pageServer.port}',
       token: token,
     );
     final (defaultBridge, defaultPort) = await _startBridge();
@@ -358,10 +368,16 @@ void main() {
     );
   }
 
-  test('a real browser page carrying the accepted token sends a command and '
-      'reads the reply', () async {
+  test('the token scenario runs on a token-only bridge: the token is the '
+      'only wire door, and the browser page cannot cross it (nothing is '
+      'echoed)', () async {
+    // جسر السيناريو بوضع «توكن فقط»: أصل الصفحة غير مدرج فالعبور على
+    // السلك يحتاج التوكن حصراً — وبدونه أو بخاطئ لا باب. الصفحة
+    // المتصفحية لا تستطيع العبور أصلاً في هذا الوضع بالعقد الموثق
+    // (لا صدى يُجاب فالمتصفح يحجب) — فهذا ما يثبته السطر أيضاً،
+    // والتوكن يبقى طريق المرسل غير المتصفحي هنا
     final (pageServer, admitted, _, pagePort, admittedPort, _, token) =
-        await lab();
+        await lab(tokenOnlyAdmitted: true);
     addTearDown(pageServer.close);
     addTearDown(admitted.stop);
     final dom = _flat(
@@ -372,22 +388,34 @@ void main() {
     );
     expect(
       dom,
-      contains('LAB-TOKENED:200:true:no-error\n'),
-      reason: 'the tokened page crosses and reads the success reply',
+      contains('LAB-TOKENED:THREW\n'),
+      reason:
+          'a token-only bridge echoes nothing, so the browser blocks '
+          'the tokened call - the token stays a non-browser path here '
+          'exactly as the contract states',
     );
-    expect(
-      dom,
-      isNot(contains('LAB-TOKENED:THREW\n')),
-      reason: 'the browser never fails the admitted tokened call',
-    );
-    // نفس الجولة على السلك من طرف الاختبار: العقد نفسه بلا متصفح
+    // السلك من طرف الاختبار: التوكن هو الباب الوحيد — به يعبر، وبغيره
+    // أو بخاطئ يُرد عدم الإدراج
     final (status, body, _) = await _send(
       admittedPort,
       origin: 'http://127.0.0.1:$pagePort',
       headers: {'X-Bridge-Token': token},
     );
-    expect(status, 200);
+    expect(status, 200, reason: 'the correct token is the only door');
     expect(body, contains('"ok":true'));
+    final (noTokenStatus, noTokenBody, _) = await _send(
+      admittedPort,
+      origin: 'http://127.0.0.1:$pagePort',
+    );
+    expect(noTokenStatus, 403, reason: 'without the token there is no door');
+    expect(noTokenBody, contains('"error":"origin_not_listed"'));
+    final (wrongStatus, wrongBody, _) = await _send(
+      admittedPort,
+      origin: 'http://127.0.0.1:$pagePort',
+      headers: {'X-Bridge-Token': 'wrong-token-value-wrong-token-value12'},
+    );
+    expect(wrongStatus, 403, reason: 'a wrong token opens no door');
+    expect(wrongBody, contains('"error":"origin_not_listed"'));
   }, skip: _skipReason);
 
   test('an unpaired page is refused: the browser sees no verdict while the '
@@ -407,12 +435,20 @@ void main() {
       contains('LAB-UNPAIRED:BLOCKED-NO-VERDICT\n'),
       reason: 'the unpaired page gets no readable verdict at all',
     );
+    // التوكيد الموجب: سطر البادئة الوحيد في كل الـDOM هو سطر الحجب —
+    // أي سطر مقروء آخر (LAB-UNPAIRED:READ:...) حكمٌ قابل للقراءة
+    // فيكون قناة استطلاع الحماية قد فُتحت
+    final unpairedLines = RegExp(
+      '^LAB-UNPAIRED:.*\$',
+      multiLine: true,
+    ).allMatches(dom).map((m) => m.group(0)!).toList();
     expect(
-      dom,
-      isNot(contains('LAB-UNPAIRED:READ:\n')),
+      unpairedLines,
+      ['LAB-UNPAIRED:BLOCKED-NO-VERDICT'],
       reason:
-          'a readable refusal for an unpaired origin would be a '
-          'recon channel the protection must never open',
+          'the blocked verdict is the ONLY line carrying the prefix - a '
+          'readable refusal for an unpaired origin would be a recon '
+          'channel the protection must never open',
     );
     // السلك يحمل الرمز الحرفي من الطرف نفسه في الجولة نفسها
     final (status, body, headers) = await _send(
