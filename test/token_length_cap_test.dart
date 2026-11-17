@@ -279,18 +279,34 @@ void main() {
         missStatuses.add(r['status'] as int);
       }
       expect(missStatuses, everyElement(403));
-      final locked = await _exchange(
+      // الإخفاق السادس الخاطئ فوق الميزانية: يُرد — الإخفاقات عند السقف
+      // نفسه تبقى إخفاقات تحسب، والبوابة تحرس ما هو أطول منها فقط
+      final wrongSixth = await _exchange(
         p,
-        _request(p, token: _t64, origin: 'https://boundary.example'),
+        _request(p, token: 'x' * 1024, origin: 'https://boundary.example'),
       );
       expect(
-        locked['status'],
+        wrongSixth['status'],
         429,
         reason:
             'five misses at exactly the cap formed the lockout - the '
             'gate guards only what is longer than the cap',
       );
-      expect(bodyJson(locked.cast<String, Object>())['error'], 'token_locked');
+      expect(
+        bodyJson(wrongSixth.cast<String, Object>())['error'],
+        'token_locked',
+      );
+      // والتوكن الصحيح فوق الميزانية المنفقة نفسها: يُقارن ويُقبَل —
+      // النافذة إشارة عن الخاطئ لا رافض للصحيح
+      final correct = await _exchange(
+        p,
+        _request(p, token: _t64, origin: 'https://boundary.example'),
+      );
+      expect(
+        correct['status'],
+        200,
+        reason: 'the correct token is accepted whatever the failure history',
+      );
     },
   );
 
@@ -426,8 +442,10 @@ void main() {
               'in full',
         );
       }
-      // سر متعدد البايتات: الحساب على بايتات UTF-8 لا المحارف
-      final arabic = 'س' * 20; // 20 محرفاً × 2 بايت = 40 بايتاً
+      // سر متعدد البايتات: الحساب على بايتات UTF-8 لا المحارف — عشرة
+      // محارف عربية مختلفة (كل محرف 2 بايت) فيعبر فحص التنوع ويبقى
+      // الشاهد عن البايتات لا المحارف
+      final arabic = 'سشصضطظعغفق' * 2; // 20 محرفاً × 2 بايت = 40 بايتاً
       final p = IntakeProtection(telemetry: rec)
         ..update(policy: const OriginPolicy(), token: arabic);
       expect(

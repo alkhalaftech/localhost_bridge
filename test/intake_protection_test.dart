@@ -611,7 +611,13 @@ void main() {
       () async {
         final rec = _Rec();
         final p = IntakeProtection(telemetry: rec);
-        p.update(token: 't' * 300);
+        // 300 بايتاً فوق الحشوة بتنوّع يمر فحص التنوع — الشاهد هنا عن
+        // الطول والتحذير لا عن التنوع
+        final overPadToken = List.generate(
+          300,
+          (i) => '0123456789abcdef'[i % 16],
+        ).join();
+        p.update(token: overPadToken);
         final overWarn = rec.warns
             .where((w) => w.contains('exceeds the'))
             .join(' ');
@@ -626,7 +632,7 @@ void main() {
           reason: 'a settings warning does not pollute the rejection counter',
         );
         expect(
-          await p.check(origin: null, portalToken: 't' * 300),
+          await p.check(origin: null, portalToken: overPadToken),
           isNull,
           reason: 'full-length comparison - accepted as is',
         );
@@ -1619,7 +1625,7 @@ void main() {
     });
 
     test(
-      'token_locked: the window is per-origin - a guessing origin locks only itself',
+      'the wrong-guess budget is per-origin - a guessing origin spends only its own',
       () async {
         final p = IntakeProtection()
           ..update(
@@ -1628,7 +1634,7 @@ void main() {
                 'a3f1c52e94b7d068f5e2a9c4b1d7e8036f9a2c5e8b1d7f04a6c9e2d5f8b3a1c7',
           );
         final sw = Stopwatch()..start();
-        // خمسة إخفاقات من أصل واحد تكفي لعتبة قفله وحده — بلا نوم
+        // خمسة إخفاقات من أصل واحد تكفي لميزانيته وحده — بلا نوم
         for (var i = 0; i < 5; i++) {
           await p.check(origin: 'https://guess.example', portalToken: 'WRONG');
         }
@@ -1636,17 +1642,29 @@ void main() {
         expect(
           sw.elapsed,
           lessThan(const Duration(milliseconds: 200)),
-          reason: 'no sleep at all - the lock is immediate and free',
+          reason: 'no sleep at all - the budget is immediate and free',
         );
-        // التوكن الصحيح من الأصل المقفل نفسه: يُرد 429 — القفل يسبق المقارنة
-        final correctButLocked = await p.check(
+        // الخاطئ السادس فوق الميزانية: يُرد token_locked — الرمز باق
+        // للتخمين الخاطئ لا للصحيح
+        final sixthWrong = await p.check(
+          origin: 'https://guess.example',
+          portalToken: 'WRONG',
+        );
+        expect(sixthWrong!.status, 429);
+        expect(sixthWrong.code, 'token_locked');
+        // والتوكن الصحيح من الأصل المفيض نفسه: يُقارن ويُقبل — النافذة
+        // إشارة لا رافض، وما فوق الميزانية رفضٌ للخاطئ لا للصحيح
+        final correctAfterFlood = await p.check(
           origin: 'https://guess.example',
           portalToken:
               'a3f1c52e94b7d068f5e2a9c4b1d7e8036f9a2c5e8b1d7f04a6c9e2d5f8b3a1c7',
         );
-        expect(correctButLocked!.status, 429);
-        expect(correctButLocked.code, 'token_locked');
-        // أصل آخر بالتوكن الصحيح: يعبر — قفل المخمّن لا يسجن الجسر
+        expect(
+          correctAfterFlood,
+          isNull,
+          reason: 'the correct token is accepted whatever the failure history',
+        );
+        // أصل آخر بالتوكن الصحيح: يعبر — ميزانية المخمّن لا تسجن الجسر
         // للبوابة الشرعية
         final other = await p.check(
           origin: 'https://legit.example',
@@ -1657,10 +1675,10 @@ void main() {
           other,
           isNull,
           reason:
-              'a guessing origin cannot lock the token for the '
+              'a guessing origin cannot spend the token budget for the '
               'legitimate origin',
         );
-        // وبلا أصل: نافذة مشتركة مستقلة — التكامل المحلي لم يقفل بعد
+        // وبلا أصل: نافذة مشتركة مستقلة — التكامل المحلي لم ينفق بعد
         final anon = await p.check(origin: null, portalToken: 'WRONG');
         expect(
           anon!.code,
@@ -1674,13 +1692,13 @@ void main() {
                 'a3f1c52e94b7d068f5e2a9c4b1d7e8036f9a2c5e8b1d7f04a6c9e2d5f8b3a1c7',
           ),
           isNull,
-          reason: 'a correct token from an unlocked window passes',
+          reason: 'a correct token from an unspent window passes',
         );
       },
     );
 
     test(
-      'the originless window is one shared lock for local integrations',
+      'the originless window is one shared budget for local integrations',
       () async {
         final p = IntakeProtection()
           ..update(
@@ -1691,17 +1709,24 @@ void main() {
         for (var i = 0; i < 5; i++) {
           await p.check(origin: null, portalToken: 'WRONG');
         }
-        final anon = await p.check(
-          origin: null,
-          portalToken:
-              'a3f1c52e94b7d068f5e2a9c4b1d7e8036f9a2c5e8b1d7f04a6c9e2d5f8b3a1c7',
-        );
+        // الخاطئ السادس فوق الميزانية المشتركة: يُرد — والصحيح بعده
+        // يُقارن ويُقبَل أياً كان تاريخ الإخفاقات
+        final wrongSixth = await p.check(origin: null, portalToken: 'WRONG');
         expect(
-          anon!.code,
+          wrongSixth!.code,
           'token_locked',
           reason:
-              'originless misses share one window - the lock precedes '
-              'the comparison',
+              'originless misses share one budget - wrong guesses above it '
+              'wait',
+        );
+        expect(
+          await p.check(
+            origin: null,
+            portalToken:
+                'a3f1c52e94b7d068f5e2a9c4b1d7e8036f9a2c5e8b1d7f04a6c9e2d5f8b3a1c7',
+          ),
+          isNull,
+          reason: 'the shared window never refuses the correct token',
         );
         expect(
           await p.check(
@@ -1710,7 +1735,7 @@ void main() {
                 'a3f1c52e94b7d068f5e2a9c4b1d7e8036f9a2c5e8b1d7f04a6c9e2d5f8b3a1c7',
           ),
           isNull,
-          reason: 'the originless lock does not touch web origins',
+          reason: 'the originless budget does not touch web origins',
         );
       },
     );
@@ -2917,7 +2942,8 @@ void main() {
           'origin_not_listed',
         );
         // عقد الاحتفاظ بما يُرصد علنياً: لا شبح من النافذة المنقضية —
-        // التوكن الصحيح يعبر، والانفجار الجديد يقفل من الصفر بانتظار صادق
+        // التوكن الصحيح يعبر، والانفجار الجديد ينفق الميزانية من الصفر
+        // بانتظار صادق
         expect(
           await p.check(
             origin: 'https://stale0.example',
@@ -2930,10 +2956,11 @@ void main() {
         for (var i = 0; i < 5; i++) {
           await p.check(origin: 'https://stale0.example', portalToken: 'WRONG');
         }
+        // الخاطئ السادس فوق الميزانية المنفقة يُرد بانتظار يحسب
+        // الإخفاقات الطازجة وحدها فالمعلن صادق — والصحيح بعده يُقبل
         final locked = await p.check(
           origin: 'https://stale0.example',
-          portalToken:
-              'a3f1c52e94b7d068f5e2a9c4b1d7e8036f9a2c5e8b1d7f04a6c9e2d5f8b3a1c7',
+          portalToken: 'WRONG',
         );
         expect(locked!.code, 'token_locked');
         expect(
@@ -2943,68 +2970,75 @@ void main() {
               'the re-lock counts only fresh misses - the expired window '
               'exerted no influence and the announced wait is honest',
         );
+        expect(
+          await p.check(
+            origin: 'https://stale0.example',
+            portalToken:
+                'a3f1c52e94b7d068f5e2a9c4b1d7e8036f9a2c5e8b1d7f04a6c9e2d5f8b3a1c7',
+          ),
+          isNull,
+          reason: 'the correct token is accepted whatever the fresh misses',
+        );
       },
     );
   });
 
-  group('one token verdict per request: the lock gates the verbose decision', () {
+  group('one token verdict per request: the verified token keeps its verdict', () {
     const t64 =
         'a3f1c52e94b7d068f5e2a9c4b1d7e8036f9a2c5e8b1d7f04a6c9e2d5f8b3a1c7';
 
-    test(
-      'a locked origin with the correct token earns no host message',
-      () async {
-        final p = IntakeProtection()
-          ..update(
-            policy: const OriginPolicy(allowAllHardened: true),
-            token: t64,
-          );
-        for (var i = 0; i < 5; i++) {
-          await p.check(
-            origin: 'https://guess.example',
-            portalToken: 'WRONG',
-            fetchMode: 'cors',
-            fetchDest: 'empty',
-          );
-        }
-        // خمسة إخفاقات قفلت نافذة الأصل: الطلب الصحيح يعبر بقرار سياسة
-        // «الكل» لأن القفل يجعل التوكن غائباً عن قرار القبول — وهو غائب
-        // عن قرار النص التفصيلي أيضاً، فالمقارنة خارج بوابة القفل قناة
-        // تخمين موازية تعبر من نص خطأ المضيف
-        expect(
-          await p.check(
-            origin: 'https://guess.example',
-            portalToken: t64,
-            fetchMode: 'cors',
-            fetchDest: 'empty',
-          ),
-          isNull,
-          reason: 'the allow-all policy admits the request while locked',
+    test('a budget-spent window never refuses the correct token and never '
+        'hides its host message', () async {
+      final p = IntakeProtection()
+        ..update(
+          policy: const OriginPolicy(allowAllHardened: true),
+          token: t64,
         );
-        expect(
-          p.verboseErrorsFor('https://guess.example', t64),
-          isFalse,
-          reason:
-              'a locked miss window makes the token absent for the verbose '
-              'decision too - the host text must not ride an ungated '
-              'comparison',
+      for (var i = 0; i < 5; i++) {
+        await p.check(
+          origin: 'https://guess.example',
+          portalToken: 'WRONG',
+          fetchMode: 'cors',
+          fetchDest: 'empty',
         );
-        // النافذة المشتركة للطلبات بلا Origin تحكم القرار نفسه
-        for (var i = 0; i < 5; i++) {
-          await p.check(origin: null, portalToken: 'WRONG');
-        }
-        expect(
-          (await p.check(origin: null, portalToken: t64))!.code,
-          'token_locked',
-          reason: 'the shared originless window locks like a web one',
-        );
-        expect(
-          p.verboseErrorsFor(null, t64),
-          isFalse,
-          reason: 'a locked shared window strips the host text as well',
-        );
-      },
-    );
+      }
+      // خمسة إخفاقات انفقت ميزانية الأصل: الطلب الصحيح يُقارن ويُقبل —
+      // والنص التفصيلي للمضيف يقرأ نتيجة المقارنة المسجلة نفسها فالمتحقق
+      // منه يأخذ نصه مهما كان تاريخ الإخفاقات، والنافذة إشارة عن
+      // التخمين الخاطئ لا رافض للتوكن الصحيح
+      expect(
+        await p.check(
+          origin: 'https://guess.example',
+          portalToken: t64,
+          fetchMode: 'cors',
+          fetchDest: 'empty',
+        ),
+        isNull,
+        reason: 'the spent budget admits the verified token',
+      );
+      expect(
+        p.verboseErrorsFor('https://guess.example', t64),
+        isTrue,
+        reason:
+            'a verified token keeps the host text whatever the miss-window '
+            'history - the verdict reads the recorded comparison',
+      );
+      // النافذة المشتركة للطلبات بلا Origin تحكم القرار نفسه: الصحيح
+      // يُقبل ولا يُخفى نصه
+      for (var i = 0; i < 5; i++) {
+        await p.check(origin: null, portalToken: 'WRONG');
+      }
+      expect(
+        await p.check(origin: null, portalToken: t64),
+        isNull,
+        reason: 'the shared originless window never refuses the correct token',
+      );
+      expect(
+        p.verboseErrorsFor(null, t64),
+        isTrue,
+        reason: 'a verified token over the shared window keeps the text too',
+      );
+    });
 
     test(
       'with no misses the correct token from an unlisted origin keeps the message',
@@ -3069,7 +3103,7 @@ void main() {
     );
 
     test(
-      'a locked origin is refused without opening a new consent question',
+      'a spent budget is refused without opening a new consent question',
       () async {
         var asked = 0;
         final p = IntakeProtection()
@@ -3096,13 +3130,13 @@ void main() {
           );
           await pumpEventQueue();
         }
-        expect(asked, 5, reason: 'each unlocked miss fired its own question');
-        // السادس: نافذة القفل مقفلة — يُرد token_locked بلا سؤال سادس،
-        // فطلب مقفل لا يفتح نوافذ موافقة جديدة مهما ما زالت ميزانية
-        // الأسئلة تسمح
+        expect(asked, 5, reason: 'each in-budget miss fired its own question');
+        // السادس الخاطئ فوق الميزانية: يُرد token_locked بلا سؤال سادس،
+        // فطلب فوق الميزانية لا يفتح نوافذ موافقة جديدة مهما ما زالت
+        // ميزانية الأسئلة تسمح — والصحيح فوق الميزانية نفسها يُقبل
         final sixth = await p.check(
           origin: 'https://fresh.example',
-          portalToken: t64,
+          portalToken: 'WRONG',
           fetchMode: 'cors',
           fetchDest: 'empty',
         );
@@ -3112,8 +3146,18 @@ void main() {
           asked,
           5,
           reason:
-              'a locked request opens no consent question - the callback '
-              'counter stays at five',
+              'a budget-spent request opens no consent question - the '
+              'callback counter stays at five',
+        );
+        expect(
+          await p.check(
+            origin: 'https://fresh.example',
+            portalToken: t64,
+            fetchMode: 'cors',
+            fetchDest: 'empty',
+          ),
+          isNull,
+          reason: 'the correct token over the spent budget is accepted',
         );
       },
     );

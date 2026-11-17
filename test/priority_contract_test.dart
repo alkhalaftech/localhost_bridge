@@ -178,7 +178,7 @@ void main() {
     );
 
     test(
-      'unlisted origin with correct token: the guessing origin stays locked, another passes',
+      'unlisted origin with correct token: accepted whatever the guessing history, another passes',
       () async {
         final p = IntakeProtection()
           ..update(
@@ -189,18 +189,32 @@ void main() {
         for (var i = 0; i < 5; i++) {
           await p.check(origin: 'https://evil.example', portalToken: 'WRONG');
         }
-        final locked = await p.check(
+        // الخاطئ السادس فوق الميزانية يُرد — والرمز باق للتخمين الخاطئ
+        final wrongSixth = await p.check(
+          origin: 'https://evil.example',
+          portalToken: 'WRONG',
+        );
+        expect(wrongSixth!.status, 429);
+        expect(
+          wrongSixth.code,
+          'token_locked',
+          reason:
+              'wrong guesses above the spent budget wait - the code '
+              'stays reserved for them, never for the correct token',
+        );
+        // الصحيح من الأصل المفيض نفسه: يُقارن ويُقبل — النافذة إشارة عن
+        // الخاطئ لا رافض للصحيح
+        final accepted = await p.check(
           origin: 'https://evil.example',
           portalToken:
               'a3f1c52e94b7d068f5e2a9c4b1d7e8036f9a2c5e8b1d7f04a6c9e2d5f8b3a1c7',
         );
-        expect(locked!.status, 429);
         expect(
-          locked.code,
-          'token_locked',
+          accepted,
+          isNull,
           reason:
-              'comparison is blocked under the lock, so a correct token '
-              'does not save the guessing origin',
+              'the correct token is compared and accepted whatever the '
+              'failure history',
         );
         final other = await p.check(
           origin: 'https://x.example',
@@ -273,27 +287,33 @@ void main() {
       expect(
         (await p.check(origin: 'https://a.example', portalToken: 'W'))!.code,
         isNot('token_locked'),
-        reason: 'an originless lock does not touch web origins',
+        reason: 'an originless budget does not touch web origins',
       );
       for (var i = 0; i < 5; i++) {
         await p.check(origin: 'https://b.example', portalToken: 'W');
       }
-      // نافذة بلا-أصل ما زالت مقفولة بلا إخفاقات ويب إضافية
+      // نافذة بلا-أصل ما زالت منفقة الميزانية بلا إخفاقات ويب إضافية:
+      // الخاطئ يُرد والصحيح يُقارن ويُقبَل
       expect(
-        (await p.check(
+        (await p.check(origin: null, portalToken: 'W'))!.status,
+        429,
+        reason: 'the originless window is separate from the web one',
+      );
+      expect(
+        await p.check(
           origin: null,
           portalToken:
               'a3f1c52e94b7d068f5e2a9c4b1d7e8036f9a2c5e8b1d7f04a6c9e2d5f8b3a1c7',
-        ))!.status,
-        429,
-        reason: 'the originless window is separate from the web one',
+        ),
+        isNull,
+        reason: 'the shared window never refuses the correct token',
       );
     });
   });
 
   group('one token verdict per request — the failing-handler message', () {
     test(
-      'a locked origin with the correct token gets the error code without the host message',
+      'a wrong token never earns the host message even over a spent budget; the verified token does',
       () async {
         const t64 =
             'a3f1c52e94b7d068f5e2a9c4b1d7e8036f9a2c5e8b1d7f04a6c9e2d5f8b3a1c7';
@@ -326,25 +346,42 @@ void main() {
             reason: 'a wrong token is not a trusted one',
           );
         }
-        // السادس بالتوكن الصحيح: نافذة القفل تجعل التوكن غائباً عن قرار
-        // النص التفصيلي كما هو غائب عن قرار القبول — الطلب يعبر (سياسة
-        // «الكل») والمعالج يفشل فيأخذ الرد الرمز وحده بلا نص المضيف
-        final locked = await _talk(
+        // السادس بالتوكن الخاطئ فوق الميزانية المنفقة: يُقبل بقرار سياسة
+        // «الكل» كما الخمسة — فيفشل المعالج ويأخذ الرد الرمز وحده بلا نص
+        // المضيف، فالميزانية لا تمنح الخاطئ ما لا يملكه
+        final spentWrong = await _talk(
+          port,
+          _post(port, 'https://guess.example', token: 'WRONG'),
+        );
+        expect(
+          spentWrong['status'],
+          500,
+          reason: 'admission follows the origin policy, not the budget',
+        );
+        expect(bodyJson(spentWrong)['error'], 'bridge_boom');
+        expect(
+          bodyJson(spentWrong).containsKey('message'),
+          isFalse,
+          reason: 'a spent budget never grants the host text to a wrong token',
+        );
+        // والتوكن الصحيح فوق الميزانية نفسها: يُقارن ويُقبل موثوقاً —
+        // نص المضيف يسافر معه لأن المقارنة المسجلة هي الدليل
+        final verified = await _talk(
           port,
           _post(port, 'https://guess.example', token: t64),
         );
         expect(
-          locked['status'],
+          verified['status'],
           500,
-          reason: 'admission follows the origin policy, not the lock',
+          reason: 'admission follows the origin policy, not the budget',
         );
-        expect(bodyJson(locked)['error'], 'bridge_boom');
+        expect(bodyJson(verified)['error'], 'bridge_boom');
         expect(
-          bodyJson(locked).containsKey('message'),
-          isFalse,
+          bodyJson(verified)['message'],
+          'host-side failure detail',
           reason:
-              'a locked miss window makes the token absent for the verbose '
-              'decision - the host text must not travel',
+              'a verified token keeps the host message whatever the '
+              'miss-window history',
         );
       },
     );
@@ -1119,8 +1156,10 @@ void main() {
             );
           }
         }
-        // المحارف متعددة البايت: بايتاتها هي التي تُحسب
-        final arabic = 'س' * 40; // 40 محرفا × 2 بايت
+        // المحارف متعددة البايت: بايتاتها هي التي تُحسب — عشرة محارف
+        // عربية مختلفة (كل محرف 2 بايت) فيعبر فحص التنوع ويبقى الشاهد
+        // عن البايتات لا المحارف
+        final arabic = 'سشصضطظعغفق' * 4; // 40 محرفاً × 2 بايت
         final p = IntakeProtection()..update(token: arabic);
         expect(await p.check(origin: null, portalToken: arabic), isNull);
       },

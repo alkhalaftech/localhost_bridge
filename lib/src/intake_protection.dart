@@ -284,6 +284,8 @@ class _AdmissionDecision {
     this.tokenAttempt = false,
     this.tokenCompared = false,
     this.tokenMatched = false,
+    this.tokenMissStamped = false,
+    this.tokenBudgetSpent = false,
     this.quotaLimit = 0,
     this.grantExisted = false,
     this.reachedAskTrim = false,
@@ -309,12 +311,22 @@ class _AdmissionDecision {
   /// the old gate.
   final bool tokenAttempt;
 
-  /// Whether the token was compared - false under the lock and when the
-  /// header was absent, so a locked or absent token is never compared.
+  /// Whether the token was compared - false when the header was absent,
+  /// so an absent token is never compared; the comparison runs whatever
+  /// the miss-window history.
   final bool tokenCompared;
 
   /// Whether the comparison matched - a match clears the miss window.
   final bool tokenMatched;
+
+  /// Whether the wrong-token miss lands a stamp on settle - under the
+  /// budget every miss counts; above it nothing stamps, so the window
+  /// drains honestly and the announced wait stays true.
+  final bool tokenMissStamped;
+
+  /// Whether the request presented a wrong token above the spent budget -
+  /// settle writes the muted budget line for it.
+  final bool tokenBudgetSpent;
 
   /// The quota limit that governed the branch (0 = the branch ran no
   /// quota) - settle re-runs the same mutating quota call so the stamp, or
@@ -465,20 +477,41 @@ class IntakeProtection {
     _consents[key] = decision;
   }
 
-  /// Token-guessing lockout - the window is per-origin for web requests (a
-  /// guessing origin locks only itself: a collective web window let any
-  /// visited site lock the bridge for the legitimate origin), one shared
-  /// window for originless requests (local integrations), and idle windows
-  /// swept once a second exactly like the origin quota windows below.
+  /// Token-guessing budget windows - per-origin for web requests (a
+  /// guessing origin spends only its own budget), one shared window for
+  /// originless requests (local integrations), and idle windows swept once
+  /// a second exactly like the origin quota windows below.
   final Map<String, Queue<int>> _tokenMissWindows = <String, Queue<int>>{};
   final Queue<String> _tokenMissOrder = ListQueue<String>();
   int _nextTokenSweepMs = 0;
-  static const _tokenLockThreshold = 5;
-  static const _tokenLockWindowMs = 60_000;
+
+  /// The wrong-guess budget, in wrong token attempts per budget window:
+  /// a sender that spends it - an origin its five attempts, or the shared
+  /// originless window - gets `429 token_locked` for further wrong tokens
+  /// until the window drains, while the correct token is compared and
+  /// accepted whatever the failure history. The window is a signal about
+  /// wrong guesses (a counter, a muted security line, a refusal for wrong
+  /// guesses above the budget), never a refusal of the verified token.
+  /// Internal constants with their unit written here - no public option.
+  static const _tokenGuessBudget = 5;
+
+  /// The budget window length in milliseconds - the unit of
+  /// [_tokenGuessBudget] is wrong attempts per this window.
+  static const _tokenBudgetWindowMs = 60_000;
 
   /// The length floor a configured bridge token must meet (UTF-8 bytes):
   /// update() refuses anything shorter - see the guard there.
   static const _minTokenBytes = 32;
+
+  /// The character-diversity floor a configured token must meet: below it
+  /// (fewer than 8 distinct characters — a repeated-character token is
+  /// guessable at a glance) update() refuses at set time. The floor sits
+  /// far below what a random 64-hex generator produces (the symbols are 16
+  /// and 64 draws practically never fall below 15 distinct), so generated
+  /// tokens never trip it. Internal constant - no public option. The check
+  /// lives in update() alone: a legitimately saved state keeps loading at
+  /// startup with a rotation warning (see updateFromSaved).
+  static const _minTokenDistinctChars = 8;
   final Queue<int> _anonTokenMisses = Queue<int>();
 
   /// Origin quota windows: stamps trimmed from the front of a queue, and the
@@ -557,6 +590,21 @@ class IntakeProtection {
         'is $tokenBytes bytes (UTF-8) - a bridge token needs at least '
             '$_minTokenBytes random bytes (generateBridgeToken produces one); '
             'a short token is guessable from a web page',
+      );
+    }
+    // فحص التنوع فوق أرضية الطول: توكن متطابق المحارف أو فقيرها قابل
+    // للتخمين بنظرة واحدة — الرفض وقت الإعداد بلا أثر جانبي كأخيه
+    // الطولي، والرمي قبل _apply فمن يلتقطه يبقى على حالته السابقة
+    final distinctChars = effectiveToken.trim().runes.toSet().length;
+    if (tokenBytes >= _minTokenBytes &&
+        distinctChars < _minTokenDistinctChars) {
+      throw ArgumentError.value(
+        distinctChars,
+        'token',
+        'has only $distinctChars distinct characters - a token this '
+            'repetitive is guessable at a glance; use generateBridgeToken '
+            'or another random source (the floor is '
+            '$_minTokenDistinctChars distinct characters)',
       );
     }
     _apply(policy: effectivePolicy, token: effectiveToken);
@@ -754,6 +802,20 @@ class IntakeProtection {
         'inert - the token layer is off until a fresh '
         '$_minTokenBytes-byte token is saved (fail-closed, not a crash '
         'loop)',
+        category: BridgeCategory.security,
+      );
+    }
+    // فحص التنوع لا يرفض الحالة المحفوظة الشرعية عند الترقية: توكن محفوظ
+    // طويل لكن فقير التنوع يبقى عاملاً كما أُقلع من الإصدار السابق —
+    // تحذير واحد يسمي الضعف والتدوير، والرفض وقت الضبط في update() حصراً
+    final savedDistinct = effectiveToken.trim().runes.toSet().length;
+    if (savedTokenBytes >= _minTokenBytes &&
+        savedDistinct < _minTokenDistinctChars) {
+      telemetry?.warn(
+        'saved bridge token has only $savedDistinct distinct characters '
+        '(the floor is $_minTokenDistinctChars) and stays active - rotate '
+        'it with generateBridgeToken; update() now refuses such tokens at '
+        'set time',
         category: BridgeCategory.security,
       );
     }
@@ -958,67 +1020,54 @@ class IntakeProtection {
     var tokenAttempt = false;
     var tokenCompared = false;
     var tokenMatched = false;
+    // ميزانية التخمين منفقة لهذا الطلب؟ تُحسب داخل طبقة التوكن وتُقرأ
+    // عند بناء القرار (طابع الإخفاق وسطر الميزانية لا يُطلعان إلا بها)
+    var budgetSpent = false;
     IntakeRejection? rejection;
     IntakeAdmissionPath? accepted;
     final beyond = _BeyondOutcome();
 
-    // (0) طبقة التوكن المستقلة — قراءة خالصة. القفل يفحص قبل المقارنة:
-    // المقفول يُرد 429 حتى بتوكن صحيح — فلا مقارنة صحيحة تسقط حاجز القفل
-    // عن التخمين — والصحيح من نافذة غير مقفولة يصفرها ويعبر فورا،
-    // والمقارنة تجري هنا مرة واحدة على الأكثر لكل طلب
+    // (0) طبقة التوكن المستقلة — قراءة خالصة. المقارنة تجري دائماً: لا
+    // نافذة إخفاق تسقط المقارنة عن التوكن الصحيح فالصحيح يُقارن ويُقبل
+    // أياً كان تاريخ الإخفاقات، والمطابقة تصفر النافذة عند التسوية.
+    // وفوق ميزانية التخمين الخاطئ لا يفتح الخاطئ سؤال موافقة ولا يُقبل
+    // إلا بتأهل الأصل — وإلا فرفض الانتظار الصادق بلا طابع جديد فالنافذة
+    // تنكسر بصدق. والمقارنة مرة واحدة على الأكثر لكل طلب هنا
     if (_token.isNotEmpty && portalToken != null && portalToken.isNotEmpty) {
       tokenAttempt = true;
-      final live = _liveTokenMisses(origin, now);
-      if (live.length >= _tokenLockThreshold) {
-        // القفل يمنع المقارنة وحدها: التوكن يُعامل كأنه غائب وتُقيَّم
-        // سياسة الأصول — البوابة المدرجة تعبر رغم إخفاقات مهاجم مجهول،
-        // ومن ترفضه السياسة أصلًا يُرَدّ 429 (لا 403: كان يحاول التخمين).
-        // والسؤال الجديد لا يُفتح من وراء القفل: mayAskConsent=false
+      tokenCompared = true;
+      tokenMatched = _fixedTimeEquals(portalToken, _token);
+      final liveMisses = _liveTokenMisses(origin, now);
+      budgetSpent = liveMisses.length >= _tokenGuessBudget;
+      if (tokenMatched) {
+        // الصحيح يعبر فورا على كل نافذة — مسار القبول: التوكن وحده على
+        // أصل غير مؤهل، والطبقتان معاً على أصل مدرج
+        accepted = _isListed(origin)
+            ? IntakeAdmissionPath.originWithToken
+            : IntakeAdmissionPath.token;
+      } else {
         _projectBeyondToken(
           origin,
           key,
           fetchMode,
           fetchDest,
           now: now,
-          mayAskConsent: false,
+          mayAskConsent: !budgetSpent,
           out: beyond,
         );
-        if (beyond.rejection == null) {
-          accepted = beyond.accepted;
-        } else {
-          // الرأس الصادق: بقايا نافذة القفل نفسها — أقدم إخفاق يخرج من
-          // النافذة فتنكسر، فانتظار الذكرى لا «ثانيتين» لكل الرفوض
-          final lockWaitMs = live.isEmpty
-              ? _tokenLockWindowMs
-              : _tokenLockWindowMs - (now - live.first) + 500;
+        if (budgetSpent && beyond.accepted == null) {
+          // الرأس الصادق: بقايا نافذة الميزانية نفسها — أقدم إخفاق يخرج
+          // منها فتنكسر، فانتظار الذكرى لا «ثانيتين» لكل الرفوض
+          final budgetWaitMs = liveMisses.isEmpty
+              ? _tokenBudgetWindowMs
+              : _tokenBudgetWindowMs - (now - liveMisses.first) + 500;
           rejection = IntakeRejection(
             429,
             'token_locked',
             'Too many failed token attempts — retry after a short wait',
-            retryAfterMs: lockWaitMs < 1000 ? 1000 : lockWaitMs,
+            retryAfterMs: budgetWaitMs < 1000 ? 1000 : budgetWaitMs,
           );
-        }
-      } else {
-        tokenCompared = true;
-        tokenMatched = _fixedTimeEquals(portalToken, _token);
-        if (tokenMatched) {
-          // الصحيح يعبر فورا — ما بعد التوكن لا يجري أصلاً كاليوم،
-          // ومسار القبول: التوكن وحده على أصل غير مؤهل، والطبقتان معاً
-          // على أصل مدرج
-          accepted = _isListed(origin)
-              ? IntakeAdmissionPath.originWithToken
-              : IntakeAdmissionPath.token;
         } else {
-          // الإخفاق يُختم عند التسوية ثم يُقيَّم ما بعد التوكن كاملاً
-          _projectBeyondToken(
-            origin,
-            key,
-            fetchMode,
-            fetchDest,
-            now: now,
-            mayAskConsent: true,
-            out: beyond,
-          );
           rejection = beyond.rejection;
           accepted = beyond.accepted;
         }
@@ -1056,6 +1105,10 @@ class IntakeProtection {
       tokenAttempt: tokenAttempt,
       tokenCompared: tokenCompared,
       tokenMatched: tokenMatched,
+      // طابع الإخفاق تحت الميزانية حصراً: فوقها لا طابع جديد فالنافذة
+      // تنكسر بالانتظار المعلن لا بفيض يعيد تسليحها
+      tokenMissStamped: tokenCompared && !tokenMatched && !budgetSpent,
+      tokenBudgetSpent: tokenCompared && !tokenMatched && budgetSpent,
       quotaLimit: beyond.quotaLimit,
       grantExisted: beyond.grantExisted,
       reachedAskTrim: beyond.reachedAskTrim,
@@ -1227,14 +1280,17 @@ class IntakeProtection {
     final now = d.stampMs;
     if (d.tokenAttempt) {
       // الجلب نفسه يجري إنشاء النافذة وكنسها الدوري كما في بوابة القديم،
-      // والمطابقة تصفر النافذة والإخفاق يُختم
+      // والمطابقة تصفر النافذة، والإخفاق تحت الميزانية يُختم وفوقها لا
+      // طابع جديد — والسطر الأمني المكبوح بالعدد يخرج للإخفاق فوق
+      // الميزانية من هنا حصراً (التسوية) لا من الإسقاط الخالص
       final window = _tokenMissWindow(origin, now);
-      if (d.tokenCompared) {
-        if (d.tokenMatched) {
-          window.clear();
-        } else {
-          window.addLast(now);
-        }
+      if (d.tokenMatched) {
+        window.clear();
+      } else if (d.tokenMissStamped) {
+        window.addLast(now);
+      }
+      if (d.tokenBudgetSpent) {
+        _warnGuessBudget(origin, window);
       }
     }
     if (d.quotaLimit > 0) {
@@ -1280,11 +1336,40 @@ class IntakeProtection {
     final live = <int>[];
     var trimming = true;
     for (final ts in window) {
-      if (trimming && now - ts > _tokenLockWindowMs) continue;
+      if (trimming && now - ts > _tokenBudgetWindowMs) continue;
       trimming = false;
       live.add(ts);
     }
     return live;
+  }
+
+  /// The muted security line for a wrong-token request above the spent
+  /// budget: at most one line per second, and the next admitted line
+  /// carries the muted count — the flood lives in the window counter,
+  /// not in the log. The line names the live attempt count, the unit
+  /// (attempts within the last 60 seconds), and the truth that matters:
+  /// the correct token is still accepted.
+  static const _guessBudgetWarnPacingMs = 1000;
+  int _nextGuessBudgetWarnMs = 0;
+  int _suppressedGuessBudgetWarns = 0;
+
+  void _warnGuessBudget(String? origin, Queue<int> window) {
+    final now = _now;
+    if (now < _nextGuessBudgetWarnMs) {
+      _suppressedGuessBudgetWarns++;
+      return;
+    }
+    final suppressed = _suppressedGuessBudgetWarns;
+    _suppressedGuessBudgetWarns = 0;
+    _nextGuessBudgetWarnMs = now + _guessBudgetWarnPacingMs;
+    final suffix = suppressed > 0 ? ' (+$suppressed more suppressed)' : '';
+    telemetry?.warn(
+      'token guess budget spent: ${window.length} wrong token attempts '
+      'within the last 60 seconds from origin=${originForLog(origin) ?? 'none'} '
+      '— the correct token is still accepted; further wrong tokens answer '
+      '429 token_locked until the window drains$suffix',
+      category: BridgeCategory.security,
+    );
   }
 
   /// Read-only peek at the per-origin quota verdict: the same front-trim,
@@ -1344,7 +1429,7 @@ class IntakeProtection {
   Queue<int> _tokenMissWindow(String? origin, int now) {
     if (origin == null) {
       while (_anonTokenMisses.isNotEmpty &&
-          now - _anonTokenMisses.first > _tokenLockWindowMs) {
+          now - _anonTokenMisses.first > _tokenBudgetWindowMs) {
         _anonTokenMisses.removeFirst();
       }
       return _anonTokenMisses;
@@ -1368,7 +1453,7 @@ class IntakeProtection {
         _tokenMissWindows.remove(oldest);
       }
     }
-    while (window.isNotEmpty && now - window.first > _tokenLockWindowMs) {
+    while (window.isNotEmpty && now - window.first > _tokenBudgetWindowMs) {
       window.removeFirst();
     }
     // الكنس الدوري للخاملين: مرة كل ثانية كأقصى — نافذة انقضت لا تبقى
@@ -1383,7 +1468,7 @@ class IntakeProtection {
         final ts = _tokenMissWindows[oldest];
         final idle =
             oldest != key &&
-            (ts == null || ts.isEmpty || now - ts.last > _tokenLockWindowMs);
+            (ts == null || ts.isEmpty || now - ts.last > _tokenBudgetWindowMs);
         if (idle) {
           _tokenMissWindows.remove(oldest);
         } else {
@@ -1684,13 +1769,12 @@ class IntakeProtection {
         (host == 'localhost' || host == '127.0.0.1' || host == '::1');
   }
 
-  /// Detailed host messages for the trusted only - a correct token or a listed
-  /// origin; the allow-all path sees the code without the host text. One
-  /// verdict per request: while the token failure window (the origin's, or
-  /// the shared originless one) is locked, the token counts as absent here
-  /// too - this decision never compares a token whose window [check] is
-  /// refusing on, so a locked origin cannot probe the token through the
-  /// host error text.
+  /// Detailed host messages for the trusted only - a verified token or a
+  /// listed origin; the allow-all path sees the code without the host text.
+  /// One verdict per request: the comparison ran once in the projection and
+  /// this decision reads the same outcome, so a verified sender keeps the
+  /// host text whatever the miss-window history - the window is a signal
+  /// about wrong guesses, never a refusal of the verified token.
   /// Kept for hosts until the planned removal: the admission record
   /// carries the decision as [IntakeAdmission.verboseErrors] - built with
   /// the single comparison [admit] already ran - so no caller compares a
@@ -1700,35 +1784,13 @@ class IntakeProtection {
     '(removal planned in 0.3.0)',
   )
   bool verboseErrorsFor(String? origin, String? portalToken) {
-    if (!_tokenWindowLocked(origin) &&
-        _token.isNotEmpty &&
+    if (_token.isNotEmpty &&
         portalToken != null &&
         portalToken.isNotEmpty &&
         _fixedTimeEquals(portalToken, _token)) {
       return true;
     }
     return _isListed(origin);
-  }
-
-  /// Whether the token-guessing lock for [origin]'s window - per origin, or
-  /// the shared originless one - is engaged right now. Read-only on purpose:
-  /// the admission path in [check] owns the state, so a verdict reader adds
-  /// no stamps and creates no map entries; expired stamps simply do not count.
-  bool _tokenWindowLocked(String? origin) {
-    final now = _now;
-    final Iterable<int> stamps;
-    if (origin == null) {
-      stamps = _anonTokenMisses;
-    } else {
-      final window = _tokenMissWindows[normalize(origin)];
-      if (window == null) return false;
-      stamps = window;
-    }
-    var live = 0;
-    for (final ts in stamps) {
-      if (now - ts <= _tokenLockWindowMs) live++;
-    }
-    return live >= _tokenLockThreshold;
   }
 
   /// A rejection from outside the protection patterns (host authorities) goes

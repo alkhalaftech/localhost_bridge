@@ -280,7 +280,7 @@ void main() {
   );
 
   test(
-    'a token is compared at most once per request, never under the lock',
+    'a token is compared at most once per request, even over the spent budget',
     () async {
       final rec = _Rec();
       final pr = IntakeProtection(telemetry: rec)
@@ -295,27 +295,33 @@ void main() {
         a.settle();
         expect(pr.tokenComparisonCount, i + 1);
       }
-      final locked = await pr.admit(
+      final overBudget = await pr.admit(
         origin: 'https://guess.example',
         portalToken: 'WRONG6',
       );
-      expect(locked.rejection?.code, 'token_locked');
+      expect(overBudget.rejection?.code, 'token_locked');
       expect(
         pr.tokenComparisonCount,
-        5,
+        6,
         reason:
-            'the locked window forbids the comparison - the token is absent',
+            'the comparison runs whatever the miss-window history - '
+            'the budget refuses wrong guesses after one comparison',
       );
-      // والصحيح نفسه لا يقارن تحت القفل
+      // والصحيح فوق الميزانية نفسها: مقارنة واحدة وقبول بلا رفض
       final correct = await pr.admit(
         origin: 'https://guess.example',
         portalToken: _t64,
       );
-      expect(correct.rejection?.code, 'token_locked');
-      expect(pr.tokenComparisonCount, 5);
+      correct.settle();
+      expect(
+        correct.rejection,
+        isNull,
+        reason: 'the correct token is accepted whatever the failure history',
+      );
+      expect(pr.tokenComparisonCount, 7);
       // بلا ترويسة توكن لا مقارنة إطلاقاً
       await pr.admit(origin: 'https://other.example');
-      expect(pr.tokenComparisonCount, 5);
+      expect(pr.tokenComparisonCount, 7);
     },
   );
 

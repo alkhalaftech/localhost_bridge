@@ -57,20 +57,28 @@ the Host-authority check, the origin policy, and the token layer.
   fetch-mode checks alone.
 - **Silent sends are write-side only** — even when a shape check is
   skipped, a non-CORS send cannot read the reply.
-- **Token guessing** — 32-byte length floor for a configured token
-  (`update()` throws on shorter; the bound measures length, not entropy —
-  `generateBridgeToken` is the recommended source of a token),
-  constant-time padded comparison, and a per-origin lockout (5 misses /
-  60 s → `429 token_locked`) whose `Retry-After` states the real
-  remaining window. The lockout pins its window to one origin: a local
+- **Token guessing** — a 32-byte length floor and a character-diversity
+  floor (fewer than 8 distinct characters) for a configured token
+  (`update()` throws on either; the bounds measure length and repetition,
+  not entropy — `generateBridgeToken` is the recommended source of a
+  token, and its output always passes both floors), constant-time padded
+  comparison, and a per-origin wrong-guess budget (5 wrong token attempts
+  / 60 s → further **wrong** tokens answer `429 token_locked`, whose
+  `Retry-After` states the real remaining window and one muted security
+  line per second carries the attempt count). The budget is a signal
+  about wrong guesses, never a refusal of the verified sender: the
+  correct token is compared and accepted whatever the failure history,
+  from any sender, with or without an `Origin` header, and a match
+  clears the window — a flood of wrong tokens cannot lock out the
+  legitimate token holder, originless included. Wrong guesses above the
+  budget stamp nothing, so the window drains honestly and the announced
+  wait stays true. The budget pins its window to one origin: a local
   sender can rotate `Origin` values to walk past it — the barrier ahead
-  of that path is the token's randomness itself. Nor does the lockout
+  of that path is the token's randomness itself. Nor does the budget
   stop a page on the allow-all or discovery paths (discovery is the
   consent-callback mode — the `OriginPolicy` reference in README.md
   names the callback behind the term): a site can rotate subdomains,
-  and each rotated origin opens its own window. The residual that
-  remains: a local sender can keep originless token clients locked out
-  with five wrong tokens per minute in the shared originless window.
+  and each rotated origin opens its own window.
 - **Resource exhaustion** — body byte cap with early `Content-Length`
   refusal, JSON structural-element cap before decoding, concurrency seat
   cap with `503`, per-request and idle timeouts, per-origin rate quota,
@@ -279,7 +287,7 @@ on the roadmap. The names are the tests' real names.
 | Oversized `Origin` header | 1,024-character cap, `400 origin_too_long` first | `an Origin one char over the cap answers 400 origin_too_long with the handler and the consent callback never invoked` · `the length gate precedes the shape gate: an Origin both oversized and malformed answers origin_too_long` · `the length gate precedes the single-header gate: a duplicated oversized Origin answers origin_too_long, not duplicate_header` (`origin_cap_test`) · `a 64 KiB slash-padded Origin is answered inside the usual test response timeout, then the next normal request is served` (`wire_contract_test`) |
 | Oversized token header | 1,024-byte cap, `400 token_too_long`, no miss window left behind | `a 1,025-byte token answers 400 token_too_long with the handler, the rejection counter, its log, and CORS untouched` · `five oversized tokens leave no miss window behind: the correct token right after them is served, not locked` · `the Origin gates settle first: an oversized token with a malformed Origin answers origin_malformed` (`token_length_cap_test`) |
 | Timing side channel on the token comparison | Constant-time padded comparison over `max(256, secret length)` | `comparison semantics hold for generated lengths: correct passes, and wrong at the first byte, the last byte, past the secret, and below the secret all fail` (`token_length_cap_test`) · `lengths 32/255/256/257: correct accepted, wrong rejected at each` (`priority_contract_test`) |
-| Token brute force and lockout edges | 5 misses / 60 s → `429 token_locked` with the honest remaining window | `Retry-After says the real lockout window, not a generic constant` (`wire_contract_test`) · `window edges on the injected clock: the sixth miss locks, 60001ms unlocks` · `no-origin and web-origin misses keep two independent windows` (`priority_contract_test`) |
+| Token brute force and budget edges | 5 wrong-token attempts / 60 s → further wrong tokens answer `429 token_locked` with the honest remaining window; the correct token is always accepted | `Retry-After says the real lockout window, not a generic constant` (`wire_contract_test`) · `window edges on the injected clock: the sixth miss locks, 60001ms unlocks` · `no-origin and web-origin misses keep two independent windows` · `unlisted origin with correct token: accepted whatever the guessing history, another passes` (`priority_contract_test`) · `after any number of wrong tokens from any sender, the correct token is accepted in the next request` (`token_guess_budget_test`) |
 | Guessable or short configured token | 32-byte floor at `update()`, saved short token inert at boot, empty token disables the layer | the `short token refusal: configuration error, inert at boot` group with `update() throws for a token below 32 bytes instead of warning` · `the short-token error names the length, never the token itself` (`intake_protection_test`) · `empty configured token: the header layer is fully disabled` (`priority_contract_test`) |
 | JSON amplification (small body, huge parse) | Structural-element and depth count before decode, `413 payload_too_complex` | `a 1MiB body of empty JSON elements is rejected with 413 payload_too_complex before parsing` · `braces and commas inside JSON strings are not counted as elements` (`intake_limits_test`) · `json amplification: 16 concurrent 1MiB bodies of empty objects stay under a declared ceiling` (`resources_test`) · `a real nested 1MB body over the live wire leaves the server alive` (`wire_contract_test`) · `deep nesting under the element cap is refused before decode` (`intake_health_test`) |
 | Body flood / memory growth | Byte cap with early refusal, bounded buffers | `300 consecutive 413 rejections: RSS stays stable` (`hardened_open_test`) · `body resources: 15 chunked rejections over the cap plus 15 accepts at the cap — RSS never escapes` (`resources_test`) |
@@ -296,7 +304,7 @@ on the roadmap. The names are the tests' real names.
 | Consent-question flooding | 3 open windows, a 10-per-10-minutes ask budget, honest `Retry-After` | `question-budget Retry-After tells the honest multi-minute wait` (`wire_contract_test`) · `a throwing consent callback consumes the question budget` · `a late answer for an open question survives a thousand abandoned windows` (`intake_protection_test`) |
 | Slowloris / body drip | Absolute body deadline, `408`, trickling senders never hold a gate | `a request stalling mid-body is answered with 408 within the timeout` · `a chunked body completing after the deadline is rejected 408, handler untouched` · `a drip under the silence window is cut by the absolute deadline before 1.25x of it` (`intake_limits_test`) · `413 drain cut on time: a trickling sender never holds the gate` (`wire_contract_test`) |
 | 413 drain abuse | Bounded drain budget, cut past it | `413 drain is bounded: past four bodies the connection is cut` · `413 drain cut on the byte-counter path: a chunked body with no Content-Length past the cap` · `both 413 responses name the 1 MiB limit, never 0MB` (`wire_contract_test`) |
-| Handler crash information leak | Fixed `500` body; host error text only for trusted senders | `a handler crash still answers 500 internal - the internal-error path is unchanged` (`parser_error_test`) · `safety net: escaped exception returns 500 internal, server stays alive` (`intake_health_test`) · `host failure detail hidden from unapproved origin, shown to trusted one` (`hardened_open_test`) · `a locked origin with the correct token gets the error code without the host message` (`priority_contract_test`) |
+| Handler crash information leak | Fixed `500` body; host error text only for trusted senders | `a handler crash still answers 500 internal - the internal-error path is unchanged` (`parser_error_test`) · `safety net: escaped exception returns 500 internal, server stays alive` (`intake_health_test`) · `host failure detail hidden from unapproved origin, shown to trusted one` (`hardened_open_test`) · `a wrong token never earns the host message even over a spent budget; the verified token does` (`priority_contract_test`) |
 | Reading replies cross-origin | CORS echo for the admitted only | `no ACAO for unlisted origin; listed and allow-all echo theirs` · `token-only host: a preflight from any origin carries no ACAO` (`hardened_open_test`) · `CORS echo of 503 and 400 for listed origins — rejects stay echoless` · `declined discovery origins (origin_declined) see no ACAO` (`priority_contract_test`) |
 | Warning-line flooding (log spam) | Every warning throttled to one line per second with the muted count | `a thousand busy rejects within one injected second write exactly one warning line, and the next second writes a line carrying the muted count` · `a thousand orphan-busy rejects within one injected second write exactly one warning line, and the next second writes a line carrying the muted count` · `a thousand handler timeouts within one injected second write exactly one warning line, and the next second writes a line carrying the muted count` · `a thousand total-deadline cuts within one injected second write exactly one warning line, and the next second writes a line carrying the muted count` (`throttled_warnings_test`) · `correlation-id warning throttle on the injected clock: per-second cap, suppressed count reported` (`priority_contract_test`) |
 | Non-root path abuse | Wire unchanged, throttled warning only | `a POST on /x is still served 200 with the handler invoked - the wire behavior does not change` · `a thousand POSTs to /x within one injected second write exactly one warning line, and the next second writes a line carrying the muted count` · `an OPTIONS preflight on /x answers 204 and writes no path warning - only the command method warns` · `a bloated request path is capped inside the warning line` (`reserved_path_warning_test`) |

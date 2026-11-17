@@ -12,6 +12,24 @@
   alone, and the token length cap (`400 token_too_long`) and the
   single-value header gate now guard the new name. See
   MIGRATION-0.2.0.md for the three renames and the migration paths.
+- Changed: the token failure window is a signal about wrong guesses,
+  never a refusal of the verified sender - the correct token is compared
+  and accepted whatever the failure history, from any sender, with or
+  without an `Origin` header, and a match clears the window. The
+  wrong-guess budget is 5 wrong token attempts per 60-second window,
+  per origin (originless attempts share one window): above it, further
+  wrong tokens answer `429 token_locked` with the honest remaining wait,
+  stamp nothing, and write one muted security line per second carrying
+  the attempt count. `token_locked` is never produced for the correct
+  token.
+- Changed: `update()` additionally refuses a configured token below the
+  character-diversity floor (fewer than 8 distinct characters - a
+  repeated-character token is guessable at a glance);
+  `generateBridgeToken()` output always passes.
+- Compatibility: a saved token below the diversity floor keeps loading
+  and stays active at startup with one rotation warning -
+  `updateFromSaved` refuses no legitimate saved state at upgrade; the
+  refusal lives in `update()` at set time alone.
 - Added: a single admission step - `IntakeProtection.admit` answers one
   request with one `IntakeAdmission` record that carries the accepted
   route, the CORS echo decision, and the verbose-error decision,
