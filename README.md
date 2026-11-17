@@ -150,7 +150,7 @@ client. Configure the token once with
 ```bash
 curl -X POST http://127.0.0.1:9100/ \
   -H 'Content-Type: application/json' \
-  -H "X-Bridge-Token: $PORTAL_TOKEN" \
+  -H "X-Bridge-Token: $BRIDGE_TOKEN" \
   -d '{"data": ["your-command"]}'
 ```
 
