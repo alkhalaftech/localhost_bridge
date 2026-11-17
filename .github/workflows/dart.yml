@@ -60,6 +60,7 @@ jobs:
       # Name the environment a red run ran on: the dart SDK version and
       # the runner image build.
       - name: environment versions
+        shell: bash
         run: |
           echo "dart SDK: $(dart --version 2>&1)"
           echo "runner image: ImageOS=${ImageOS:-unknown} ImageVersion=${ImageVersion:-unknown}"
@@ -111,15 +112,17 @@ jobs:
 
   browser-lab:
     # The real-browser lab (test/browser_lab_test.dart): a system
-    # Chrome/Chromium driven headlessly proves the three pre-pairing
-    # browser scenarios - the tokened page crosses and reads the reply,
-    # the unpaired page gets no readable verdict while the wire carries
-    # the literal code, and the preflight round trip announces the token
-    # header with the new name alone. Zero packages added: the lab uses
-    # whatever Chrome/Chromium the host has, and skips itself honestly
-    # when there is none, so this job pins the runner image that actually
-    # runs it - the ubuntu-latest image ships Google Chrome and Chromium
-    # preinstalled (the runner-images README lists both).
+    # Chrome/Chromium driven headlessly proves the pre-pairing browser
+    # scenarios - the token-only bridge where the token is the wire's
+    # only door, the unpaired page gets no readable verdict while the
+    # wire carries the literal code, and the preflight round trip
+    # announces the token header with the new name alone. Zero packages
+    # added: the lab uses whatever Chrome/Chromium the host has and
+    # skips itself honestly on a machine without one (that skip is a
+    # local-run behavior); this CI job has no such out - its image is
+    # expected to ship a browser (the ubuntu-latest runner image lists
+    # Google Chrome and Chromium), so a missing engine fails the job
+    # instead of earning a green with nothing proved.
     if: github.event_name != 'schedule' || vars.SCHEDULED_CI == 'true'
     runs-on: ubuntu-latest
     timeout-minutes: 15
@@ -132,7 +135,13 @@ jobs:
 
       # Name the browser the lab ran on: the discovery order of the test
       # itself, echoed here so a green run records which engine proved it.
+      # No green without a browser: this job exists to prove the lab on a
+      # real one, so a missing engine fails the job instead of warning -
+      # the honest skip stays a local-run behavior of the test itself
+      # (BRIDGE_BROWSER), while a CI image that lost its browsers is an
+      # environment drift this job must surface as red.
       - name: browsers on the runner image
+        shell: bash
         run: |
           found=""
           for b in google-chrome google-chrome-stable chromium chromium-browser; do
@@ -142,7 +151,8 @@ jobs:
             fi
           done
           if [ -z "$found" ]; then
-            echo "::warning::no system Chrome/Chromium found - the lab will skip itself"
+            echo "::error::no system Chrome/Chromium on the runner image - the browser lab cannot prove anything without a real browser (the image is expected to ship one; treating that as green would fake the proof)."
+            exit 1
           fi
 
       - name: resolve packages
@@ -167,11 +177,26 @@ jobs:
       # or "repository is a placeholder". The patterns match the full stale
       # sentences, so prose that legitimately uses the word "placeholder" (for
       # example the changelog line about removing the placeholder homepage)
-      # keeps passing.
+      # keeps passing. The gate is fail-closed on its own inputs: every
+      # expected path must exist before the grep runs, and a grep that
+      # errors (exit 2) fails the run instead of reading as "no match".
       - name: Reject stale pre-publication wording in published files
+        shell: bash
         run: |
+          for p in README.md README.ar.md CHANGELOG.md SECURITY.md pubspec.yaml lib example; do
+            if [ ! -e "$p" ]; then
+              echo "::error::release-doc-gate: expected published path '$p' is missing from the checkout - refusing to judge an incomplete file set."
+              exit 1
+            fi
+          done
           pattern="not published|publish_to:[[:space:]]*['\"]?none|is a placeholder"
-          if grep -rniE -- "$pattern" README.md README.ar.md CHANGELOG.md SECURITY.md pubspec.yaml lib example; then
+          grep_status=0
+          grep -rniE -- "$pattern" README.md README.ar.md CHANGELOG.md SECURITY.md pubspec.yaml lib example || grep_status=$?
+          if [ "$grep_status" -gt 1 ]; then
+            echo "::error::release-doc-gate: the grep failed to run (exit $grep_status) - a gate that cannot scan must not pass."
+            exit 1
+          fi
+          if [ "$grep_status" -eq 0 ]; then
             echo "::error::Stale pre-publication wording found in files published to pub.dev - see the matches above."
             exit 1
           fi
