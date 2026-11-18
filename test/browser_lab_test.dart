@@ -132,6 +132,7 @@ String _labPage({
   required int admittedBridgePort,
   required int defaultBridgePort,
   required String token,
+  String? pairingCode,
 }) =>
     '''
 <!DOCTYPE html>
@@ -144,13 +145,36 @@ String _labPage({
 const ADMITTED_BRIDGE = 'http://127.0.0.1:$admittedBridgePort';
 const DEFAULT_BRIDGE = 'http://127.0.0.1:$defaultBridgePort';
 const TOKEN = '$token';
+const PAIRING_CODE = '${pairingCode ?? ''}';
+// وضع التقرير (?report=1): العلامات تعود إلى مجمع صفحة المختبر نفسه —
+// القناة التي يقرأها شاهد المحاكي (dump-dom لا يعمل على كروم Android)
+const REPORT = new URLSearchParams(location.search).get('report') === '1';
 const results = document.getElementById('lab-results');
-function mark(line) { results.textContent += line + '\\n'; }
+const marks = [];
+function mark(line) { marks.push(line); results.textContent += line + '\\n'; }
 
 async function postJson(bridge, extraHeaders) {
   const headers = Object.assign({'Content-Type': 'application/json'},
                                 extraHeaders);
   return fetch(bridge, {method: 'POST', headers, body: '["BROWSER-LAB"]'});
+}
+
+// توقيع الصفحة بنفس طريقة التصميم حرفا: HMAC-SHA-256 عبر WebCrypto فوق
+// canonical = "v1\\n<pairingId>\\n<stamp>\\n<method>\\n<path>\\n<cid>" —
+// 127.0.0.1 سياق آمن فcrypto.subtle متاح على http الحلقي
+async function signProof(tokenHex, pairingId, method, path, correlationId) {
+  const stamp = Date.now();
+  const canonical = 'v1\\n' + pairingId + '\\n' + stamp + '\\n' +
+                    method + '\\n' + path + '\\n' + correlationId;
+  const keyBytes = new Uint8Array(
+      tokenHex.match(/.{2}/g).map(h => parseInt(h, 16)));
+  const key = await crypto.subtle.importKey(
+      'raw', keyBytes, {name: 'HMAC', hash: 'SHA-256'}, false, ['sign']);
+  const sig = await crypto.subtle.sign(
+      'HMAC', key, new TextEncoder().encode(canonical));
+  const sigHex = Array.from(new Uint8Array(sig))
+      .map(b => b.toString(16).padStart(2, '0')).join('');
+  return pairingId + '.' + stamp + '.' + sigHex;
 }
 
 (async () => {
@@ -202,6 +226,66 @@ async function postJson(bridge, extraHeaders) {
   } catch (browserError) {
     mark('LAB-UNPAIRED:BLOCKED-NO-VERDICT');
   }
+  // Scenario 5 (ج3): الصفحة المقترنة كاملة الدورة — الاقتران بالرمز
+  // المعروض، ثم التوقيع، ثم الأمر الموقَّع، ثم إعادة التوقيع نفسه، ثم
+  // الصفحة بلا إثبات. يشتغل حين يحمل الجسر رمز عرض فقط
+  if (PAIRING_CODE !== '') {
+    try {
+      const pairRes = await fetch(ADMITTED_BRIDGE + '/pair', {
+        method: 'POST',
+        headers: {'Content-Type': 'application/json'},
+        body: JSON.stringify({pairingCode: PAIRING_CODE}),
+      });
+      const pairBody = await pairRes.json().catch(() => null);
+      if (pairRes.status === 200 && pairBody && pairBody.token) {
+        const proof = await signProof(
+            pairBody.token, pairBody.pairingId, 'POST', '/', 'lab-paired-1');
+        const signed = await postJson(ADMITTED_BRIDGE, {
+          'X-Bridge-Pairing': proof,
+          'X-Correlation-Id': 'lab-paired-1',
+        });
+        const signedBody = await signed.json().catch(() => null);
+        mark('LAB-PAIRED:' + signed.status + ':' +
+             (signedBody && signedBody.ok === true ? 'true' : 'false'));
+        // إعادة التوقيع نفسه: الطابع نفسه لا يثبت مرتين — والمتصفح
+        // يقرأ الرمز الحرفي من الرفض القابل للقراءة
+        const replay = await postJson(ADMITTED_BRIDGE, {
+          'X-Bridge-Pairing': proof,
+          'X-Correlation-Id': 'lab-paired-1',
+        });
+        const replayBody = await replay.json().catch(() => null);
+        mark('LAB-PAIRED-REPLAY:' + replay.status + ':' +
+             (replayBody && replayBody.error ? replayBody.error
+                                             : 'no-error'));
+        // الصفحة نفسها بلا إثبات: الرفض الصادق المقروء تعيد منه
+        const bare = await postJson(ADMITTED_BRIDGE, {
+          'X-Correlation-Id': 'lab-bare-1',
+        });
+        const bareBody = await bare.json().catch(() => null);
+        mark('LAB-STRICT-BARE:' + bare.status + ':' +
+             (bareBody && bareBody.error ? bareBody.error : 'no-error'));
+      } else {
+        mark('LAB-PAIRED:' + pairRes.status + ':' +
+             (pairBody && pairBody.error ? pairBody.error : 'unreadable'));
+      }
+    } catch (browserError) {
+      mark('LAB-PAIRED:THREW');
+    }
+  }
+  // وضع التقرير: العلامات كلها تعود إلى مجمع المختبر على أصل الصفحة —
+  // آخر نداء في الصفحة كي تجمع كل ما سبقها
+  if (REPORT) {
+    try {
+      await fetch('/lab-report', {
+        method: 'POST',
+        headers: {'Content-Type': 'application/json'},
+        body: JSON.stringify({marks: marks}),
+      });
+      mark('LAB-REPORTED');
+    } catch (browserError) {
+      mark('LAB-REPORT:THREW');
+    }
+  }
 })();
 </script>
 </body>
@@ -215,15 +299,22 @@ String _labCorrelationId() => 'lab-${_labIdSeq++}';
 
 /// Starts a bridge on an ephemeral loopback port; when [token] is given it
 /// is set as the accepted token alongside the listed [allowedOrigin].
+/// With [paired] the origin+token requirement is on and the pairing layer
+/// is armed - the page pairs with the displayed code and signs.
 Future<(LocalIntakeServer, int)> _startBridge({
   String? allowedOrigin,
   String? token,
+  bool paired = false,
 }) async {
   final protection = IntakeProtection(telemetry: const SilentTelemetry());
   protection.update(
-    policy: OriginPolicy(allowed: [?allowedOrigin]),
+    policy: OriginPolicy(
+      allowed: [?allowedOrigin],
+      requireOriginWithToken: paired,
+    ),
     token: token,
   );
+  if (paired) protection.enablePairing();
   final bridge = LocalIntakeServer(
     onCommand: (_) async => const CommandOutcome(ok: true),
     telemetry: const SilentTelemetry(),
@@ -357,24 +448,56 @@ void main() {
   Future<
     (HttpServer, LocalIntakeServer, LocalIntakeServer, int, int, int, String)
   >
-  lab({bool tokenOnlyAdmitted = false}) async {
+  lab({
+    bool tokenOnlyAdmitted = false,
+    bool pairedAdmitted = false,
+    List<Map<String, Object?>>? collectedReports,
+  }) async {
     final token = generateBridgeToken();
     // الجسر المقبول يُبنى على أصل الصفحة قبل أن تُخدم الصفحة: المنفذ
-    // المعمى في HTML يحتاج منافذ الجسور جاهزة أولاً
+    // المعمى في HTML يحتاج منافذ الجسور جاهزة أولاً. ووضع [pairedAdmitted]
+    // يسلّح الشرط المشترك والاقتران معاً ويولّد رمز العرض — الشاهد
+    // المتصفحي لج3 كله على الجسر الواحد
     final pageServer = await HttpServer.bind(InternetAddress.loopbackIPv4, 0);
     final (admitted, admittedPort) = await _startBridge(
       allowedOrigin: tokenOnlyAdmitted
           ? null
           : 'http://127.0.0.1:${pageServer.port}',
       token: token,
+      paired: pairedAdmitted,
     );
     final (defaultBridge, defaultPort) = await _startBridge();
+    final pairingOffer = pairedAdmitted
+        ? admitted.protection.startPairing()
+        : null;
     final html = _labPage(
       admittedBridgePort: admittedPort,
       defaultBridgePort: defaultPort,
       token: token,
+      pairingCode: pairingOffer?.code,
     );
+    // مجمّع التقارير: القناة التي يقرأها شاهد المحاكي (كروم Android لا
+    // يفرغ DOM) — الصفحة في وضع ?report=1 تعيد علاماتها إلى هنا
+    final reports = collectedReports ?? <Map<String, Object?>>[];
     pageServer.listen((request) async {
+      if (request.uri.path == '/lab-report') {
+        if (request.method == 'POST') {
+          final body = await utf8.decoder.bind(request).join();
+          try {
+            reports.add((jsonDecode(body) as Map).cast<String, Object?>());
+          } on FormatException {
+            reports.add(<String, Object?>{'marks': <Object?>[]});
+          }
+          request.response.headers.contentType = ContentType.json;
+          request.response.write('{"ok":true}');
+          await request.response.close();
+          return;
+        }
+        request.response.headers.contentType = ContentType.json;
+        request.response.write(jsonEncode(reports));
+        await request.response.close();
+        return;
+      }
       if (request.uri.path != '/') {
         request.response.statusCode = HttpStatus.notFound;
         await request.response.close();
@@ -464,7 +587,15 @@ void main() {
     );
     // التوكيد الموجب: سطر البادئة الوحيد في كل الـDOM هو سطر الحجب —
     // أي سطر مقروء آخر (LAB-UNPAIRED:READ:...) حكمٌ قابل للقراءة
-    // فيكون قناة استطلاع الحماية قد فُتحت
+    // فيكون قناة استطلاع الحماية قد فُتحت. والسالب المشدد (ملاحظة
+    // المراجع في الدور 1): أي سطر مقروء بنمط الحالة الرقمية يفشل الجولة
+    expect(
+      dom,
+      isNot(contains(RegExp('LAB-UNPAIRED:READ:[0-9]'))),
+      reason:
+          'a readable verdict line for the unpaired scenario is a recon '
+          'channel the protection must never open',
+    );
     final unpairedLines = RegExp(
       '^LAB-UNPAIRED:.*\$',
       multiLine: true,
@@ -622,5 +753,105 @@ void main() {
                   'usable browser, or one too old to simulate a public page '
                   'reaching loopback'
             : null),
+  );
+
+  test(
+    'the paired page pairs with the displayed code, signs its command, '
+    'and reads the reply; the replay and the proofless page are refused',
+    () async {
+      // شاهد ج3 الرابع (سطح المكتب): الصفحة المقترنة كاملة الدورة على
+      // متصفح حقيقي — الاقتران بالرمز المعروض، ثم التوقيع بـWebCrypto
+      // (HMAC-SHA-256 فوق الcanonical بنص التصميم)، ثم الأمر الموقَّع 200،
+      // ثم إعادة التوقيع نفسه 403 pair_signature_replay، ثم الصفحة بلا
+      // إثبات 403 token_required مقروءة — والسلك من طرف الاختبار يثبت
+      // الطلب المحلي المكتوب يدوياً بالأصل المدرج وبلا إثبات يُرفض
+      final (pageServer, admitted, _, pagePort, admittedPort, _, token) =
+          await lab(pairedAdmitted: true);
+      addTearDown(pageServer.close);
+      addTearDown(admitted.stop);
+      final dom = _flat(
+        await _dumpDom('http://127.0.0.1:$pagePort/', 'j3-paired-dom.txt'),
+      );
+      expect(
+        dom,
+        contains('LAB-PAIRED:200:true\n'),
+        reason:
+            'the paired page pairs with the displayed code, signs with '
+            'WebCrypto, and reads its command reply - the whole pairing '
+            'story in a real browser',
+      );
+      expect(
+        dom,
+        contains('LAB-PAIRED-REPLAY:403:pair_signature_replay\n'),
+        reason: 'the same signature never proves twice, read by the browser',
+      );
+      expect(
+        dom,
+        contains('LAB-STRICT-BARE:403:token_required\n'),
+        reason:
+            'the same page without its proof reads the honest strict '
+            'refusal and retries from it',
+      );
+      // السلك من طرف الاختبار: برنامج محلي مكتوب يدوياً بالأصل المدرج
+      // وبلا توكن — الرفض الصادق نفسه لا القبول
+      final (forgedStatus, forgedBody, forgedHeaders) = await _send(
+        admittedPort,
+        origin: 'http://127.0.0.1:$pagePort',
+      );
+      expect(forgedStatus, 403);
+      expect(forgedBody, contains('"error":"token_required"'));
+      expect(
+        forgedHeaders['access-control-allow-origin'],
+        'http://127.0.0.1:$pagePort',
+        reason: 'the qualified origin reads its refusal to retry with a proof',
+      );
+      // والتوكن المشترك لا يعالج الصفحة المقترنة هنا: الشاهد يقف على
+      // أن الإثبات هو باب الصفحة لا التوكن الخام
+      final (sharedStatus, sharedBody, _) = await _send(
+        admittedPort,
+        origin: 'http://127.0.0.1:$pagePort',
+        headers: {'X-Bridge-Token': token},
+      );
+      expect(sharedStatus, 200, reason: 'the shared token stays a valid proof');
+      expect(sharedBody, contains('"ok":true'));
+    },
+    skip: _skipReason,
+  );
+
+  test(
+    'the paired page reports its verdicts through the collector: the '
+    'channel the emulator witness reads, proven on a desktop browser',
+    () async {
+      // قناة شاهد المحاكي مثبتة هنا حصرا: كروم Android لا يفرغ DOM فيقرأ
+      // الشاهدُ علاماتِ الصفحة من مجمّع المختبر (?report=1) — وهذا الشاهد
+      // يثبت القناة نفسها على متصفح سطح مكتب قبل أن يسلكها المحاكي
+      final collected = <Map<String, Object?>>[];
+      final (pageServer, admitted, _, pagePort, _, _, _) = await lab(
+        pairedAdmitted: true,
+        collectedReports: collected,
+      );
+      addTearDown(pageServer.close);
+      addTearDown(admitted.stop);
+      await _dumpDom(
+        'http://127.0.0.1:$pagePort/?report=1',
+        'j3-paired-report-dom.txt',
+      );
+      // انتظار قصير لا يستبدل الاكتمال: التقرير قد يتأخر عن التقاط DOM
+      for (var i = 0; i < 20 && collected.isEmpty; i++) {
+        await Future<void>.delayed(const Duration(milliseconds: 100));
+      }
+      expect(collected, hasLength(1), reason: 'the page reported exactly once');
+      final marks = (collected.single['marks'] as List).cast<String>();
+      expect(
+        marks,
+        contains('LAB-PAIRED:200:true'),
+        reason: 'the collector received the whole paired story, not a DOM',
+      );
+      // علامة LAB-REPORTED ذاتها لا تحتويها النسخة المرسلة بالتصميم: هي
+      // تُكتب بعد بناء جسم التقرير — حضورها في الـDOM لا في المجمع
+      expect(marks, contains('LAB-PAIRED-REPLAY:403:pair_signature_replay'));
+      expect(marks, contains('LAB-STRICT-BARE:403:token_required'));
+    },
+    skip: _skipReason,
   );
 }

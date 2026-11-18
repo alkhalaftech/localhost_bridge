@@ -44,6 +44,13 @@
   `X-Bridge-Pairing` only while pairing is armed, and the single-value
   gate and the 256-byte length gate guard it there (`400
   duplicate_header`, `400 pairing_too_long`).
+- Added: the real-browser lab pairs a page end to end - a desktop
+  Chrome/Chromium headlessly pairs with the displayed code, signs its
+  command with WebCrypto (the same HMAC construction the server
+  verifies), reads the reply, and sees the replay and the proofless
+  page refused; `dart run tool/emulator_pairing_lab.dart` runs the same
+  story against an emulator's browser over adb reverse, reading the
+  verdicts from the page's report collector.
 - Added: proof-of-possession for paired pages - under
   `requireOriginWithToken`, a page signs every request with HMAC-SHA-256
   (the package's internal digest primitives) over the pairing id, a

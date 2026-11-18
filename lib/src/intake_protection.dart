@@ -940,6 +940,16 @@ class IntakeProtection {
             '$_minTokenBytes bytes, as generateBridgeToken produces',
       );
     }
+    // شكل التوكن المقترن واحد: 64-hex كنتاج المولد — التوقيع يفتح مفتاحه
+    // من الhex فالشكل الآخر يرفض وقت الاستعادة صاخبا لا صمتا عند أول توقيع
+    if (token.trim().length != 64 || !_pairTokenHex.hasMatch(token.trim())) {
+      throw ArgumentError.value(
+        token.trim().length,
+        'token',
+        'is not the 64-hex shape generateBridgeToken produces - a paired '
+            'token signs with its 32 raw bytes decoded from that hex',
+      );
+    }
     final digest = hexEncode(sha256(utf8.encode(token.trim())));
     final id = digest.substring(0, 16);
     final existing = _pairingIdIndex[id];
@@ -1102,6 +1112,10 @@ class IntakeProtection {
     r'^([0-9a-f]{16})\.([0-9]{1,16})\.([0-9a-f]{64})$',
   );
 
+  /// The paired token's only shape: 64 hex characters, exactly what
+  /// generateBridgeToken produces - the proof's key decodes from it.
+  static final RegExp _pairTokenHex = RegExp(r'^[0-9a-f]{64}$');
+
   /// The outcome of one proof verification - pure, no state touched. The
   /// internal failure name travels the muted security line only.
   _PairCheck _verifyPairProof(
@@ -1148,8 +1162,14 @@ class IntakeProtection {
     final canonical =
         'v1\n$id\n$stampText\n${method.toUpperCase()}\n$path\n'
         '$correlationId';
+    // المفتاح بايتات التوكن الخام الاثنتان والثلاثون (hex التوكن مفكوكاً)
+    // لا بايتات سلسلته السداسية — نفس ما يبنيه كود الصفحة في WebCrypto،
+    // والتوكن المقترن دائما 64-hex (مولدها أو استعادتها بنفس الشكل).
+    // اكتشف شاهد المتصفح الحقيقي هذا الالتباس: جانبا Dart اتفقا على
+    // utf8(السلسلة) بينما بنى المتصفح على النثر الحاكم فرفض
+    final keyBytes = _hexToBytes(record.token);
     final expected = hmacSha256(
-      utf8.encode(record.token),
+      keyBytes ?? utf8.encode(record.token),
       utf8.encode(canonical),
     );
     final supplied = _hexToBytes(sigHex);
@@ -2889,8 +2909,8 @@ class PairingOffer {
 /// raw token itself travels through the save hook only: the host persists
 /// it (its own storage), the package never writes a file.
 class PairingInfo {
-  /// Builds the info - the protection constructs it for [IntakeProtection.
-  /// enablePairing]'s onPaired callback.
+  /// Builds the info - the protection constructs it for the onPaired
+  /// callback brought by [IntakeProtection.enablePairing].
   const PairingInfo({
     required this.origin,
     required this.pairingId,

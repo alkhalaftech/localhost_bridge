@@ -73,7 +73,10 @@ class _Rec extends BridgeTelemetry {
 }
 
 /// يبني ترويسة التوقيع بنفس طريقة الصفحة حرفا — الطابع من ساعة الجدار
-/// الحقيقية (نافذة الانحراف تُقاس عليها)، والcanonical بنص التصميم
+/// الحقيقية (نافذة الانحراف تُقاس عليها)، والcanonical بنص التصميم،
+/// والمفتاح بايتات التوكن الخام الاثنتان والثلاثون مفكوكة من الhex
+/// (النثر الحاكم للتصميم — الذي أمسكه شاهد المتصفح حين اتفق جانبا
+/// Dart على utf8(السلسلة))
 String _sign({
   required String token,
   required String pairingId,
@@ -85,9 +88,11 @@ String _sign({
   final stamp = stampOverride ?? DateTime.now().millisecondsSinceEpoch;
   final canonical =
       'v1\n$pairingId\n$stamp\n${method.toUpperCase()}\n$path\n$correlationId';
-  final signature = hexEncode(
-    hmacSha256(utf8.encode(token), utf8.encode(canonical)),
-  );
+  final keyBytes = [
+    for (var i = 0; i + 1 < token.length; i += 2)
+      int.parse(token.substring(i, i + 2), radix: 16),
+  ];
+  final signature = hexEncode(hmacSha256(keyBytes, utf8.encode(canonical)));
   return '$pairingId.$stamp.$signature';
 }
 

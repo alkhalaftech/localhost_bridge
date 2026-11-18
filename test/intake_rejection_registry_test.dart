@@ -608,12 +608,15 @@ List<_Scenario> _scenarios() {
       final offer = pr.startPairing();
       final out = pr.pair(origin: 'https://portal.example', code: offer.code);
       // الإثبات الصالح يبنى بدوال ج1 نفسها كما يبنيه كود الصفحة: الطابع
-      // من ساعة الجدار، والcanonical بنص التصميم
+      // من ساعة الجدار، والcanonical بنص التصميم، والمفتاح بايتات
+      // التوكن الخام مفكوكة من الhex (النثر الحاكم للتصميم)
       final stamp = DateTime.now().millisecondsSinceEpoch;
       final canonical = 'v1\n${out.pairingId}\n$stamp\nPOST\n/\nwalk-sig';
-      final signature = hexEncode(
-        hmacSha256(utf8.encode(out.token!), utf8.encode(canonical)),
-      );
+      final keyBytes = [
+        for (var i = 0; i + 1 < out.token!.length; i += 2)
+          int.parse(out.token!.substring(i, i + 2), radix: 16),
+      ];
+      final signature = hexEncode(hmacSha256(keyBytes, utf8.encode(canonical)));
       final proof = '${out.pairingId}.$stamp.$signature';
       // الإرسال الأول يقبل ويسجل الطابع، والثاني (الرابط الخام) إعادة
       final client = HttpClient();
