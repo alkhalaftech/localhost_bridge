@@ -132,16 +132,44 @@ blocking and checking the address space against loopback after DNS resolution
 
 Adding a token does not make it required: while any origin path admits
 (a listed origin, allow-all, a remembered consent), a local program can
-present that Origin and enter without the token. To require the token,
-keep the origin policy empty. In this release whether a browser page can
-use the token path follows the CORS echo: with an empty origin policy
-and no consent callback nothing is echoed at all, so the token stays a
-non-browser path; with a listed origin policy it is echoed for the
-listed origins themselves - a page on one can send `X-Bridge-Token`
-too, though it is already admitted without it; in the discovery
-and allow-all modes the preflight is answered for any valid https origin
-that has not been refused, so a page on such an origin can send
-`X-Bridge-Token` as well.
+present that Origin and enter without the token. To make the token
+**required on top of the admitted origin**, set
+`OriginPolicy.requireOriginWithToken`: a qualified origin without a
+valid token reads `403 token_required`, and the token alone - from an
+unqualified origin or with no Origin at all - never admits (the origin
+rejection answers it, so a wrong-origin sender learns nothing about its
+token). That mode is where **pairing** lives: the host displays a
+six-digit one-time code (`startPairing`, 120-second life), the page
+sends it with its origin to `POST /pair`, and receives a token bound to
+that origin for 24 hours - revocable and rotatable by the host
+(`revokePairedOrigin` / `rotatePairedOrigin`) and never sent raw again:
+the page proves possession by signing every request (HMAC-SHA-256 over
+the pairing id, a wall-clock stamp, the method, the path, and the
+correlation id) in the `X-Bridge-Pairing` header. The page-side
+signature is plain WebCrypto:
+
+```javascript
+async function signProof(tokenHex, pairingId, method, path, correlationId) {
+  const stamp = Date.now(); // keep stamps unique: never sign twice in one ms
+  const canonical = `v1\n${pairingId}\n${stamp}\n${method}\n${path}\n${correlationId}`;
+  const keyBytes = new Uint8Array(tokenHex.match(/.{2}/g).map(h => parseInt(h, 16)));
+  const key = await crypto.subtle.importKey(
+      'raw', keyBytes, {name: 'HMAC', hash: 'SHA-256'}, false, ['sign']);
+  const sig = await crypto.subtle.sign(
+      'HMAC', key, new TextEncoder().encode(canonical));
+  const sigHex = [...new Uint8Array(sig)]
+      .map(b => b.toString(16).padStart(2, '0')).join('');
+  return `${pairingId}.${stamp}.${sigHex}`;
+}
+// headers: { 'X-Bridge-Pairing': proof, 'X-Correlation-Id': cid, ... }
+```
+
+A reused or stale (outside one minute of the server's clock) signature
+reads `403 pair_signature_replay`; sign a fresh request and increment
+nothing - the stamp is the freshness. With the requirement off (the
+default), today's behavior stands: the token stays an optional
+independent path, a browser page can send `X-Bridge-Token` wherever its
+preflight is echoed, and headerless local clients keep their token door.
 
 A local token client needs no browser at all — one `curl` is the whole
 client. Configure the token once with
@@ -182,18 +210,23 @@ program), the `Sec-Fetch-*` headers, and the payload.
   apps on the machine, other users on a shared host). Adding a token does
   not make it required: while any origin path admits (a listed origin,
   allow-all, a remembered consent), a local program can present that
-  Origin and enter without the token. To require the token, keep the
-  origin policy empty. In this release a browser page can use the token
-  path wherever the preflight is echoed for it: listed and
-  always-approved origins (the origins your consent callback answered
-  with a remembered `allowAlways` grant) always - a page on a listed
-  origin can present the token too, though it is already admitted
-  without it - and in the discovery and allow-all modes any valid https
-  origin not yet refused.
-  Only with an empty origin policy and no consent callback is nothing
-  echoed, so the token belongs to non-browser senders there. On Android it is
-  the practical requirement, not an optional extra: any installed app
-  can open the port and present a forged `Origin`.
+  Origin and enter without the token. To make it required, set
+  `OriginPolicy.requireOriginWithToken`: a qualified origin must also
+  present a valid token - the shared secret, or a paired origin-bound
+  signature - and the token alone never admits from an unqualified
+  origin (the origin rejection answers it, never a token verdict). This
+  origin+token requirement with **pairing** is the setup that admits a
+  browser page while resisting other local programs: the page pairs once
+  with a displayed one-time code and holds a token bound to its origin,
+  expiring in 24 hours, revocable and rotatable by the host, and never
+  sent raw - every request carries only its HMAC signature. With the
+  requirement off (the default), a browser page can use the token path
+  wherever the preflight is echoed for it: listed and always-approved
+  origins always, and in the discovery and allow-all modes any valid
+  https origin not yet refused. On Android the requirement is the
+  practical setup, not an optional extra: any installed app can open the
+  port and present a forged `Origin` - but it cannot sign without the
+  paired secret.
 - **"Trusted" means admitted, not validated.** A `TrustedCommand` is so
   named because it passed the origin decision on its way in — the name
   says nothing about the payload's safety. Payload validation is always
@@ -301,10 +334,13 @@ deferred to a later release; treat it as provisional.
 JSON everywhere: `POST` with `Origin`; responses carry `X-Correlation-Id` (yours echoed back when it matches `[A-Za-z0-9._-]` and is at most 128 chars; anything else is replaced with a generated id).
 
 The `Access-Control-Allow-Headers` list is fixed — `Content-Type`,
-`X-Bridge-Token`, `X-Correlation-Id` — so the page must not send any
+`X-Bridge-Token`, `X-Correlation-Id` (plus `X-Bridge-Pairing` only while
+pairing is armed) — so the page must not send any
 other header: the preflight answer will not allow it. Commands are sent
-to `/`: in this release every path reaches the handler, and non-root
-POSTs just warn the host — so keep sending commands to `/`.
+to `/`: every path reaches the handler, and non-root
+POSTs just warn the host — so keep sending commands to `/` (with
+pairing armed, `POST /pair` is the pairing door and answers its own
+codes; disarmed it is no path at all).
 
 Stable error codes:
 
@@ -512,7 +548,7 @@ applies wherever the request arrives.
 | Host platform | Status | As of | Source |
 |---|---|---|---|
 | Desktop (Windows, macOS, Linux) | shipped — the usual loopback server model; Windows and Linux put no platform gate on it, while a macOS host inside App Sandbox needs the `com.apple.security.network.server` entitlement | 2026-11-15 | [Apple: App Sandbox entitlements](https://developer.apple.com/documentation/bundleresources/entitlements/com.apple.security.network.server) |
-| Android | shipped — an in-app loopback server; run the host app foregrounded or behind a foreground service, or the system may stop it. Chrome and Firefox reach it after the user grants Local Network Access. On Android 17, loopback traffic between two profiles (work and personal) is blocked by default for every app regardless of targetSdk; loopback within one profile is unaffected. On Android, any installed app can reach the port and send any `Origin`, so the token is the real barrier there. Native clients on the device send the token. In this release a browser page presents the token only where its preflight is echoed: a listed origin, or any valid https origin not yet refused under the discovery and allow-all modes — and an installed app can present that same listed origin. | 2026-11-15 | [Android: local network permission](https://developer.android.com/privacy-and-security/local-network-permission) · [Android 17 behavior changes](https://developer.android.com/about/versions/17/behavior-changes-all) |
+| Android | shipped — an in-app loopback server; run the host app foregrounded or behind a foreground service, or the system may stop it. Chrome and Firefox reach it after the user grants Local Network Access. On Android 17, loopback traffic between two profiles (work and personal) is blocked by default for every app regardless of targetSdk; loopback within one profile is unaffected. On Android, any installed app can reach the port and send any `Origin`, so the origin+token requirement with pairing is the real barrier there: the page pairs with a displayed one-time code and proves possession with HMAC signatures - an installed app can present the same listed origin but cannot sign. Native clients on the device send the shared token. With the requirement off (the default), a browser page presents the token only where its preflight is echoed: a listed origin, or any valid https origin not yet refused under the discovery and allow-all modes - and an installed app can present that same listed origin. The emulator side of the pairing story is runnable with `dart run tool/emulator_pairing_lab.dart` (adb reverse commands and the page URL are printed; the verdicts are read from the page's report collector). | 2026-11-18 | [Android: local network permission](https://developer.android.com/privacy-and-security/local-network-permission) · [Android 17 behavior changes](https://developer.android.com/about/versions/17/behavior-changes-all) |
 | iOS | untested here — no browser path: WebKit blocks `http://127.0.0.1` from `https` pages (mixed content), and iOS suspends in-app sockets when the host app backgrounds | 2026-11-15 | [WebKit bug 171934](https://bugs.webkit.org/show_bug.cgi?id=171934) |
 
 ### When this package fits
@@ -578,9 +614,14 @@ nothing listens in this release, and another local program can listen on
   that drives a system Chrome/Chromium headlessly, with zero added
   dependencies: a page carrying the accepted token sends a command and
   reads the reply; an unpaired page is refused with no readable verdict
-  while the wire carries the literal code; and the preflight round trip
-  announces `X-Bridge-Token`. Without a browser the lab skips itself and
-  states why; CI runs it where the runner image ships Chrome.
+  while the wire carries the literal code; the preflight round trip
+  announces `X-Bridge-Token`; and a paired page runs the whole pairing
+  story in the browser - pair with the displayed code, sign with
+  WebCrypto, read `200`, watch the same signature refused
+  `pair_signature_replay`, and read the proofless `token_required`.
+  Without a browser the lab skips itself and
+  states why; CI runs it where the runner image ships Chrome; and the
+  emulator side runs with `dart run tool/emulator_pairing_lab.dart`.
 - Why no TLS: on the browser path over loopback, a self-signed certificate
   trains users to click through warnings and buys nothing against the
   browser adversary model above; the transport is loopback-only and never

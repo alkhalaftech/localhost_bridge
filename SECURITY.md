@@ -123,18 +123,24 @@ These are stated plainly so no host builds on a false assumption:
   literal `127.0.0.1`.
 - **Mobile host platforms.** On Android, every installed app can open the
   port and send any `Origin` it likes — the origin policy is not a
-  barrier there at all, and the token layer is the practical barrier,
-  with the same caveat as above: it holds only while no origin path
-  admits without the secret. The in-app server runs while the host app is
+  barrier there at all, and the origin+token requirement with pairing is
+  the practical barrier: the page pairs with a displayed one-time code,
+  receives a token bound to its origin (expiring in 24 hours, revocable
+  and rotatable by the host), and never sends it raw again - every
+  request carries only its HMAC signature, so a same-device app that
+  forges the listed origin still cannot sign. The shared token path
+  (headerless native clients) holds with the same caveat as above: it
+  holds only while no origin path admits without the secret. The in-app
+  server runs while the host app is
   foregrounded or behind a foreground service; backgrounded without one,
   the system may stop it. And on Android 17, loopback traffic between two
   profiles (work and personal) is blocked by default for every app
   regardless of targetSdk; loopback within one profile is unaffected.
-  Native clients on the device send the token. In this release a browser
-  page presents the token only where its preflight is echoed: a listed
-  origin, or any valid https origin not yet refused under the discovery
-  and allow-all modes — and an installed app can present that same
-  listed origin.
+  Native clients on the device send the token. With the requirement off
+  (the default), a browser page presents the token only where its
+  preflight is echoed: a listed origin, or any valid https origin not yet
+  refused under the discovery and allow-all modes - and an installed app
+  can present that same listed origin.
   On iOS there is no path from a browser at all: Safari, and iOS browsers
   built on WebKit, block `http://127.0.0.1` from an `https` page as mixed
   content — Apple permits other engines in the EU (iOS 17.4+); none is
@@ -288,6 +294,9 @@ on the roadmap. The names are the tests' real names.
 | Oversized token header | 1,024-byte cap, `400 token_too_long`, no miss window left behind | `a 1,025-byte token answers 400 token_too_long with the handler, the rejection counter, its log, and CORS untouched` · `five oversized tokens leave no miss window behind: the correct token right after them is served, not locked` · `the Origin gates settle first: an oversized token with a malformed Origin answers origin_malformed` (`token_length_cap_test`) |
 | Timing side channel on the token comparison | Constant-time padded comparison over `max(256, secret length)` | `comparison semantics hold for generated lengths: correct passes, and wrong at the first byte, the last byte, past the secret, and below the secret all fail` (`token_length_cap_test`) · `lengths 32/255/256/257: correct accepted, wrong rejected at each` (`priority_contract_test`) |
 | Token brute force and budget edges | 5 wrong-token attempts / 60 s → further wrong tokens answer `429 token_locked` with the honest remaining window; the correct token is always accepted | `Retry-After says the real lockout window, not a generic constant` (`wire_contract_test`) · `window edges on the injected clock: the sixth miss locks, 60001ms unlocks` · `no-origin and web-origin misses keep two independent windows` · `unlisted origin with correct token: accepted whatever the guessing history, another passes` (`priority_contract_test`) · `after any number of wrong tokens from any sender, the correct token is accepted in the next request` (`token_guess_budget_test`) |
+| Pairing-code guessing (a hostile page probing the displayed code) | Six-digit one-time code, 120 s life, 5 wrong attempts per pairing session → `429 pair_budget_exceeded` with the session's honest remainder; the budget is per session, never per origin | `code guessing is budget-bound: five wrong attempts per pairing session, then 429 with the honest remaining session wait` (`pairing_test`) · `a wrong code on the wire answers 403 pair_code_invalid - readable, counted, and the honest budget follows` (`pairing_route_test`) · `pair_budget_exceeded` and `pair_code_expired` and `pair_code_invalid` walk scenarios (`intake_rejection_registry_test`) |
+| Stolen pairing credential replayed (a captured signature resent) | One-minute stamp-skew window plus a capped replay cache (4,096 entries, 120 s, oldest evicted) → the same stamp never proves twice: `403 pair_signature_replay`; outside the skew refuses the same way, so a cache flood opens no replay window | `a replayed signature is refused pair_signature_replay: the same stamp never proves twice` · `a stale signature (outside the skew window) is refused as a replay…` · `the replay cache is capped at 4,096 entries: a stamp flood never opens a replay window` (`pairing_signature_test`) · the browser reads the refusal: `the paired page pairs with the displayed code…` (`browser_lab_test`) |
+| Forged origin under the origin+token requirement (a local program presenting a listed origin) | `OriginPolicy.requireOriginWithToken` makes the token a requirement on the qualified origin; a paired origin cannot be transplanted (the signature binds the origin) and an unqualified origin never learns whether its token was valid | `requireOriginWithToken: a qualified origin without the token is refused token_required` · `requireOriginWithToken: the correct token from another origin is refused by the origin rejection alone - no token oracle for unqualified origins` (`origin_token_policy_test`) · `a signature keyed by another origin token is refused by the origin rejection…` (`pairing_signature_test`) · the browser and the forged-origin wire send in `the paired page pairs with the displayed code…` (`browser_lab_test`) |
 | Guessable or short configured token | 32-byte floor at `update()`, saved short token inert at boot, empty token disables the layer | the `short token refusal: configuration error, inert at boot` group with `update() throws for a token below 32 bytes instead of warning` · `the short-token error names the length, never the token itself` (`intake_protection_test`) · `empty configured token: the header layer is fully disabled` (`priority_contract_test`) |
 | JSON amplification (small body, huge parse) | Structural-element and depth count before decode, `413 payload_too_complex` | `a 1MiB body of empty JSON elements is rejected with 413 payload_too_complex before parsing` · `braces and commas inside JSON strings are not counted as elements` (`intake_limits_test`) · `json amplification: 16 concurrent 1MiB bodies of empty objects stay under a declared ceiling` (`resources_test`) · `a real nested 1MB body over the live wire leaves the server alive` (`wire_contract_test`) · `deep nesting under the element cap is refused before decode` (`intake_health_test`) |
 | Body flood / memory growth | Byte cap with early refusal, bounded buffers | `300 consecutive 413 rejections: RSS stays stable` (`hardened_open_test`) · `body resources: 15 chunked rejections over the cap plus 15 accepts at the cap — RSS never escapes` (`resources_test`) |
