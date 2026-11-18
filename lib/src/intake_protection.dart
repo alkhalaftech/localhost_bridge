@@ -4,6 +4,7 @@ import 'dart:convert';
 import 'dart:math';
 
 import 'bridge_telemetry.dart';
+import 'digest.dart';
 
 /// The host's answer to an unknown-origin question. [allowAlways] and
 /// [reject] are remembered for the session, [allowOnce] grants a single
@@ -564,6 +565,480 @@ class IntakeProtection {
   /// candidate, so the stamp the request is about to record always lands
   /// in a live window and the token lockout still forms under the flood.
   static const _maxOriginWindows = 10000;
+
+  // ══ طبقة الاقتران — الحالة والسقوف مكتوبة في تقرير التصميم قبل الكود ══
+
+  /// Cap on live pairing sessions (a session = one displayed code): a
+  /// host shows one at a time; eight bounds the broadcast abuse and the
+  /// memory with it. The ninth insert evicts the oldest-inserted session,
+  /// and expired ones are swept on every insert and every read.
+  static const _maxPairingSessions = 8;
+
+  /// The life of one pairing session (and its code), in milliseconds -
+  /// short by design: the user reads the code from the host screen now.
+  static const _pairingTtlMs = 120_000;
+
+  /// The wrong-code guess budget, in wrong code attempts per pairing
+  /// session (the unit is written here): every wrong attempt is charged to
+  /// every live session - a guess could have been aimed at any of them -
+  /// so once a session has absorbed the budget, further attempts against
+  /// it answer `429 pair_budget_exceeded` with the session's honest
+  /// remainder. Per-session, never per-origin: on loopback the address is
+  /// one, and a per-origin split would hand a multi-page attacker one
+  /// fresh budget per forged origin. Above the budget the code is not
+  /// compared at all - the budget decides first, so the answer never
+  /// tells how close a guess was.
+  static const _pairGuessBudget = 5;
+
+  /// Cap on paired-origin records (one binding per paired token): expired
+  /// records are swept on insert; a 65th insert into a full house evicts
+  /// the oldest-inserted LIVE record - fail-closed: the evicted page's
+  /// signatures stop verifying and it re-pairs. The ceiling is the worst
+  /// case for memory, never the flood.
+  static const _maxPairedOrigins = 64;
+
+  /// The life of a paired token, in milliseconds - 24 hours: long enough
+  /// for a workday, bounded so no secret lives forever in page code. The
+  /// host revokes or rotates earlier at will; after expiry the page
+  /// re-pairs.
+  static const _pairedTokenTtlMs = 86_400_000;
+
+  /// The sessions map - insertion order IS the eviction queue (a
+  /// LinkedHashMap assigns to an existing key without moving it).
+  final Map<String, _PairingSession> _pairingSessions =
+      <String, _PairingSession>{};
+
+  /// The paired records keyed by sha256(token) hex - the raw token bytes
+  /// never become a lookup key.
+  final Map<String, _PairedRecord> _pairedRecords = <String, _PairedRecord>{};
+
+  /// The pairing-id index: derived id -> record (its ceiling is the
+  /// records cap by construction).
+  final Map<String, _PairedRecord> _pairingIdIndex = <String, _PairedRecord>{};
+
+  /// Whether the pairing layer is armed: the host turns it on once
+  /// through [enablePairing], which is also where the callbacks arrive.
+  bool _pairingArmed = false;
+
+  /// Whether the pairing layer is armed right now.
+  bool get pairingEnabled => _pairingArmed;
+
+  /// Fired once per successful pairing with the bound origin.
+  void Function(PairingInfo info)? onPaired;
+
+  /// Save hook (brought in [enablePairing]): the host persists the paired
+  /// token for its own storage - the package writes no file and never
+  /// waits on the hook; a throwing hook is contained and said, never
+  /// allowed to break the wire.
+  Future<void> Function(String origin, String token, int lifetimeMs)?
+  onPairedSave;
+
+  /// Save hook (brought in [enablePairing]): the host drops its persisted
+  /// copy when a binding is revoked (explicitly or by rotation).
+  void Function(String origin)? onPairedRevoke;
+
+  /// Save hook (brought in [enablePairing]): the host persists a discovery
+  /// decision (allowAlways or reject) the moment it is remembered.
+  void Function(String origin, OriginConsent consent)? onConsentSave;
+
+  /// Arms the pairing layer: `POST /pair` starts answering on the server,
+  /// bound tokens start counting, and the host's callbacks take their
+  /// seats. Calling it again re-arms with the new callbacks (the state
+  /// maps survive); [disablePairing] closes the route and drops the
+  /// bindings.
+  void enablePairing({
+    void Function(PairingInfo info)? onPaired,
+    Future<void> Function(String origin, String token, int lifetimeMs)?
+    onPairedSave,
+    void Function(String origin)? onPairedRevoke,
+    void Function(String origin, OriginConsent consent)? onConsentSave,
+  }) {
+    _pairingArmed = true;
+    this.onPaired = onPaired;
+    this.onPairedSave = onPairedSave;
+    this.onPairedRevoke = onPairedRevoke;
+    this.onConsentSave = onConsentSave;
+  }
+
+  /// Disarms the pairing layer and drops every binding: pages paired so
+  /// far must pair again. The route stops answering; the wire contracts
+  /// of everything else are untouched.
+  void disablePairing() {
+    _pairingArmed = false;
+    onPaired = null;
+    onPairedSave = null;
+    onPairedRevoke = null;
+    onConsentSave = null;
+    _pairingSessions.clear();
+    _pairedRecords.clear();
+    _pairingIdIndex.clear();
+  }
+
+  /// Creates a new one-time code for the host to display. No origin
+  /// involved here - the qualification gate lives in [pair], where the
+  /// page's origin arrives.
+  PairingOffer startPairing() {
+    if (!_pairingArmed) {
+      throw StateError('pairing is not enabled - call enablePairing first');
+    }
+    _sweepPairingSessions();
+    final rnd = Random.secure();
+    final code = rnd.nextInt(1_000_000).toString().padLeft(6, '0');
+    // الطرد عند السقف: الأقدم إدراجاً يخرج (الخريطة نفسها الطابور)
+    while (_pairingSessions.length >= _maxPairingSessions) {
+      _pairingSessions.remove(_pairingSessions.keys.first);
+    }
+    _pairingSessions[code] = _PairingSession(code, _now + _pairingTtlMs);
+    return PairingOffer(code: code, expiresInSeconds: _pairingTtlMs ~/ 1000);
+  }
+
+  /// The pairing gate: the page's origin must qualify under the current
+  /// policy (one qualification source - the same list / allow-all /
+  /// remembered consent the admission paths read), then the code decides.
+  /// Every wrong attempt is charged to every live session; the code is
+  /// one-time; the issued token is bound to this origin, expires in 24
+  /// hours, and is revocable and rotatable by the host. Rejections here
+  /// count and log through the same throttled path as every other
+  /// rejection - denial is never silent.
+  PairingOutcome pair({String? origin, required String code}) {
+    if (!_pairingArmed) {
+      throw StateError('pairing is not enabled - call enablePairing first');
+    }
+    final key = origin == null ? '' : normalize(origin);
+    // بوابة التأهيل أولاً: غير المؤهل يُجاب برمز الأصل ولا يحرق الرمز
+    // ولا ميزانية الجلسة — مصدر تأهيل واحد لا اثنان
+    if (!_pairingQualified(origin)) {
+      _noteAuthority('pairing refused: origin_not_listed', origin);
+      return const PairingOutcome.rejected(
+        IntakeRejection(
+          403,
+          'origin_not_listed',
+          'Origin is not on the allowed list',
+        ),
+      );
+    }
+    // مقارنة الرمز سادة المقارنة الزمنية-الثابتة: الميزانية لكل جلسة هي
+    // الحارس (خمس محاولات فأقل فضاء الرمز)، ومقارنة الزمن-الثابت هنا
+    // كانت ستلوث عدّاد مقارنات التوكن بشاهد قبوله. البحث يشمل الجلسة
+    // المنتهية بعد — رمز معروف انتهى عمره يُجاب برمز الانتهاء لا برمز
+    // المجهول، ثم تموت الجلسة هنا
+    _PairingSession? matched;
+    for (final session in _pairingSessions.values) {
+      if (session.code == code) {
+        matched = session;
+        break;
+      }
+    }
+    if (matched != null && _now > matched.expiresAtMs) {
+      _pairingSessions.remove(matched.code);
+      _noteAuthority('pairing refused: pair_code_expired', origin);
+      return const PairingOutcome.rejected(
+        IntakeRejection(
+          403,
+          'pair_code_expired',
+          'This pairing code has expired — ask the host for a new one',
+        ),
+      );
+    }
+    if (matched == null) {
+      // ما لا يطابق حيّاً: الكنس أولا فيخرج الموتى قبل التسعير
+      _sweepPairingSessions();
+      // محاولة خاطئة تُحسب على كل جلسة حية — كان يمكن أن تستهدف أيّها.
+      // الحكم قبل التسعير: المنفق هو من بلغ الميزانية قبل هذه المحاولة،
+      // فالمحاولات الخمس كلها تُجاب invalid والسادسة وحدها 429
+      var allSpent = _pairingSessions.isNotEmpty;
+      for (final session in _pairingSessions.values) {
+        if (session.wrongAttempts < _pairGuessBudget) allSpent = false;
+      }
+      var longestRemainderMs = 0;
+      for (final session in _pairingSessions.values) {
+        session.wrongAttempts++;
+        final remainder = session.expiresAtMs - _now;
+        if (remainder > longestRemainderMs) longestRemainderMs = remainder;
+      }
+      if (allSpent) {
+        _noteAuthority(
+          'pairing refused: pair_budget_exceeded '
+          '($_pairGuessBudget wrong code attempts per pairing session)',
+          origin,
+        );
+        return PairingOutcome.rejected(
+          IntakeRejection(
+            429,
+            'pair_budget_exceeded',
+            'Too many wrong pairing codes — retry after a short wait',
+            retryAfterMs: longestRemainderMs < 1000 ? 1000 : longestRemainderMs,
+          ),
+        );
+      }
+      _noteAuthority('pairing refused: pair_code_invalid', origin);
+      return const PairingOutcome.rejected(
+        IntakeRejection(
+          403,
+          'pair_code_invalid',
+          'Unknown or already-used pairing code',
+        ),
+      );
+    }
+    // الميزانية تحسم قبل أي مقارنة إضافية: فوقها الجواب لا يكشف قرب
+    // المحاولة من الهدف
+    if (matched.wrongAttempts >= _pairGuessBudget) {
+      final remainder = matched.expiresAtMs - _now;
+      _noteAuthority(
+        'pairing refused: pair_budget_exceeded '
+        '($_pairGuessBudget wrong code attempts per pairing session)',
+        origin,
+      );
+      return PairingOutcome.rejected(
+        IntakeRejection(
+          429,
+          'pair_budget_exceeded',
+          'Too many wrong pairing codes — retry after a short wait',
+          retryAfterMs: remainder < 1000 ? 1000 : remainder,
+        ),
+      );
+    }
+    // النجاح: الجلسة تموت بالاستهلاك (الرمز لمرة واحدة)، والتوكن المربوط
+    // يولد من مولده المستقل — لا اشتقاق من المفتاح المشترك إطلاقاً
+    _pairingSessions.remove(matched.code);
+    final token = generateBridgeToken();
+    final digest = hexEncode(sha256(utf8.encode(token)));
+    final id = digest.substring(0, 16);
+    final existing = _pairingIdIndex[id];
+    if (existing != null && existing.digest != digest) {
+      // التصادم عملياً مستحيل (64 مدخلاً على فضاء 64 بتاً) — لكن الفشل
+      // الصاخب أفضل من حفظ ربط غامض
+      telemetry?.error(
+        'pairing id collision on issue - refusing this pairing loudly',
+        category: BridgeCategory.security,
+      );
+      return const PairingOutcome.rejected(
+        IntakeRejection(
+          403,
+          'pair_code_invalid',
+          'Unknown or already-used pairing code',
+        ),
+      );
+    }
+    _insertPairedRecord(
+      _PairedRecord(
+        origin: key,
+        token: token,
+        digest: digest,
+        issuedAtMs: _now,
+        expiresAtMs: _now + _pairedTokenTtlMs,
+      ),
+    );
+    onPaired?.call(
+      PairingInfo(
+        origin: key,
+        pairingId: id,
+        expiresInSeconds: _pairedTokenTtlMs ~/ 1000,
+      ),
+    );
+    _containHook(() {
+      final hook = onPairedSave;
+      if (hook == null) return null;
+      return Future<void>.sync(() => hook(key, token, _pairedTokenTtlMs));
+    }, origin: key);
+    return PairingOutcome.paired(
+      token: token,
+      pairingId: id,
+      expiresInSeconds: _pairedTokenTtlMs ~/ 1000,
+    );
+  }
+
+  /// Revokes every binding of one origin at once: its signatures stop
+  /// verifying in the very next admission, and the revoke hook carries the
+  /// origin to the host's storage.
+  void revokePairedOrigin(String origin) {
+    final key = normalize(origin);
+    final dead = _pairedRecords.keys
+        .where((digest) => _pairedRecords[digest]!.origin == key)
+        .toList();
+    for (final digest in dead) {
+      final record = _pairedRecords.remove(digest);
+      if (record != null) _pairingIdIndex.remove(record.pairingId);
+    }
+    if (dead.isNotEmpty) {
+      telemetry?.warn(
+        'paired origin revoked: every binding of this origin is dead '
+        '— its page must pair again',
+        category: BridgeCategory.security,
+      );
+      _containHook(() {
+        onPairedRevoke?.call(key);
+        return null;
+      }, origin: key);
+    }
+  }
+
+  /// Rotation = revoke + a fresh offer: the host displays the new code,
+  /// the page pairs again, the old bindings stay dead.
+  PairingOffer rotatePairedOrigin(String origin) {
+    revokePairedOrigin(origin);
+    return startPairing();
+  }
+
+  /// Re-arms a persisted binding after a host restart: same token, same
+  /// derived pairing id, whatever lifetime the host's own timestamps say
+  /// is left. Returns the derived pairing id (identical to the one the
+  /// original pairing issued - it is a function of the token alone). A
+  /// non-positive remainder or a token below the length floor throws
+  /// [ArgumentError] - a loud setup error, never a silent entry.
+  String restorePairedOrigin({
+    required String origin,
+    required String token,
+    required int remainingMs,
+  }) {
+    if (!_pairingArmed) {
+      throw StateError('pairing is not enabled - call enablePairing first');
+    }
+    final bytes = utf8.encode(token.trim()).length;
+    if (remainingMs <= 0) {
+      throw ArgumentError.value(
+        remainingMs,
+        'remainingMs',
+        'must be positive - an expired binding is not restored',
+      );
+    }
+    if (bytes < _minTokenBytes) {
+      throw ArgumentError.value(
+        bytes,
+        'token',
+        'is $bytes bytes (UTF-8) - a paired token needs at least '
+            '$_minTokenBytes bytes, as generateBridgeToken produces',
+      );
+    }
+    final digest = hexEncode(sha256(utf8.encode(token.trim())));
+    final id = digest.substring(0, 16);
+    final existing = _pairingIdIndex[id];
+    if (existing != null && existing.digest != digest) {
+      throw ArgumentError.value(
+        id,
+        'pairingId',
+        'collides with a different binding - refusing loudly instead of '
+            'storing an ambiguous record',
+      );
+    }
+    _insertPairedRecord(
+      _PairedRecord(
+        origin: normalize(origin),
+        token: token.trim(),
+        digest: digest,
+        issuedAtMs: _now,
+        expiresAtMs: _now + remainingMs,
+      ),
+    );
+    return id;
+  }
+
+  /// Re-arms a persisted discovery decision after a host restart: only the
+  /// two persistent values are accepted - `allowOnce` is a 30-second
+  /// grant by contract and [ArgumentError] says so, `dismissed` stores
+  /// nothing by contract.
+  void restoreSavedConsent(String origin, OriginConsent consent) {
+    if (consent == OriginConsent.allowOnce) {
+      throw ArgumentError.value(
+        consent,
+        'consent',
+        'allowOnce is a short one-request grant, never a saved decision - '
+            'the origin will be asked again',
+      );
+    }
+    if (consent == OriginConsent.dismissed) {
+      throw ArgumentError.value(
+        consent,
+        'consent',
+        'dismissed closes a question with no decision - nothing is stored',
+      );
+    }
+    _rememberConsent(normalize(origin), consent);
+  }
+
+  /// How many paired-origin records are armed right now - the read-only
+  /// counter a settings UI reads; the wire behavior never does.
+  int get pairedCount => _pairedRecords.length;
+
+  /// Does this origin qualify for pairing under the current policy? The
+  /// same qualification the admission paths grant: the list (with its
+  /// remembered always-allow consents), or the hardened allow-all shape.
+  /// Discovery is deliberately absent: an origin whose question is still
+  /// open has not been vouched for yet.
+  bool _pairingQualified(String? origin) {
+    if (origin == null || origin.isEmpty || origin == 'null') return false;
+    if (_isListed(origin)) return true;
+    if (!_policy.allowAllHardened) return false;
+    final uri = Uri.tryParse(origin);
+    if (uri == null || uri.host.isEmpty) return false;
+    if (uri.scheme == 'https') return true;
+    final host = uri.host.toLowerCase();
+    return _policy.allowLocalHttp &&
+        uri.scheme == 'http' &&
+        (host == 'localhost' || host == '127.0.0.1' || host == '::1');
+  }
+
+  /// Sweeps expired sessions - on every insert and every read.
+  void _sweepPairingSessions() {
+    final now = _now;
+    _pairingSessions.removeWhere((_, session) => now > session.expiresAtMs);
+  }
+
+  /// Inserts a paired record under the cap: expired records swept first,
+  /// then the oldest-inserted live record is evicted fail-closed.
+  void _insertPairedRecord(_PairedRecord record) {
+    final now = _now;
+    _pairedRecords.removeWhere(
+      (digest, existing) => now > existing.expiresAtMs,
+    );
+    final previous = _pairedRecords[record.digest];
+    if (previous != null) {
+      // إعادة ربط نفس التوكن (استعادة أو إعادة اقتران) تستبدل السجل لا
+      // تكرره، وفهرس المعرف يبقى على الأحدث
+      _pairingIdIndex.remove(previous.pairingId);
+      _pairedRecords.remove(record.digest);
+    }
+    while (_pairedRecords.length >= _maxPairedOrigins) {
+      final oldestDigest = _pairedRecords.keys.first;
+      final oldest = _pairedRecords.remove(oldestDigest);
+      if (oldest != null && _pairingIdIndex[oldest.pairingId] == oldest) {
+        _pairingIdIndex.remove(oldest.pairingId);
+      }
+    }
+    _pairedRecords[record.digest] = record;
+    _pairingIdIndex[record.pairingId] = record;
+  }
+
+  /// Runs a save hook with its failures contained: the hook belongs to the
+  /// host's storage, so its crash is said once (telemetry) and never
+  /// allowed to break the pairing or revocation path. A null return means
+  /// the body ran synchronously.
+  void _containHook(Future<void>? Function() body, {required String origin}) {
+    Future<void>? work;
+    try {
+      work = body();
+    } catch (e) {
+      telemetry?.warn(
+        'pairing save hook threw synchronously (origin='
+        '${originForLog(origin) ?? 'none'}) — the binding is live in '
+        'memory; the host storage missed it',
+        category: BridgeCategory.security,
+      );
+      return;
+    }
+    if (work != null) {
+      unawaited(
+        work.catchError((Object e) {
+          telemetry?.warn(
+            'pairing save hook failed (origin='
+            '${originForLog(origin) ?? 'none'}) — the binding is live in '
+            'memory; the host storage missed it: $e',
+            category: BridgeCategory.security,
+          );
+        }),
+      );
+    }
+  }
 
   /// The policy currently in force - replaced live by [update] and
   /// [updateFromSaved]. Read it to mirror settings UI state; admission
@@ -1674,6 +2149,14 @@ class IntakeProtection {
             _onceGrants[key] = _now + _onceGrantWindowMs;
           } else {
             _rememberConsent(key, answer);
+            // خطاف حفظ الموافقة: قرار المستخدم للجلسة، والحفظ ملك المضيف —
+            // محتوى الخطأ كما بقية الخطافات لا انهيار مسار الجواب
+            _containHook(() {
+              final hook = onConsentSave;
+              if (hook == null) return null;
+              hook(key, answer);
+              return null;
+            }, origin: key);
           }
         })
         .catchError((Object _) {
@@ -2001,6 +2484,11 @@ class IntakeProtection {
     _askTimers.clear();
     _pendingAsks.clear();
     _askSequence.clear();
+    // خرائط الاقتران الثلاث تخرج مع الكائن: جلسات وسجلات وفهرس — لا بقاء
+    // لحالة اقتران بعد الإغلاق
+    _pairingSessions.clear();
+    _pairedRecords.clear();
+    _pairingIdIndex.clear();
   }
 
   /// How many constant-time token comparisons this object has run since
@@ -2057,4 +2545,113 @@ String generateBridgeToken() {
     32,
     (_) => rnd.nextInt(256),
   ).map((b) => b.toRadixString(16).padLeft(2, '0')).join();
+}
+
+/// One live pairing session - a displayed code and its expiry, plus the
+/// wrong-attempt budget it absorbs (every wrong attempt anywhere is
+/// charged here too).
+class _PairingSession {
+  _PairingSession(this.code, this.expiresAtMs);
+
+  final String code;
+  final int expiresAtMs;
+  int wrongAttempts = 0;
+}
+
+/// One armed pairing binding - the token bound to the origin it paired
+/// from, keyed by its digest in the maps. [pairingId] is derived from the
+/// token digest alone, so a host restart that restores the token restores
+/// the id with it.
+class _PairedRecord {
+  _PairedRecord({
+    required this.origin,
+    required this.token,
+    required this.digest,
+    required this.issuedAtMs,
+    required this.expiresAtMs,
+  });
+
+  final String origin;
+  final String token;
+  final String digest;
+  final int issuedAtMs;
+  final int expiresAtMs;
+
+  /// The public pairing identifier the page presents - the first 16 hex
+  /// characters of sha256(token).
+  String get pairingId => digest.substring(0, 16);
+}
+
+/// A short one-time pairing code the host displays to the user - what the
+/// page sends (with its Origin) to receive its origin-bound token.
+/// [expiresInSeconds] is the honest life of the offer.
+class PairingOffer {
+  /// Builds the offer - the protection constructs it, the host displays
+  /// [code].
+  const PairingOffer({required this.code, required this.expiresInSeconds});
+
+  /// Six decimal digits from a secure random source - readable aloud,
+  /// typeable from a screen.
+  final String code;
+
+  /// How long the offer lives, in seconds - after it the code is refused
+  /// `pair_code_expired` and its session is gone.
+  final int expiresInSeconds;
+}
+
+/// What the host is told when a page pairs - the origin that paired, the
+/// pairing id the page will present, and the honest token lifetime. The
+/// raw token itself travels through the save hook only: the host persists
+/// it (its own storage), the package never writes a file.
+class PairingInfo {
+  /// Builds the info - the protection constructs it for [IntakeProtection.
+  /// enablePairing]'s onPaired callback.
+  const PairingInfo({
+    required this.origin,
+    required this.pairingId,
+    required this.expiresInSeconds,
+  });
+
+  /// The normalized origin the bound token is locked to.
+  final String origin;
+
+  /// The public pairing identifier the page presents in
+  /// `X-Bridge-Pairing` - derived from the token alone, so it survives a
+  /// host restart whenever the token does.
+  final String pairingId;
+
+  /// The token's full lifetime in seconds (the host can revoke or rotate
+  /// it earlier at any moment).
+  final int expiresInSeconds;
+}
+
+/// The answer of one pairing attempt - either the rejection (status, code,
+/// message on the wire) or the issued binding. Exactly one side is set.
+class PairingOutcome {
+  /// Builds a rejected attempt.
+  const PairingOutcome.rejected(this.rejection)
+    : token = null,
+      pairingId = null,
+      expiresInSeconds = null;
+
+  /// Builds a paired attempt.
+  const PairingOutcome.paired({
+    required this.token,
+    required this.pairingId,
+    required this.expiresInSeconds,
+  }) : rejection = null;
+
+  /// The pairing gate's rejection - null when the attempt paired.
+  final IntakeRejection? rejection;
+
+  /// The origin-bound token (64 hex characters) - null on a rejection. It
+  /// signs requests (never travels raw after pairing day), expires on its
+  /// own, and is revocable and rotatable by the host.
+  final String? token;
+
+  /// The public pairing identifier for the token - null on a rejection.
+  final String? pairingId;
+
+  /// The token lifetime in seconds - null on a rejection.
+  final int? expiresInSeconds;
 }
