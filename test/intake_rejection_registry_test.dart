@@ -161,6 +161,7 @@ class _Link {
 String _head(
   int port, {
   String method = 'POST',
+  String path = '/',
   String? host,
   String? origin,
   String? token,
@@ -170,7 +171,7 @@ String _head(
   String? extraHeaders,
 }) {
   final b = StringBuffer()
-    ..write('$method / HTTP/1.1\r\n')
+    ..write('$method $path HTTP/1.1\r\n')
     ..write('Host: ${host ?? '127.0.0.1:$port'}\r\n');
   if (origin != null) b.write('Origin: $origin\r\n');
   if (token != null) b.write('X-Bridge-Token: $token\r\n');
@@ -266,6 +267,18 @@ IntakeProtection _discovery(Future<OriginConsent> Function(String) cb) =>
     IntakeProtection()..update(
       policy: OriginPolicy(requireFetchMetadata: false, onUnknownOrigin: cb),
     );
+
+/// قائمة صارمة بالاقتران مسلحا، على الساعة المحقونة نفسها التي يقرؤها
+/// الخادم — شاهود ميزانية الرمز وانتهائه حتمية
+IntakeProtection _strictPairing() => IntakeProtection(nowMs: () => _clockMs[0])
+  ..update(
+    policy: const OriginPolicy(
+      allowed: ['https://portal.example'],
+      requireOriginWithToken: true,
+    ),
+    token: _t64,
+  )
+  ..enablePairing();
 
 List<_Scenario> _scenarios() {
   final cases = <({String code, bool preBody, Future<_Walk> Function() run})>[];
@@ -483,6 +496,104 @@ List<_Scenario> _scenarios() {
         _head(srv.port, origin: 'https://portal.example'),
       );
       return _Walk(srv, link, () async {}, preBody: true);
+    },
+  ));
+  cases.add((
+    code: 'pairing_too_long',
+    preBody: true,
+    run: () async {
+      // بوابة شكل ترويسة التوقيع: فوق السقف تُرد قبلا كأخويها، بشرط
+      // تسليح الاقتران حصرا
+      final pr = _strictPairing();
+      final srv = await _listen(_server(pr: pr));
+      final link = await _Link.open(
+        srv.port,
+        _head(
+          srv.port,
+          origin: 'https://portal.example',
+          extraHeaders: 'X-Bridge-Pairing: a.b.${'c' * 300}\r\n',
+        ),
+      );
+      return _Walk(srv, link, () async {}, preBody: true);
+    },
+  ));
+
+  // 403 - the pairing gate over a fully read body
+  cases.add((
+    code: 'pair_code_invalid',
+    preBody: false,
+    run: () async {
+      final pr = _strictPairing();
+      final srv = await _listen(_server(pr: pr));
+      pr.startPairing();
+      final link = await _Link.openFull(
+        srv.port,
+        _head(
+          srv.port,
+          path: '/pair',
+          origin: 'https://portal.example',
+          cl: 24,
+        ),
+        utf8.encode('{"pairingCode":"000001"}'),
+      );
+      return _Walk(srv, link, () async {}, preBody: false);
+    },
+  ));
+  cases.add((
+    code: 'pair_code_expired',
+    preBody: false,
+    run: () async {
+      final pr = _strictPairing();
+      final srv = await _listen(_server(pr: pr));
+      final offer = pr.startPairing();
+      // الجلسة انقضت عمرها كاملا على الساعة المحقونة قبل المحاولة
+      _clockMs[0] += 120_001;
+      final link = await _Link.openFull(
+        srv.port,
+        _head(
+          srv.port,
+          path: '/pair',
+          origin: 'https://portal.example',
+          cl: 24,
+        ),
+        utf8.encode('{"pairingCode":"${offer.code}"}'),
+      );
+      return _Walk(srv, link, () async {}, preBody: false);
+    },
+  ));
+
+  // 429 - the pairing budget over a fully read body
+  cases.add((
+    code: 'pair_budget_exceeded',
+    preBody: false,
+    run: () async {
+      final pr = _strictPairing();
+      final srv = await _listen(_server(pr: pr));
+      pr.startPairing();
+      // خمس محاولات خاطئة كاملة تملى ميزانية الجلسة
+      for (var i = 0; i < 5; i++) {
+        final client = HttpClient();
+        try {
+          final req = await client.open('POST', '127.0.0.1', srv.port, '/pair');
+          req.headers.set('Origin', 'https://portal.example');
+          req.headers.set(HttpHeaders.contentTypeHeader, 'application/json');
+          req.add(utf8.encode('{"pairingCode":"00000$i"}'));
+          await req.close();
+        } finally {
+          client.close(force: true);
+        }
+      }
+      final link = await _Link.openFull(
+        srv.port,
+        _head(
+          srv.port,
+          path: '/pair',
+          origin: 'https://portal.example',
+          cl: 24,
+        ),
+        utf8.encode('{"pairingCode":"999999"}'),
+      );
+      return _Walk(srv, link, () async {}, preBody: false);
     },
   ));
 

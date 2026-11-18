@@ -259,7 +259,7 @@ JSON في كل مكان: `POST` مع `Origin`، والردود تحمل `X-Corre
 |---|---|---|
 | 200 | — | نجاح المعالج (`{"ok":true}`). |
 | 400 | `duplicate_header` / `origin_too_long` | ترويسة أحادية أُرسلت مرتين / ترويسة `Origin` أطول من السقف الداخلي للحزمة (1,024 محرفاً)، تُرد قبل أي معالجة. |
-| 400 | `origin_malformed` / `token_too_long` / `bad_request` | ترويسة `Origin` ليست بالشكل `scheme://host[:port]` / ترويسة `X-Bridge-Token` فوق السقف الداخلي (1,024 بايتاً) / محلل HTTP رفض تأطير الطلب — كلها تُرد قبل وصول معالجك. |
+| 400 | `origin_malformed` / `token_too_long` / `pairing_too_long` / `bad_request` | ترويسة `Origin` ليست بالشكل `scheme://host[:port]` / ترويسة `X-Bridge-Token` فوق السقف الداخلي (1,024 بايتاً) / ترويسة `X-Bridge-Pairing` فوق السقف الداخلي (256 بايتاً، عند تسليح الاقتران فقط) / محلل HTTP رفض تأطير الطلب — كلها تُرد قبل وصول معالجك. |
 | 400 | `invalid_utf8` / `empty_payload` / `unsupported_payload_shape` | الجسم ليس UTF-8 / لا حمولة صالحة / كائن JSON بلا مفاتيح أوامر معروفة. الجسم الذي يفشل فك JSON كلياً **ليس** 400 — يسقط نصاً خاماً كأمر (عقد «غير JSON يبقى خاماً» المختبَر)؛ والرقم والمنطقي و`null` يسلكون المسار الخام نفسه؛ وداخل مصفوفة JSON تسقط العناصر غير النصية والفارغة بلا إشعار. |
 | 405 | `method_not_allowed` | المقبول `POST` (و`OPTIONS` للفحص المسبق) حصراً. |
 | 403 | `origin_not_listed` / `origin_declined` / `origin_unknown` / `origin_blocked` / `origin_pending` | رفض سياسة الأصول (غير مدرج / موافقة مرفوضة / غير قابل للتأكيد / تحصين الكل / نافذة موافقة مفتوحة — أعِد بعد `Retry-After`). |

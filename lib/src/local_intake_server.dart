@@ -532,6 +532,20 @@ class LocalIntakeServer {
   /// gate makes any CORS decision and before anything else reads it.
   static const _maxOriginChars = 1024;
 
+  /// The internal `X-Bridge-Pairing` length cap in UTF-8 bytes: a well
+  /// formed proof is `id.stamp.signature` - 16 hex, up to 16 digits, and a
+  /// 64-hex signature, plus the two separators - sitting far below this
+  /// ceiling; anything over it is a hostile value refused before any
+  /// parsing. Gated on the pairing layer being armed, like the header's
+  /// other gates.
+  static const _maxPairingHeaderBytes = 256;
+
+  /// The pairing route - the one path the intake answers specially while
+  /// the pairing layer is armed. Disarmed, it is no path at all: it rides
+  /// the ordinary non-root behavior (a warning and the handler), wire
+  /// letter identical to previous releases.
+  static const _pairingPath = '/pair';
+
   /// The internal `X-Bridge-Token` length cap in UTF-8 bytes (not
   /// characters): the constant-time comparison in the protection layer runs
   /// over the configured secret, so a bloated token is nothing but wasted
@@ -706,6 +720,28 @@ class LocalIntakeServer {
         );
         return;
       }
+      // سقف ترويسة توقيع الاقتران بنمط أخيه التوكن: القيمة المتضخمة لا
+      // تبلغ أي محلل أو مقارنة — والبوابة بشرط تفعيل الاقتران حصرا فالخامل
+      // سلكه حرفا كما هو (الترويسة مجهولة لا تقرأ في الإعداد الافتراضي)
+      final earlyPairing = _firstHeader(request, 'X-Bridge-Pairing');
+      if (protection.pairingEnabled &&
+          earlyPairing != null &&
+          utf8.encode(earlyPairing).length > _maxPairingHeaderBytes) {
+        response.headers.set(
+          'X-Correlation-Id',
+          _sanitizeCorrelationId(_firstHeader(request, 'X-Correlation-Id')),
+        );
+        await _replyRejection(
+          response,
+          code: 'pairing_too_long',
+          message:
+              'X-Bridge-Pairing header exceeds the allowed length '
+              '($_maxPairingHeaderBytes bytes)',
+          bodyFullyRead: false,
+          headOnly: headOnly,
+        );
+        return;
+      }
       // مدخل القبول الواحد: مرة واحدة لكل طلب، بعد بوابات الشكل وقبل أي
       // قراءة أخرى للحماية — الإسقاط خالص لا يخلف أثراً فالمهيّأ
       // (OPTIONS) والطريقة المخالفة والمنشغل والمرفوض بالمضيف يمرّون
@@ -721,12 +757,17 @@ class LocalIntakeServer {
       );
       // الترويسات أحادية الدلالة: تعدد قيمها طلب ملغوب صريح
       // 400 وقطع، بدل استثناء valueغير الملتقط الذي يعلق المقبس بلا
-      // رد أصلا. Host مستثنى: محلل dart يطويه.
-      for (final name in const [
-        'x-correlation-id',
-        'origin',
-        'x-bridge-token',
-      ]) {
+      // رد أصلا. Host مستثنى: محلل dart يطويه. وترويسة توقيع الاقتران
+      // تنضم للقائمة عند تسليح الطبقة حصرا — الخامل لا يقرأها أصلا
+      for (final name
+          in protection.pairingEnabled
+              ? const [
+                  'x-correlation-id',
+                  'origin',
+                  'x-bridge-token',
+                  'x-bridge-pairing',
+                ]
+              : const ['x-correlation-id', 'origin', 'x-bridge-token']) {
         if ((request.headers[name] ?? const <String>[]).length > 1) {
           // كل رفض يحمل معرف ارتباط — هنا توليد دائم لأن القيمة
           // الواردة نفسها هي الملغوبة
@@ -916,6 +957,15 @@ class LocalIntakeServer {
             return;
           }
 
+          // بوابة الاقتران: POST على /pair والطبقة مسلحة حصرا — بلا
+          // تسوية لسجل قبول عادي (الطلب لا ينفذ أمرا) ولا تحذير مسار
+          // غير جذري (مسار مسجل). الخامل يمر من تحت الفرع لسلوك اليوم
+          // حرفا: تحذير المسار ثم المعالج.
+          if (request.uri.path == _pairingPath && protection.pairingEnabled) {
+            await _handlePairing(request, response);
+            return;
+          }
+
           // تحذير المسار غير الجذري: كل POST على مسار آخر يُقال
           // للمضيف مرة في الثانية على الأكثر بالساعة المحقونة، والسطر
           // التالي بعد النافذة يحمل عدد المكتوم كي يبقى حجم الاستعمال
@@ -1038,56 +1088,7 @@ class LocalIntakeServer {
           // toString) فيتضاعف استهلاك الذاكرة بلا حارس تطبيقي
           final outcome = await _readBody(request);
           if (outcome.error != null) {
-            if (outcome.error is _BodyTooLargeException) {
-              // الرفض سُلّم لحظة تجاوز السقف، والرد الآن على مسار «الرد
-              // أولاً» نفسه الذي تسلكه بوابات ما قبل الجسم: يُكتب على
-              // المقبس المنتزع ويُغسل ويُغلق جهة الكتابة، والبقية تُفرَّغ
-              // بالحدود القائمة في خلفية بلا مقعد ثم يُقطع. الاستثناء
-              // الموثق في README يبقى لمن لا يتوقف ولا يقرأ — لكن لا
-              // مسار يقطع قبل كتابة الرد.
-              await _replyRejection(
-                response,
-                code: 'payload_too_large',
-                message: 'Request body exceeds the allowed limit ($_mbLabel)',
-                bodyFullyRead: false,
-              );
-            } else if (outcome.error is TimeoutException) {
-              // المهلة توقف الاشتراك (لا تلغيه) — الرد المُدار يمر فوق
-              // الجسم الموقوف ثم يغلق تحت الحارس
-              await _replyRejection(
-                response,
-                code: 'request_timeout',
-                message: 'Timed out waiting for the complete request body',
-                bodyFullyRead: true,
-              );
-            } else if (outcome.error is FormatException) {
-              await _replyRejection(
-                response,
-                code: 'invalid_utf8',
-                message: 'The request body is not valid UTF-8',
-                bodyFullyRead: true,
-              );
-            } else if (outcome.error is HttpException) {
-              // خطأ المحلل على الحافة: HttpException الذي يبلغ هذه النقطة
-              // هو من طبقة محلل dart:io حول شكل الرسالة الواردة حصراً —
-              // المحلل يسلّم أخطاء تأطير الجسم (مثل Content-Length مع
-              // Transfer-Encoding فيقرأ الجسم تأطير chunked فيرمي على سطر
-              // حجم معتل) وانقطاع الوسط إلى تيار الجسم عبر مسار أخطاء
-              // الجسم في مصدر المحلل، ولا يرمي منطقنا HttpException هنا
-              // (رموزنا الثلاثة أعلاه). رفض شكل سلكي يُرد 400 ويُقطع على
-              // المقبس الخام بنمط الرفض المبكر: لا شبكة أمان فيصير 500
-              // وسجل انهيار على خطأ شكل من العميل، ولا اتصال باقٍ بعد الرد.
-              await _replyRejection(
-                response,
-                code: 'bad_request',
-                message: 'The HTTP parser rejected this request',
-                bodyFullyRead: false,
-              );
-            } else {
-              // خطأ مقبس أثناء الجسم ليس علة صيغة عند العميل: يُطلق
-              // ليصله مسار الشبكة الأماني (500 ثابت وسجل انهيار).
-              throw outcome.error!;
-            }
+            await _replyBodyError(response, outcome.error!);
             return;
           }
           final body = outcome.body!;
@@ -1307,6 +1308,135 @@ class LocalIntakeServer {
         // بيدها، وهي ليست رداً (لا تكتب شيئاً) فليست من مخرج الرد
         await _cutResponseSocket(response);
       },
+    );
+  }
+
+  /// The shared body-error mapping - one home for the four body rejections
+  /// (the cap, the deadline, the broken UTF-8, the parser's framing), used
+  /// by the command path and the pairing route alike so neither drifts.
+  /// An unknown error is rethrown: a socket failure mid-body is not a wire
+  /// shape, and it belongs to the safety net.
+  Future<void> _replyBodyError(HttpResponse response, Object error) async {
+    if (error is _BodyTooLargeException) {
+      // الرفض سُلّم لحظة تجاوز السقف، والرد الآن على مسار «الرد
+      // أولاً» نفسه الذي تسلكه بوابات ما قبل الجسم: يُكتب على
+      // المقبس المنتزع ويُغسل ويُغلق جهة الكتابة، والبقية تُفرَّغ
+      // بالحدود القائمة في خلفية بلا مقعد. الاستثناء
+      // الموثق في README يبقى لمن لا يتوقف ولا يقرأ — لكن لا
+      // مسار يقطع قبل كتابة الرد.
+      await _replyRejection(
+        response,
+        code: 'payload_too_large',
+        message: 'Request body exceeds the allowed limit ($_mbLabel)',
+        bodyFullyRead: false,
+      );
+    } else if (error is TimeoutException) {
+      // المهلة توقف الاشتراك (لا تلغيه) — الرد المُدار يمر فوق
+      // الجسم الموقوف ثم يغلق تحت الحارس
+      await _replyRejection(
+        response,
+        code: 'request_timeout',
+        message: 'Timed out waiting for the complete request body',
+        bodyFullyRead: true,
+      );
+    } else if (error is FormatException) {
+      await _replyRejection(
+        response,
+        code: 'invalid_utf8',
+        message: 'The request body is not valid UTF-8',
+        bodyFullyRead: true,
+      );
+    } else if (error is HttpException) {
+      // خطأ المحلل على الحافة: HttpException الذي يبلغ هذه النقطة
+      // هو من طبقة محلل dart:io حول شكل الرسالة الواردة حصراً —
+      // المحلل يسلّم أخطاء تأطير الجسم (مثل Content-Length مع
+      // Transfer-Encoding فيقرأ الجسم تأطير chunked فيرمي على سطر
+      // حجم معتل) وانقطاع الوسط إلى تيار الجسم عبر مسار أخطاء
+      // الجسم في مصدر المحلل، ولا يرمي منطقنا HttpException هنا
+      // (رموزنا الثلاثة أعلاه). رفض شكل سلكي يُرد 400 ويُقطع على
+      // المقبس الخام بنمط الرفض المبكر: لا شبكة أمان فيصير 500
+      // وسجل انهيار على خطأ شكل من العميل، ولا اتصال باقٍ بعد الرد.
+      await _replyRejection(
+        response,
+        code: 'bad_request',
+        message: 'The HTTP parser rejected this request',
+        bodyFullyRead: false,
+      );
+    } else {
+      // خطأ مقبس أثناء الجسم ليس علة صيغة عند العميل: يُطلق
+      // ليصله مسار الشبكة الأماني (500 ثابت وسجل انهيار).
+      throw error;
+    }
+  }
+
+  /// The pairing route handler: reads the bounded body, hands the code to
+  /// the protection's gate, and answers with the bound token - or with the
+  /// gate's rejection. The reply always echoes CORS: this is the bootstrap
+  /// door - the code is the gate, not the origin, and the page cannot pair
+  /// (or learn a failure) unless the answer is readable. It never settles
+  /// a command admission (the request runs no command) and never fires the
+  /// non-root path warning (a registered route, not a stray path).
+  Future<void> _handlePairing(
+    HttpRequest request,
+    HttpResponse response,
+  ) async {
+    response.headers.set(
+      'X-Correlation-Id',
+      _sanitizeCorrelationId(_firstHeader(request, 'X-Correlation-Id')),
+    );
+    _echoCors(response, _firstHeader(request, 'Origin'), admitted: true);
+    final outcome = await _readBody(request);
+    if (outcome.error != null) {
+      await _replyBodyError(response, outcome.error!);
+      return;
+    }
+    String? code;
+    try {
+      final decoded = jsonDecode(outcome.body!);
+      if (decoded is Map) {
+        final value = decoded['pairingCode'];
+        if (value is String) code = value;
+      }
+    } on FormatException {
+      // جسم ليس JSON: رمز مجهول شكلا — رفض الشكل العام لا حكم رمز
+    }
+    if (code == null) {
+      await _replyRejection(
+        response,
+        code: 'bad_request',
+        message: 'Send {"pairingCode": "<the code the host displays>"} as JSON',
+        bodyFullyRead: true,
+      );
+      return;
+    }
+    final result = protection.pair(
+      origin: _firstHeader(request, 'Origin'),
+      code: code,
+    );
+    final rejection = result.rejection;
+    if (rejection != null) {
+      final waitMs = rejection.retryAfterMs;
+      if (waitMs != null) {
+        response.headers.set('Retry-After', '${(waitMs / 1000).ceil()}');
+      }
+      await _replyRejection(
+        response,
+        code: rejection.code,
+        message: rejection.message,
+        bodyFullyRead: true,
+      );
+      return;
+    }
+    await _reply(
+      response,
+      status: HttpStatus.ok,
+      json: {
+        'ok': true,
+        'token': result.token!,
+        'pairingId': result.pairingId!,
+        'expiresInSeconds': result.expiresInSeconds!,
+      },
+      bodyFullyRead: true,
     );
   }
 
@@ -1872,6 +2002,9 @@ class LocalIntakeServer {
   /// CORS headers for the allowed only: echo of the requester's origin with
   /// Vary - the disallowed get no ACAO at all, so the browser blocks reading
   /// (echoing to everyone equaled '*'); Max-Age trims https-portal preflights.
+  /// The allowed-header list extends with the pairing proof header only
+  /// while the pairing layer is armed - the disarmed wire is letter
+  /// identical to previous releases.
   void _corsHeaders(HttpResponse response) {
     // البوابات صفحات https تتصل بـ http محلي — CORS صريح إلزامي.
     // الصدى (ACAO) يقرر لاحقا بعد حسم القبول أو عند الpreflight — لا
@@ -1879,7 +2012,10 @@ class LocalIntakeServer {
     response.headers.set('Access-Control-Allow-Methods', 'POST, OPTIONS');
     response.headers.set(
       'Access-Control-Allow-Headers',
-      'Content-Type, X-Bridge-Token, X-Correlation-Id',
+      protection.pairingEnabled
+          ? 'Content-Type, X-Bridge-Token, X-Correlation-Id, '
+                'X-Bridge-Pairing'
+          : 'Content-Type, X-Bridge-Token, X-Correlation-Id',
     );
     response.headers.contentType = ContentType.json;
   }

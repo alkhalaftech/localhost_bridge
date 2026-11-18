@@ -36,6 +36,14 @@
   `TrustedCommand.admission` delivers that record to the host, and
   `intakeRejectionRegistry` is the single table behind every rejection
   code on the wire.
+- Added: the pairing route - `POST /pair` (only while pairing is armed)
+  exchanges the displayed one-time code for the origin-bound token; its
+  replies always echo CORS (the code is the gate, not the origin), and
+  disarmed the path rides the ordinary non-root behavior, wire letter
+  unchanged. The allowed CORS header list extends with
+  `X-Bridge-Pairing` only while pairing is armed, and the single-value
+  gate and the 256-byte length gate guard it there (`400
+  duplicate_header`, `400 pairing_too_long`).
 - Deprecated: the per-question protection probes (`check`,
   `echoesCorsFor`, `verboseErrorsFor`, `noteRejection`, `logRejection`,
   and `normalize`) in favor of the admission record; removal is planned
