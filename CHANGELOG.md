@@ -36,41 +36,10 @@
   `TrustedCommand.admission` delivers that record to the host, and
   `intakeRejectionRegistry` is the single table behind every rejection
   code on the wire.
-- Added: the pairing route - `POST /pair` (only while pairing is armed)
-  exchanges the displayed one-time code for the origin-bound token; its
-  replies always echo CORS (the code is the gate, not the origin), and
-  disarmed the path rides the ordinary non-root behavior, wire letter
-  unchanged. The allowed CORS header list extends with
-  `X-Bridge-Pairing` only while pairing is armed, and the single-value
-  gate and the 256-byte length gate guard it there (`400
-  duplicate_header`, `400 pairing_too_long`).
-- Added: the real-browser lab pairs a page end to end - a desktop
-  Chrome/Chromium headlessly pairs with the displayed code, signs its
-  command with WebCrypto (the same HMAC construction the server
-  verifies), reads the reply, and sees the replay and the proofless
-  page refused; `dart run tool/emulator_pairing_lab.dart` runs the same
-  story against an emulator's browser over adb reverse, reading the
-  verdicts from the page's report collector.
-- Added: proof-of-possession for paired pages - under
-  `requireOriginWithToken`, a page signs every request with HMAC-SHA-256
-  (the package's internal digest primitives) over the pairing id, a
-  millisecond wall-clock stamp, the method, the path, and the
-  correlation id, and presents the proof in `X-Bridge-Pairing`: the raw
-  paired token never travels after pairing day. The stamp accepts one
-  minute of clock skew; a reused or stale stamp answers `403
-  pair_signature_replay`; verification compares constant-time, the
-  origin binding is checked before any token verdict, and an unqualified
-  origin never learns whether its proof was valid.
 - Deprecated: the per-question protection probes (`check`,
   `echoesCorsFor`, `verboseErrorsFor`, `noteRejection`, `logRejection`,
   and `normalize`) in favor of the admission record; removal is planned
   for 0.3.0.
-- Added: `OriginPolicy.requireOriginWithToken` (off by default - the
-  default wire is unchanged) requires an admitted origin AND a token
-  bound to it: a qualified origin without a valid token answers `403
-  token_required`, and the token alone never admits - from an
-  unqualified origin it is answered with the origin rejection alone, so
-  a wrong-origin sender learns nothing about its token.
 
 ## 0.1.3
 

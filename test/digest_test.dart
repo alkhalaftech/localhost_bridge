@@ -23,49 +23,6 @@ import 'package:test/test.dart';
 import 'package:localhost_bridge/src/digest.dart';
 
 void main() {
-  // الأنصبة الرسمية أدناه تثبت sha256 وhmacSha256 حرفا؛ وما يلي شاهود
-  // المقارنة الزمن-الثابتة التي يتحقق بها توقيع الاقتران (عقد ج3: تُضاف
-  // هنا باختبارها) — صواب المنطق في كل مواضع الاختلاف وأطوال الأطراف،
-  // وزمن التنفيذ ثابت بالبناء فلا يتسرب موضع أول اختلاف ولا طول أي طرف
-  group('fixedTimeEquals (the proof-verification comparison)', () {
-    test('equal byte lists match at every length the wire can carry', () {
-      expect(fixedTimeEquals(const <int>[], const <int>[]), isTrue);
-      expect(
-        fixedTimeEquals(const <int>[1, 2, 3], const <int>[1, 2, 3]),
-        isTrue,
-      );
-      expect(
-        fixedTimeEquals(List<int>.filled(32, 0xAB), List<int>.filled(32, 0xAB)),
-        isTrue,
-      );
-      expect(
-        fixedTimeEquals(List<int>.filled(64, 7), List<int>.filled(64, 7)),
-        isTrue,
-      );
-    });
-
-    test('a difference at any position fails - first, middle, and last', () {
-      for (final position in const [0, 15, 31]) {
-        final b = List<int>.filled(32, 0x11);
-        b[position] = 0x12;
-        expect(
-          fixedTimeEquals(List<int>.filled(32, 0x11), b),
-          isFalse,
-          reason: 'position $position must fail',
-        );
-      }
-    });
-
-    test('length differences fail in both directions', () {
-      final a = List<int>.filled(32, 5);
-      expect(fixedTimeEquals(a, List<int>.filled(31, 5)), isFalse);
-      expect(fixedTimeEquals(List<int>.filled(31, 5), a), isFalse);
-      expect(fixedTimeEquals(a, List<int>.filled(33, 5)), isFalse);
-      expect(fixedTimeEquals(List<int>.filled(33, 5), a), isFalse);
-      expect(fixedTimeEquals(const <int>[], const <int>[1]), isFalse);
-    });
-  });
-
   group('SHA-256 official vectors (FIPS 180-2 Appendix B)', () {
     test('empty message digest matches the reference digest', () {
       final digest = sha256(const <int>[]);

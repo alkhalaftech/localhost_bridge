@@ -60,7 +60,6 @@ const Map<String, IntakeRejectSpec> intakeRejectionRegistry =
       'invalid_utf8': IntakeRejectSpec(400),
       'origin_malformed': IntakeRejectSpec(400),
       'origin_too_long': IntakeRejectSpec(400),
-      'pairing_too_long': IntakeRejectSpec(400),
       'token_too_long': IntakeRejectSpec(400),
       'unsupported_payload_shape': IntakeRejectSpec(400),
       // 403 - policy and authority denials
@@ -71,10 +70,6 @@ const Map<String, IntakeRejectSpec> intakeRejectionRegistry =
       'origin_not_listed': IntakeRejectSpec(403),
       'origin_pending': IntakeRejectSpec(403),
       'origin_unknown': IntakeRejectSpec(403),
-      'pair_code_expired': IntakeRejectSpec(403),
-      'pair_code_invalid': IntakeRejectSpec(403),
-      'pair_signature_replay': IntakeRejectSpec(403),
-      'token_required': IntakeRejectSpec(403),
       // 405 / 408
       'method_not_allowed': IntakeRejectSpec(405),
       'request_timeout': IntakeRejectSpec(408),
@@ -84,7 +79,6 @@ const Map<String, IntakeRejectSpec> intakeRejectionRegistry =
       'unsupported_media_type': IntakeRejectSpec(415),
       // 429
       'origin_rate_limited': IntakeRejectSpec(429),
-      'pair_budget_exceeded': IntakeRejectSpec(429),
       'token_locked': IntakeRejectSpec(429),
       // 503 / 504
       'handler_timeout': IntakeRejectSpec(504),
