@@ -754,6 +754,12 @@ class LocalIntakeServer {
         fetchMode: _firstHeader(request, 'Sec-Fetch-Mode'),
         fetchDest: _firstHeader(request, 'Sec-Fetch-Dest'),
         path: request.uri.path,
+        // إثبات الاقتران وحقائق توقيعه يمرران كما وردا — canonical
+        // التوقيع يربط الطريقة ومعرف الارتباط بالقيمة الواردة الخام لا
+        // المنظفة، فالصفحة توقع على ما أرسلت لا على ما أعاد الخادم
+        pairingProof: earlyPairing,
+        method: request.method,
+        correlationId: _firstHeader(request, 'X-Correlation-Id') ?? '',
       );
       // الترويسات أحادية الدلالة: تعدد قيمها طلب ملغوب صريح
       // 400 وقطع، بدل استثناء valueغير الملتقط الذي يعلق المقبس بلا

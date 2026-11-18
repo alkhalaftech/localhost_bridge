@@ -164,6 +164,12 @@ enum IntakeAdmissionPath {
 
   /// Both layers agreed: a correct token over a listed origin.
   originWithToken,
+
+  /// The pairing proof agreed: a valid origin-bound HMAC signature over a
+  /// qualified origin - the page proves possession of its paired token
+  /// without ever sending it. Added at the enum's end; a host switch that
+  /// must know every route reads this value explicitly.
+  originWithPairedToken,
 }
 
 /// The one admission record for one request - the single projection of the
@@ -264,11 +270,23 @@ class IntakeAdmission {
     }
     decision.settled = true;
     owner._applyDecision(decision, origin);
+    // طابع الإثبات الموثق يسجل هنا حصرا — الإسقاط الخالص قرأه لا كتبه
+    final replayKey = decision.pairReplayKey;
+    if (replayKey != null) {
+      owner._recordPairReplay(replayKey, decision.stampMs);
+    }
     final rejection = decision.rejection;
     if (rejection != null) {
       // العد والسطر الأمني هنا حصراً كما كانت noteRejection من الخادم في
-      // موضع بوابة القبول — check القديمة لا تعد أبداً
-      owner._noteAuthority('${rejection.code}: ${rejection.message}', origin);
+      // موضع بوابة القبول — check القديمة لا تعد أبداً. وسبب فشل الإثبات
+      // الداخلي يسمى في السطر المكبوح لا في الرد
+      final detail = decision.pairFailure == null
+          ? ''
+          : ' (pairing proof: ${decision.pairFailure})';
+      owner._noteAuthority(
+        '${rejection.code}: ${rejection.message}$detail',
+        origin,
+      );
     }
   }
 
@@ -311,6 +329,8 @@ class _AdmissionDecision {
     this.reachedAskTrim = false,
     this.fireAsk = false,
     this.reportOnlyLine,
+    this.pairReplayKey,
+    this.pairFailure,
   });
 
   final IntakeRejection? rejection;
@@ -366,6 +386,16 @@ class _AdmissionDecision {
 
   /// The full report-only would-reject line - settle warns it verbatim.
   final String? reportOnlyLine;
+
+  /// The replay-cache key a verified pairing proof records on settle -
+  /// `(pairingId, stamp)`; null when no verified proof rode the request.
+  final String? pairReplayKey;
+
+  /// The internal reason a pairing proof failed (malformed, unknown id,
+  /// expired, origin mismatch, signature) - it names the muted security
+  /// line on settle and never travels the wire: the wire sees
+  /// token_required alone for every invalid-proof shape.
+  final String? pairFailure;
 
   /// One-shot guard: a record settles once.
   bool settled = false;
@@ -1040,6 +1070,124 @@ class IntakeProtection {
     }
   }
 
+  // ══ إثبات الحيازة — التحقق من توقيع HMAC وباب الإعادة ══
+
+  /// The accepted stamp-skew window in milliseconds: the page stamps its
+  /// signature with its own wall clock, and the server accepts what stays
+  /// within one minute of its own. Both clocks read the same machine on
+  /// loopback, so honest skew is microseconds - the window exists for
+  /// embedded clocks, not for patience.
+  static const _pairStampSkewMs = 60_000;
+
+  /// The replay-cache window in milliseconds - double the skew window with
+  /// margin: a stamp either sits inside the skew (the cache is young
+  /// enough to remember it) or outside it (freshness refuses before the
+  /// cache matters). No third case.
+  static const _pairReplayWindowMs = 120_000;
+
+  /// Cap on replay-cache entries (pairingId + stamp keys): the oldest
+  /// inserted is evicted past it. The cache ceiling is the worst case for
+  /// memory, never an open replay door - a stamp outside the skew window
+  /// refuses whatever its cache fate was.
+  static const _maxPairReplayEntries = 4096;
+
+  /// The replay cache: `(pairingId.stamp)` -> first-seen reading. The
+  /// projection reads it (a pure read); settle records into it.
+  final Map<String, int> _pairReplay = <String, int>{};
+  int _nextPairReplaySweepMs = 0;
+
+  /// The proof's wire shape: `pairingId(16 hex).stamp(digits).signature
+  /// (64 hex)` - everything else is malformed before any lookup.
+  static final RegExp _pairProofShape = RegExp(
+    r'^([0-9a-f]{16})\.([0-9]{1,16})\.([0-9a-f]{64})$',
+  );
+
+  /// The outcome of one proof verification - pure, no state touched. The
+  /// internal failure name travels the muted security line only.
+  _PairCheck _verifyPairProof(
+    String? raw,
+    String? origin,
+    String key,
+    String method,
+    String path,
+    String correlationId,
+    int now,
+  ) {
+    if (raw == null || raw.isEmpty) {
+      return _PairCheck.bad('missing');
+    }
+    final match = _pairProofShape.firstMatch(raw);
+    if (match == null) {
+      return _PairCheck.bad('malformed');
+    }
+    final id = match.group(1)!;
+    final stampText = match.group(2)!;
+    final sigHex = match.group(3)!;
+    final record = _pairingIdIndex[id];
+    if (record == null) {
+      return _PairCheck.bad('unknown-id');
+    }
+    if (now > record.expiresAtMs) {
+      return _PairCheck.bad('token-expired');
+    }
+    if (key.isEmpty || record.origin != key) {
+      return _PairCheck.bad('origin-mismatch');
+    }
+    // نافذة الانحراف على ساعة الجدار: الطابع epoch من ساعة الصفحة
+    final stampMs = int.parse(stampText);
+    final serverEpoch = DateTime.now().millisecondsSinceEpoch;
+    if ((serverEpoch - stampMs).abs() > _pairStampSkewMs) {
+      return _PairCheck.bad('stale', replay: true);
+    }
+    final replayKey = '$id.$stampText';
+    if (_pairReplay.containsKey(replayKey)) {
+      return _PairCheck.bad('reused-stamp', replay: true);
+    }
+    // الرسالة الموقعة بنص التصميم الحرفي — الطريقة والمسار ومعرف
+    // الارتباط تربط التوقيع بطلبه فيلا نقل توقيع صالح إلى أمر آخر
+    final canonical =
+        'v1\n$id\n$stampText\n${method.toUpperCase()}\n$path\n'
+        '$correlationId';
+    final expected = hmacSha256(
+      utf8.encode(record.token),
+      utf8.encode(canonical),
+    );
+    final supplied = _hexToBytes(sigHex);
+    if (supplied == null || !fixedTimeEquals(expected, supplied)) {
+      return _PairCheck.bad('signature');
+    }
+    return _PairCheck.ok(record, replayKey);
+  }
+
+  /// Sixty-four hex characters to 32 bytes - null on anything else (the
+  /// proof's regex has already guaranteed hex, so this is belt and
+  /// suspenders).
+  static List<int>? _hexToBytes(String hex) {
+    if (hex.length != 64) return null;
+    final out = List<int>.filled(32, 0);
+    for (var i = 0; i < 32; i++) {
+      final high = int.tryParse(hex[i * 2], radix: 16);
+      final low = int.tryParse(hex[i * 2 + 1], radix: 16);
+      if (high == null || low == null) return null;
+      out[i] = high * 16 + low;
+    }
+    return out;
+  }
+
+  /// Records a verified proof's stamp on settle - the projection's pure
+  /// read never writes here. Expired entries sweep at most once a second,
+  /// and the cap evicts the oldest-inserted key.
+  void _recordPairReplay(String replayKey, int now) {
+    if (_pairReplay.isNotEmpty && now >= _nextPairReplaySweepMs) {
+      _nextPairReplaySweepMs = now + 1000;
+      _pairReplay.removeWhere((_, seen) => now - seen > _pairReplayWindowMs);
+    }
+    while (_pairReplay.length >= _maxPairReplayEntries) {
+      _pairReplay.remove(_pairReplay.keys.first);
+    }
+    _pairReplay[replayKey] = now;
+  }
+
   /// The policy currently in force - replaced live by [update] and
   /// [updateFromSaved]. Read it to mirror settings UI state; admission
   /// decisions keep reading this same live object per request.
@@ -1514,14 +1662,33 @@ class IntakeProtection {
   /// The token is compared at most once per request: the comparison happens
   /// here and its outcome is recorded, so the verbose-error decision reads
   /// the record instead of ever comparing again.
+  ///
+  /// [pairingProof] is the raw `X-Bridge-Pairing` value - verified here
+  /// under [OriginPolicy.requireOriginWithToken] against the armed pairing
+  /// records, its replay recorded on settle. [method] and [correlationId]
+  /// bind the proof to the request it signs (the canonical string carries
+  /// both), so a captured proof cannot be transplanted to another verb,
+  /// path, or story.
   Future<IntakeAdmission> admit({
     String? origin,
     String? bridgeToken,
     String? fetchMode,
     String? fetchDest,
     String path = '/',
+    String? pairingProof,
+    String method = 'POST',
+    String correlationId = '',
   }) async {
-    final decision = _project(origin, bridgeToken, fetchMode, fetchDest);
+    final decision = _project(
+      origin,
+      bridgeToken,
+      fetchMode,
+      fetchDest,
+      pairingProof: pairingProof,
+      method: method,
+      path: path,
+      correlationId: correlationId,
+    );
     return IntakeAdmission._(
       rejection: decision.rejection,
       acceptedPath: decision.acceptedPath,
@@ -1543,8 +1710,12 @@ class IntakeProtection {
     String? origin,
     String? bridgeToken,
     String? fetchMode,
-    String? fetchDest,
-  ) {
+    String? fetchDest, {
+    String? pairingProof,
+    String method = 'POST',
+    String path = '/',
+    String correlationId = '',
+  }) {
     final now = _now;
     final key = origin == null ? '' : normalize(origin);
 
@@ -1575,6 +1746,26 @@ class IntakeProtection {
     IntakeRejection? rejection;
     IntakeAdmissionPath? accepted;
     final beyond = _BeyondOutcome();
+    // إثبات الاقتران: يتحقق كسولا في موضع القرار حصرا (أصل مؤهل تحت
+    // الشرط) — بلا شرط ولا إثبات لا تحقق ولا أثر إطلاقا
+    _PairCheck? proofCheck;
+    var pairReplayKey = '';
+    var pairFailure = '';
+    _PairCheck resolveProof() {
+      final existing = proofCheck;
+      if (existing != null) return existing;
+      final checked = _verifyPairProof(
+        pairingProof,
+        origin,
+        key,
+        method,
+        path,
+        correlationId,
+        now,
+      );
+      proofCheck = checked;
+      return checked;
+    }
 
     // (0) طبقة التوكن المستقلة — قراءة خالصة. المقارنة تجري دائماً: لا
     // نافذة إخفاق تسقط المقارنة عن التوكن الصحيح فالصحيح يُقارن ويُقبل
@@ -1628,6 +1819,42 @@ class IntakeProtection {
           if (tokenMatched) {
             // المؤهل والإثبات المشترك معاً — مسار الطبقتين كما كان
             accepted = IntakeAdmissionPath.originWithToken;
+          } else if (_pairingArmed) {
+            // التوكن المشترك خاطئ لكن إثبات اقتران قد يكون حاضرا: يتحقق
+            // كسولا هنا — الصحيح يقبل بالمسار المقترن، والإعادة يعود
+            // برمزها الصادق، وسواهما token_required بلا تفصيل يوهم
+            final proof = resolveProof();
+            if (proof.ok) {
+              accepted = IntakeAdmissionPath.originWithPairedToken;
+              pairReplayKey = proof.replayKey!;
+            } else if (proof.replay) {
+              rejection = const IntakeRejection(
+                403,
+                'pair_signature_replay',
+                'This pairing signature was already used — sign a fresh '
+                    'request',
+              );
+              accepted = null;
+              pairFailure = proof.fail!;
+              beyond
+                ..grantExisted = false
+                ..quotaLimit = 0
+                ..fireAsk = false
+                ..reportOnlyLine = null;
+            } else {
+              rejection = const IntakeRejection(
+                403,
+                'token_required',
+                'A token is required for this origin',
+              );
+              accepted = null;
+              pairFailure = proof.fail!;
+              beyond
+                ..grantExisted = false
+                ..quotaLimit = 0
+                ..fireAsk = false
+                ..reportOnlyLine = null;
+            }
           } else {
             // المؤهل بلا إثبات صالح: token_required — والقراءة خالصة
             // تبقى خالصة: أثر الاستحقاق المسجل (المنحة وطابع الحصة
@@ -1660,9 +1887,43 @@ class IntakeProtection {
         mayAskConsent: true,
         out: beyond,
       );
-      if (requireBoth && beyond.accepted != null) {
-        // المؤهل بلا ترويسة توكن أصلاً تحت الشرط: نفس الرمز وبنفس صفاء
-        // القراءة — لا أثر استحقاق يسجل لطلب بلا إثبات
+      if (requireBoth && beyond.accepted != null && _pairingArmed) {
+        // المؤهل بلا ترويسة توكن مشترك: إثبات الاقتران هو الباب —
+        // بنفس الأحكام الثلاثة للفرع أعلاه حرفا
+        final proof = resolveProof();
+        if (proof.ok) {
+          accepted = IntakeAdmissionPath.originWithPairedToken;
+          pairReplayKey = proof.replayKey!;
+        } else if (proof.replay) {
+          rejection = const IntakeRejection(
+            403,
+            'pair_signature_replay',
+            'This pairing signature was already used — sign a fresh request',
+          );
+          accepted = null;
+          pairFailure = proof.fail!;
+          beyond
+            ..grantExisted = false
+            ..quotaLimit = 0
+            ..fireAsk = false
+            ..reportOnlyLine = null;
+        } else {
+          rejection = const IntakeRejection(
+            403,
+            'token_required',
+            'A token is required for this origin',
+          );
+          accepted = null;
+          pairFailure = proof.fail!;
+          beyond
+            ..grantExisted = false
+            ..quotaLimit = 0
+            ..fireAsk = false
+            ..reportOnlyLine = null;
+        }
+      } else if (requireBoth && beyond.accepted != null) {
+        // المؤهل بلا إثبات أصلاً والاقتران غير مسلح: نفس الرمز وبنفس
+        // صفاء القراءة — لا أثر استحقاق يسجل لطلب بلا إثبات
         rejection = const IntakeRejection(
           403,
           'token_required',
@@ -1708,6 +1969,8 @@ class IntakeProtection {
       reachedAskTrim: beyond.reachedAskTrim,
       fireAsk: beyond.fireAsk,
       reportOnlyLine: beyond.reportOnlyLine,
+      pairReplayKey: pairReplayKey.isEmpty ? null : pairReplayKey,
+      pairFailure: pairFailure.isEmpty ? null : pairFailure,
     );
   }
 
@@ -2485,10 +2748,11 @@ class IntakeProtection {
     _pendingAsks.clear();
     _askSequence.clear();
     // خرائط الاقتران الثلاث تخرج مع الكائن: جلسات وسجلات وفهرس — لا بقاء
-    // لحالة اقتران بعد الإغلاق
+    // لحالة اقتران بعد الإغلاق، وذاكرة الإعادة رابعتها
     _pairingSessions.clear();
     _pairedRecords.clear();
     _pairingIdIndex.clear();
+    _pairReplay.clear();
   }
 
   /// How many constant-time token comparisons this object has run since
@@ -2545,6 +2809,27 @@ String generateBridgeToken() {
     32,
     (_) => rnd.nextInt(256),
   ).map((b) => b.toRadixString(16).padLeft(2, '0')).join();
+}
+
+/// The verdict of one pairing-proof verification: either the verified
+/// record with its replay key, or a named internal failure (and whether
+/// that failure is the replay shape the wire answers
+/// `pair_signature_replay` to).
+class _PairCheck {
+  _PairCheck.ok(_PairedRecord this.record, String this.replayKey)
+    : fail = null,
+      replay = false;
+
+  _PairCheck.bad(String this.fail, {this.replay = false})
+    : record = null,
+      replayKey = null;
+
+  final _PairedRecord? record;
+  final String? replayKey;
+  final String? fail;
+  final bool replay;
+
+  bool get ok => record != null;
 }
 
 /// One live pairing session - a displayed code and its expiry, plus the

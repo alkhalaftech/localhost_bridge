@@ -16,6 +16,7 @@ import 'dart:typed_data' show BytesBuilder;
 
 import 'package:test/test.dart';
 import 'package:localhost_bridge/localhost_bridge.dart';
+import 'package:localhost_bridge/src/digest.dart' show hexEncode, hmacSha256;
 
 const _t64 = 'a3f1c52e94b7d068f5e2a9c4b1d7e8036f9a2c5e8b1d7f04a6c9e2d5f8b3a1c7';
 
@@ -592,6 +593,53 @@ List<_Scenario> _scenarios() {
           cl: 24,
         ),
         utf8.encode('{"pairingCode":"999999"}'),
+      );
+      return _Walk(srv, link, () async {}, preBody: false);
+    },
+  ));
+
+  // 403 - the replayed pairing signature over a fully read body
+  cases.add((
+    code: 'pair_signature_replay',
+    preBody: false,
+    run: () async {
+      final pr = _strictPairing();
+      final srv = await _listen(_server(pr: pr));
+      final offer = pr.startPairing();
+      final out = pr.pair(origin: 'https://portal.example', code: offer.code);
+      // الإثبات الصالح يبنى بدوال ج1 نفسها كما يبنيه كود الصفحة: الطابع
+      // من ساعة الجدار، والcanonical بنص التصميم
+      final stamp = DateTime.now().millisecondsSinceEpoch;
+      final canonical = 'v1\n${out.pairingId}\n$stamp\nPOST\n/\nwalk-sig';
+      final signature = hexEncode(
+        hmacSha256(utf8.encode(out.token!), utf8.encode(canonical)),
+      );
+      final proof = '${out.pairingId}.$stamp.$signature';
+      // الإرسال الأول يقبل ويسجل الطابع، والثاني (الرابط الخام) إعادة
+      final client = HttpClient();
+      try {
+        final req = await client.open('POST', '127.0.0.1', srv.port, '/');
+        req.headers.set('Origin', 'https://portal.example');
+        req.headers.set('X-Bridge-Pairing', proof);
+        req.headers.set('X-Correlation-Id', 'walk-sig');
+        req.headers.set(HttpHeaders.contentTypeHeader, 'application/json');
+        req.add(utf8.encode('["CMD"]'));
+        final res = await req.close();
+        assert(res.statusCode == 200);
+        await res.drain<void>();
+      } finally {
+        client.close(force: true);
+      }
+      final link = await _Link.openFull(
+        srv.port,
+        _head(
+          srv.port,
+          origin: 'https://portal.example',
+          cid: 'walk-sig',
+          extraHeaders: 'X-Bridge-Pairing: $proof\r\n',
+          cl: 9,
+        ),
+        utf8.encode('["CMD"]\r\n'),
       );
       return _Walk(srv, link, () async {}, preBody: false);
     },

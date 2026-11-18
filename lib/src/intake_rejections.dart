@@ -73,6 +73,7 @@ const Map<String, IntakeRejectSpec> intakeRejectionRegistry =
       'origin_unknown': IntakeRejectSpec(403),
       'pair_code_expired': IntakeRejectSpec(403),
       'pair_code_invalid': IntakeRejectSpec(403),
+      'pair_signature_replay': IntakeRejectSpec(403),
       'token_required': IntakeRejectSpec(403),
       // 405 / 408
       'method_not_allowed': IntakeRejectSpec(405),

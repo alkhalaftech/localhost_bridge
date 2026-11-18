@@ -318,6 +318,7 @@ Stable error codes:
 | 403 | `origin_not_listed` / `origin_declined` / `origin_unknown` / `origin_blocked` / `origin_pending` | Origin policy rejection (not listed / consent declined / not confirmable / allow-all hardening / consent window open — retry after `Retry-After`). |
 | 403 | `token_required` | The origin qualified, but `OriginPolicy.requireOriginWithToken` is on and the request carried no valid token (the shared token, or a paired origin-bound signature) — the readable refusal a paired page retries from. |
 | 403 | `pair_code_invalid` / `pair_code_expired` | On `POST /pair` (pairing armed): an unknown or already-used one-time code / a code past its 120-second life. The reply always echoes CORS — the pairing door is readable by design (the code is the gate, not the origin). |
+| 403 | `pair_signature_replay` | A pairing signature whose stamp was already used, or lies outside the accepted one-minute clock-skew window — the same stamp never proves twice. Sign a fresh request. |
 | 403 | `cross_site_blocked` | Fetch-mode hardening: `Sec-Fetch-Mode` not `cors`. |
 | 403 | `blocked_by_protection` | Host-authority rejection (DNS-rebinding defense). |
 | 408 | `request_timeout` | Body did not arrive in time. |

@@ -44,6 +44,16 @@
   `X-Bridge-Pairing` only while pairing is armed, and the single-value
   gate and the 256-byte length gate guard it there (`400
   duplicate_header`, `400 pairing_too_long`).
+- Added: proof-of-possession for paired pages - under
+  `requireOriginWithToken`, a page signs every request with HMAC-SHA-256
+  (the package's internal digest primitives) over the pairing id, a
+  millisecond wall-clock stamp, the method, the path, and the
+  correlation id, and presents the proof in `X-Bridge-Pairing`: the raw
+  paired token never travels after pairing day. The stamp accepts one
+  minute of clock skew; a reused or stale stamp answers `403
+  pair_signature_replay`; verification compares constant-time, the
+  origin binding is checked before any token verdict, and an unqualified
+  origin never learns whether its proof was valid.
 - Deprecated: the per-question protection probes (`check`,
   `echoesCorsFor`, `verboseErrorsFor`, `noteRejection`, `logRejection`,
   and `normalize`) in favor of the admission record; removal is planned
