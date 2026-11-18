@@ -263,6 +263,7 @@ JSON في كل مكان: `POST` مع `Origin`، والردود تحمل `X-Corre
 | 400 | `invalid_utf8` / `empty_payload` / `unsupported_payload_shape` | الجسم ليس UTF-8 / لا حمولة صالحة / كائن JSON بلا مفاتيح أوامر معروفة. الجسم الذي يفشل فك JSON كلياً **ليس** 400 — يسقط نصاً خاماً كأمر (عقد «غير JSON يبقى خاماً» المختبَر)؛ والرقم والمنطقي و`null` يسلكون المسار الخام نفسه؛ وداخل مصفوفة JSON تسقط العناصر غير النصية والفارغة بلا إشعار. |
 | 405 | `method_not_allowed` | المقبول `POST` (و`OPTIONS` للفحص المسبق) حصراً. |
 | 403 | `origin_not_listed` / `origin_declined` / `origin_unknown` / `origin_blocked` / `origin_pending` | رفض سياسة الأصول (غير مدرج / موافقة مرفوضة / غير قابل للتأكيد / تحصين الكل / نافذة موافقة مفتوحة — أعِد بعد `Retry-After`). |
+| 403 | `token_required` | الأصل تأهل لكن `OriginPolicy.requireOriginWithToken` مفعّل والطلب بلا توكن صالح (التوكن المشترك أو توقيع اقتران مربوط بالأصل) — الرفض المقروء الذي تعيد الصفحة المقترنة من بعده. |
 | 403 | `cross_site_blocked` | تحصين طريقة الإرسال: `Sec-Fetch-Mode` ليس `cors`. |
 | 403 | `blocked_by_protection` | رفض سلطات المضيف (دفاع إعادة ربط DNS). |
 | 408 | `request_timeout` | الجسم لم يصل في وقته. |

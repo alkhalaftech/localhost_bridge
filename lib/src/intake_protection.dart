@@ -30,6 +30,7 @@ class OriginPolicy {
     this.perOriginPerMinute = 30,
     this.listedPerOriginPerMinute = 0,
     this.requireFetchMetadata = true,
+    this.requireOriginWithToken = false,
     this.askTimeout = const Duration(seconds: 60),
   });
 
@@ -75,6 +76,24 @@ class OriginPolicy {
   /// the token layer returns before the shape checks, so token integrations
   /// are never affected either way.
   final bool requireFetchMetadata;
+
+  /// Require BOTH facts together on every qualified origin: an admitted
+  /// origin AND a token bound to it. Off by default - the default keeps the
+  /// token as an independent path and the origin paths open, wire-identical
+  /// to previous releases. On, the mode closes the two one-legged doors:
+  /// a qualified origin without a valid token answers `403 token_required`,
+  /// and the token alone - correct or not, from an unqualified origin or
+  /// with no Origin at all - never admits (the origin rejection answers it,
+  /// never a token verdict, so a wrong-origin sender learns nothing about
+  /// its token). The proof that satisfies the mode is the shared token
+  /// (constant-time compared, as always) or a paired origin-bound token
+  /// presented as an HMAC signature (the pairing layer). The preflight for
+  /// the token header keeps its usual echo decision: a qualified origin's
+  /// preflight is answered, so its page can read `token_required` and
+  /// retry with the proof. With the mode on, headerless non-browser clients
+  /// have no door at all - run them on a separate listener (or turn the
+  /// mode off there), and pair browser pages through the pairing layer.
+  final bool requireOriginWithToken;
 
   /// Timeout of a single discovery question - a window left unanswered is
   /// closed after this long, freeing its place among the 3 open-question
@@ -1088,13 +1107,17 @@ class IntakeProtection {
     // وفوق ميزانية التخمين الخاطئ لا يفتح الخاطئ سؤال موافقة ولا يُقبل
     // إلا بتأهل الأصل — وإلا فرفض الانتظار الصادق بلا طابع جديد فالنافذة
     // تنكسر بصدق. والمقارنة مرة واحدة على الأكثر لكل طلب هنا
+    // شرط الأصل والتوكن معاً: المطفأ سلكُ اليوم حرفاً؛ والمفعّل يقلب
+    // معنى الطبقتين على الأصل المؤهل — المؤهل يطلب إثباتاً، والتوكن
+    // وحده لا يفتح أصلاً غير مؤهل (رفض الأصل يجيب فلا يتكلم التوكن)
+    final requireBoth = _policy.requireOriginWithToken;
     if (_token.isNotEmpty && bridgeToken != null && bridgeToken.isNotEmpty) {
       tokenAttempt = true;
       tokenCompared = true;
       tokenMatched = _fixedTimeEquals(bridgeToken, _token);
       final liveMisses = _liveTokenMisses(origin, now);
       budgetSpent = liveMisses.length >= _tokenGuessBudget;
-      if (tokenMatched) {
+      if (tokenMatched && !requireBoth) {
         // الصحيح يعبر فورا على كل نافذة — مسار القبول: التوكن وحده على
         // أصل غير مؤهل، والطبقتان معاً على أصل مدرج
         accepted = _isListed(origin)
@@ -1110,9 +1133,13 @@ class IntakeProtection {
           mayAskConsent: !budgetSpent,
           out: beyond,
         );
-        if (budgetSpent && beyond.accepted == null) {
+        if (!tokenMatched &&
+            budgetSpent &&
+            (beyond.accepted == null || requireBoth)) {
           // الرأس الصادق: بقايا نافذة الميزانية نفسها — أقدم إخفاق يخرج
-          // منها فتنكسر، فانتظار الذكرى لا «ثانيتين» لكل الرفوض
+          // منها فتنكسر، فانتظار الذكرى لا «ثانيتين» لكل الرفوض. وتحت
+          // الشرط الجديد يبقى الخاطئ فوق الميزانية محروساً بالإشارة نفسها
+          // أياً كان حكم الأصل — نافذة الإخفاق إشارة عن التوكن المشترك
           final budgetWaitMs = liveMisses.isEmpty
               ? _tokenBudgetWindowMs
               : _tokenBudgetWindowMs - (now - liveMisses.first) + 500;
@@ -1122,6 +1149,27 @@ class IntakeProtection {
             'Too many failed token attempts — retry after a short wait',
             retryAfterMs: budgetWaitMs < 1000 ? 1000 : budgetWaitMs,
           );
+        } else if (requireBoth && beyond.accepted != null) {
+          if (tokenMatched) {
+            // المؤهل والإثبات المشترك معاً — مسار الطبقتين كما كان
+            accepted = IntakeAdmissionPath.originWithToken;
+          } else {
+            // المؤهل بلا إثبات صالح: token_required — والقراءة خالصة
+            // تبقى خالصة: أثر الاستحقاق المسجل (المنحة وطابع الحصة
+            // والسؤال وسطر المراقبة) يُصفَّر فلا تسوية تترك شيئاً لطلب
+            // لم يثبت نفسه
+            rejection = const IntakeRejection(
+              403,
+              'token_required',
+              'A token is required for this origin',
+            );
+            accepted = null;
+            beyond
+              ..grantExisted = false
+              ..quotaLimit = 0
+              ..fireAsk = false
+              ..reportOnlyLine = null;
+          }
         } else {
           rejection = beyond.rejection;
           accepted = beyond.accepted;
@@ -1137,8 +1185,24 @@ class IntakeProtection {
         mayAskConsent: true,
         out: beyond,
       );
-      rejection = beyond.rejection;
-      accepted = beyond.accepted;
+      if (requireBoth && beyond.accepted != null) {
+        // المؤهل بلا ترويسة توكن أصلاً تحت الشرط: نفس الرمز وبنفس صفاء
+        // القراءة — لا أثر استحقاق يسجل لطلب بلا إثبات
+        rejection = const IntakeRejection(
+          403,
+          'token_required',
+          'A token is required for this origin',
+        );
+        accepted = null;
+        beyond
+          ..grantExisted = false
+          ..quotaLimit = 0
+          ..fireAsk = false
+          ..reportOnlyLine = null;
+      } else {
+        rejection = beyond.rejection;
+        accepted = beyond.accepted;
+      }
     }
 
     // صدى CORS: قرار الأهلية الخام نفسه الذي كانت echoesCorsFor تجيبه —

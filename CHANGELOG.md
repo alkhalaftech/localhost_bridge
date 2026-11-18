@@ -40,6 +40,12 @@
   `echoesCorsFor`, `verboseErrorsFor`, `noteRejection`, `logRejection`,
   and `normalize`) in favor of the admission record; removal is planned
   for 0.3.0.
+- Added: `OriginPolicy.requireOriginWithToken` (off by default - the
+  default wire is unchanged) requires an admitted origin AND a token
+  bound to it: a qualified origin without a valid token answers `403
+  token_required`, and the token alone never admits - from an
+  unqualified origin it is answered with the origin rejection alone, so
+  a wrong-origin sender learns nothing about its token.
 
 ## 0.1.3
 

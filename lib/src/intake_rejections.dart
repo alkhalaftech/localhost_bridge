@@ -70,6 +70,7 @@ const Map<String, IntakeRejectSpec> intakeRejectionRegistry =
       'origin_not_listed': IntakeRejectSpec(403),
       'origin_pending': IntakeRejectSpec(403),
       'origin_unknown': IntakeRejectSpec(403),
+      'token_required': IntakeRejectSpec(403),
       // 405 / 408
       'method_not_allowed': IntakeRejectSpec(405),
       'request_timeout': IntakeRejectSpec(408),

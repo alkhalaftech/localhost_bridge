@@ -956,12 +956,14 @@ class LocalIntakeServer {
             // the request), and every rejection carrying a wait budget
             // (per-origin quota or token lockout) echoes when the origin
             // qualifies for one - without ACAO the browser hides both from
-            // the retrying page and Retry-After loses its meaning. قاعدة
-            // قراءة الرد تُطوى من حقول السجل نفسها: رمز الرفض وحصة
-            // انتظاره والصدى الخام المسجل — لا سؤال جديد للحماية هنا
+            // the retrying page and Retry-After loses its meaning.
+            // token_required ينضم لعموم القراءة: هو سؤال القبول نفسه
+            // الموجه لصفحة الأصل المؤهل (أعِد بالإثبات) — وبوابة التأهيل
+            // (الصدى الخام المسجل) تبقي الأجنبي أعمى عنه
             final echoesCors =
                 rejection.code == 'origin_pending' ||
-                (rejection.retryAfterMs != null && admission.echoesCors);
+                (rejection.retryAfterMs != null && admission.echoesCors) ||
+                (rejection.code == 'token_required' && admission.echoesCors);
             if (echoesCors) {
               _echoCors(response, origin, admitted: true);
             }

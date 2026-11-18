@@ -316,6 +316,7 @@ Stable error codes:
 | 400 | `invalid_utf8` / `empty_payload` / `unsupported_payload_shape` | Body not UTF-8 / no valid command payload / JSON object without any of the known command keys. A body that fails JSON decoding altogether is **not** a 400 — it falls through as a raw text command (the tested non-JSON contract); a JSON number, boolean, or `null` body takes the same raw path. Inside a JSON array, non-string and empty-string elements drop without notice. |
 | 405 | `method_not_allowed` | Only `POST` (and `OPTIONS` preflight) are accepted. |
 | 403 | `origin_not_listed` / `origin_declined` / `origin_unknown` / `origin_blocked` / `origin_pending` | Origin policy rejection (not listed / consent declined / not confirmable / allow-all hardening / consent window open — retry after `Retry-After`). |
+| 403 | `token_required` | The origin qualified, but `OriginPolicy.requireOriginWithToken` is on and the request carried no valid token (the shared token, or a paired origin-bound signature) — the readable refusal a paired page retries from. |
 | 403 | `cross_site_blocked` | Fetch-mode hardening: `Sec-Fetch-Mode` not `cors`. |
 | 403 | `blocked_by_protection` | Host-authority rejection (DNS-rebinding defense). |
 | 408 | `request_timeout` | Body did not arrive in time. |

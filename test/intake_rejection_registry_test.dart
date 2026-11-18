@@ -246,7 +246,7 @@ Future<LocalIntakeServer> _listen(LocalIntakeServer srv) async {
 IntakeProtection _allowlist({int listedQuota = 0}) =>
     IntakeProtection()..update(
       policy: OriginPolicy(
-        allowed: const ['https://portal.example'],
+        allowed: ['https://portal.example'],
         listedPerOriginPerMinute: listedQuota,
       ),
     );
@@ -459,6 +459,28 @@ List<_Scenario> _scenarios() {
           host: 'evil.example:${srv.port}',
           origin: 'https://portal.example',
         ),
+      );
+      return _Walk(srv, link, () async {}, preBody: true);
+    },
+  ));
+  cases.add((
+    code: 'token_required',
+    preBody: true,
+    run: () async {
+      // الشرط المشترك: الأصل المؤهل بلا توكن يُرد بالرمز الجديد فوق
+      // جسم غير مقروء، والقائمة مفعلة بخيار ج3
+      final pr = IntakeProtection()
+        ..update(
+          policy: const OriginPolicy(
+            allowed: ['https://portal.example'],
+            requireOriginWithToken: true,
+          ),
+          token: _t64,
+        );
+      final srv = await _listen(_server(pr: pr));
+      final link = await _Link.open(
+        srv.port,
+        _head(srv.port, origin: 'https://portal.example'),
       );
       return _Walk(srv, link, () async {}, preBody: true);
     },
