@@ -1024,6 +1024,41 @@ class IntakeProtection {
     _pairingSessions.removeWhere((_, session) => now > session.expiresAtMs);
   }
 
+  /// The pairing idle-sweep gate - at most once a second, driven by the
+  /// same window passes that sweep the quota and token-miss maps below:
+  /// dead pairing state must not wait for the next pairing insert to die.
+  int _nextPairingSweepMs = 0;
+
+  /// Sweeps the expired pairing state - the live sessions, the paired
+  /// records (their id-index mirror leaves with them), and the replay
+  /// cache - at most once a second, called from the periodic window
+  /// sweeps. Wire-invisible for records and replay (the expiry and
+  /// freshness checks precede any effect their presence could have); the
+  /// one documented wire difference is a session swept by idleness: its
+  /// code answers `pair_code_invalid` instead of `pair_code_expired`
+  /// (both 403, both telling the page to pair again). A live record is
+  /// never a candidate - only `now > expiresAtMs` leaves.
+  void _sweepPairingIdle(int now) {
+    if (_pairingSessions.isEmpty &&
+        _pairedRecords.isEmpty &&
+        _pairReplay.isEmpty) {
+      return;
+    }
+    if (now < _nextPairingSweepMs) return;
+    _nextPairingSweepMs = now + 1000;
+    _sweepPairingSessions();
+    _pairedRecords.removeWhere((_, record) {
+      if (now > record.expiresAtMs) {
+        if (_pairingIdIndex[record.pairingId] == record) {
+          _pairingIdIndex.remove(record.pairingId);
+        }
+        return true;
+      }
+      return false;
+    });
+    _pairReplay.removeWhere((_, seen) => now - seen > _pairReplayWindowMs);
+  }
+
   /// Inserts a paired record under the cap: expired records swept first,
   /// then the oldest-inserted live record is evicted fail-closed.
   void _insertPairedRecord(_PairedRecord record) {
@@ -2375,6 +2410,9 @@ class IntakeProtection {
           _tokenMissOrder.addLast(oldest);
         }
       }
+      // والكنس نفسه يخرج حالة الاقتران الميتة: جلسات وسجلات وذاكرة
+      // إعادة — لا ينتظر الموتى إدراج اقتران تالياً ليموتوا
+      _sweepPairingIdle(now);
     }
     return window;
   }
@@ -2620,6 +2658,9 @@ class IntakeProtection {
           _windowOrder.addLast(oldest);
         }
       }
+      // والكنس نفسه يخرج حالة الاقتران الميتة: جلسات وسجلات وذاكرة
+      // إعادة — لا ينتظر الموتى إدراج اقتران تالياً ليموتوا
+      _sweepPairingIdle(now);
     }
     if (window.length > (limitOverride ?? _policy.perOriginPerMinute)) {
       // الرفض لا يشغل الحصة: طابعه يُسحب فور الرفض فتبقى النافذة بطول
