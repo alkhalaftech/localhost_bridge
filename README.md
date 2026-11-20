@@ -351,7 +351,7 @@ Stable error codes:
 
 | HTTP | `error` code | Meaning |
 |---|---|---|
-| 200 | — | Handler succeeded (`{"ok":true}`). |
+| 200 | — | Handler succeeded (`{"ok":true}` - plus the handler's data field when `CommandOutcome.data` was returned and it sat under the internal 64 KiB page cap; over the cap the whole result is refused as `reply_data_too_large`). |
 | 400 | `duplicate_header` / `origin_too_long` | A single-valued header was sent twice / an `Origin` header over the package's internal length cap (1,024 characters), refused before any processing. |
 | 400 | `origin_malformed` / `token_too_long` / `pairing_too_long` / `bad_request` | An `Origin` header that is not `scheme://host[:port]` / an `X-Bridge-Token` header over the internal byte cap (1,024 bytes) / an `X-Bridge-Pairing` header over the internal byte cap (256 bytes, pairing armed only) / the HTTP parser rejected the request framing — all refused before your handler runs. |
 | 400 | `invalid_utf8` / `empty_payload` / `unsupported_payload_shape` | Body not UTF-8 / no valid command payload / JSON object without any of the known command keys. A body that fails JSON decoding altogether is **not** a 400 — it falls through as a raw text command (the tested non-JSON contract); a JSON number, boolean, or `null` body takes the same raw path. Inside a JSON array, non-string and empty-string elements drop without notice. |
@@ -562,8 +562,9 @@ The bridge is built for pages driving local commands where a silent or
 replayed send must be stopped by barriers, not by luck: irreversible
 commands (print, pay, unlock, open a file, change device state) where
 you want origin admission, consent questions, quotas, and
-a deduplication ledger your host keeps around every send
-(`example/idempotent_handler.dart` is that ledger, ready to adapt). The
+a deduplication ledger around every send - `DedupLedger` with
+`idempotentCommand` ships in the package
+(`example/idempotent_handler.dart` is the wiring demo). The
 ledger never drops a live entry to make room: a full ledger refuses new
 commands with a `ledger_full` outcome until entries settle or expire.
 For that case, SECURITY.md collects the host-side disciplines in one

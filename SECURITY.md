@@ -279,8 +279,9 @@ its own side:
 5. **Keep a deduplication ledger keyed by the correlation id.** A 504
    frees the seat while the handler may still finish, so a blind retry
    can run the command twice; a ledger that registers before the work
-   and replays the stored reply makes the repeat harmless.
-   `example/idempotent_handler.dart` is that ledger, ready to adapt.
+   and replays the stored reply makes the repeat harmless. The package
+   ships that ledger as surface - `DedupLedger` with `idempotentCommand`;
+   `example/idempotent_handler.dart` is the wiring demo.
    A full ledger refuses new commands with `ledger_full` instead of
    evicting a live entry - size its cap above your realistic command
    rate.

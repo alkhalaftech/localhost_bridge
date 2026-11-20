@@ -25,6 +25,22 @@
   while more sockets than the cap are open answers `503`, and once the
   count drops the next request is served. `0` - the default - keeps it
   off, and the wire never refuses for open sockets alone.
+- Added: `CommandOutcome.data` - optional JSON-encodable data the page
+  reads back on success, sent as the `data` field of the success reply.
+  Data over the internal page cap (64 KiB after JSON encoding) refuses
+  the whole result with `413 reply_data_too_large` - never truncated,
+  and the command stays executed; a failed reply carries the error
+  contract and never data. Without `data` the success reply is
+  byte-identical to previous releases.
+- Added: the correlation-id dedup helper as package surface -
+  `DedupLedger` and `idempotentCommand` (moved out of
+  `example/idempotent_handler.dart`, which is now a wiring demo on top
+  of them). The ledger registers a command under its correlation id
+  before the work runs, stores the settled reply, and replays it for
+  every repeat - a retry after `504 handler_timeout` returns the first
+  result and never executes the command twice. The memory is bounded by
+  size (`maxEntries` - a full ledger answers `ledger_full` and never
+  evicts a live entry) and by time (`ttl`, swept on the next look).
 - **Breaking: the handler budget is on by default** - `handlerTimeout`
   left at null no longer means "no deadline"; it selects the configured
   default budget (`BridgeConfig.handlerTimeout`, 30 seconds shipped). A
