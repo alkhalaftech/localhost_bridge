@@ -19,11 +19,11 @@ commands *mean* stays entirely in your handler.
   code. (The SDK constraint pub.dev displays is a compatibility range,
   not a dependency.)
 - Rejections carry a stable error `code` — the developer contract. The
-  honest exceptions cut the connection immediately: the busy 503, the
-  per-origin seat 503, the 403 Host reject (a request whose Host is not
-  this bridge's local address), and a 413 whose body cannot be drained
-  within the discard limits — on those paths the code may never reach
-  the caller.
+  honest exceptions cut the connection immediately: the busy 503 (the
+  global seat cap and the open-connection cap), the per-origin seat
+  503, the 403 Host reject (a request whose Host is not this bridge's
+  local address), and a 413 whose body cannot be drained within the
+  discard limits — on those paths the code may never reach the caller.
 
 ## Quick start
 
@@ -623,6 +623,13 @@ nothing listens in this release, and another local program can listen on
   protection-state limits, not seats: a paired page's signed requests
   count into its origin's seat share like any other request. Past the
   share the sender reads `503 origin_seat_limit`.
+- `dart:io` never bounds the sockets a listening server has accepted,
+  so a host that wants a hard ceiling on open connections sets
+  `BridgeConfig.maxOpenConnections` above zero: a request arriving while
+  more sockets than the cap are open answers `503 server_busy`, and
+  once the count drops (senders finish, idle sockets close after
+  `idleTimeout`) the next request is served. `0` — the default — keeps
+  the option off, and the wire never refuses for open sockets alone.
 - `BridgeConfig.extraHosts` adds host authorities the server answers for
   (a bare name matches `name:boundPort` too, like the built-ins). Every
   entry must be a name you control that resolves to this machine — a

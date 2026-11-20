@@ -252,6 +252,13 @@ class LocalIntakeServer {
       'config.maxConcurrentRequests',
       config.maxConcurrentRequests,
     );
+    if (config.maxOpenConnections < 0) {
+      throw ArgumentError.value(
+        config.maxOpenConnections,
+        'config.maxOpenConnections',
+        'must not be negative - 0 is the named off value',
+      );
+    }
     if (config.maxSeatsPerOrigin < 1) {
       throw ArgumentError.value(
         config.maxSeatsPerOrigin,
@@ -933,6 +940,10 @@ class LocalIntakeServer {
     nowMs: () => _now,
     windowMs: _warnThrottleWindowMs,
   );
+  late final _WarnThrottle _connCapWarnThrottle = _WarnThrottle(
+    nowMs: () => _now,
+    windowMs: _warnThrottleWindowMs,
+  );
   late final _WarnThrottle _originBusyWarnThrottle = _WarnThrottle(
     nowMs: () => _now,
     windowMs: _warnThrottleWindowMs,
@@ -1179,6 +1190,43 @@ class LocalIntakeServer {
         return;
       }
 
+      // (سقف الاتصالات المفتوحة — خياري) dart:io لا يحدّ المقابس
+      // المقبولة (الخاملة منها أيضا)، وفوق الخيار يُرد الفائض فورا
+      // ويُخدم الطلب بعد هبوط العدد. الصفر مطفأ فالسلك بلا الخيار
+      // حرفا كما هو، والعد يشمل الاتصال الحامل للطلب نفسه
+      final openConnectionCap = config.maxOpenConnections;
+      if (openConnectionCap > 0) {
+        final openNow = _server?.connectionsInfo().total ?? 0;
+        if (openNow > openConnectionCap) {
+          // كبح السطر بنمط بقية أسطر السعة: سطر واحد في الثانية على
+          // الأكثر بالساعة المحقونة، والسطر التالي يحمل عدد المكتوم
+          final line = _connCapWarnThrottle.admit(
+            'intake connection limit: $openNow open connections over the '
+            'cap of $openConnectionCap — rejecting',
+          );
+          if (line != null) {
+            telemetry.warn(line, category: BridgeCategory.network);
+          }
+          response.headers.set(
+            'X-Correlation-Id',
+            _sanitizeCorrelationId(_firstHeader(request, 'X-Correlation-Id')),
+          );
+          _echoCors(
+            response,
+            _firstHeader(request, 'Origin'),
+            admitted: admission.echoesCors,
+          );
+          // القطع الفوري الموثق يقرأه من السجل لا من هذا الموضع
+          await _replyRejection(
+            response,
+            code: 'server_busy',
+            message: 'The server is busy right now — please retry shortly',
+            bodyFullyRead: false,
+            headOnly: headOnly,
+          );
+          return;
+        }
+      }
       // (سقف الاتصالات) فوق السقف نرد فورا — فيضان طلبات متزامنة
       // يضاعف ذروة الذاكرة (كل طلب جسم يقرأ حتى سقف الجسم) بلا حاجز
       if (_activeRequests >= config.maxConcurrentRequests) {

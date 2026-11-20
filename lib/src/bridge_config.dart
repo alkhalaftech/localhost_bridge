@@ -12,6 +12,7 @@ class BridgeConfig {
     this.maxBodyBytes = 1024 * 1024,
     this.maxConcurrentRequests = 16,
     this.maxSeatsPerOrigin = defaultMaxSeatsPerOrigin,
+    this.maxOpenConnections = 0,
     this.maxJsonElements = 10_000,
     this.maxJsonDepth = 32,
     this.requestTimeout = const Duration(seconds: 30),
@@ -64,6 +65,17 @@ class BridgeConfig {
   /// limits, not seats: a paired page's signed requests count into its
   /// origin's seat share like any other request.
   final int maxSeatsPerOrigin;
+
+  /// Open-connection cap - dart:io never bounds the sockets a listening
+  /// server has accepted (idle keep-alive sockets included), so a host
+  /// that wants a hard ceiling on open connections sets this above zero:
+  /// a request arriving while more sockets than the cap are open answers
+  /// `503 server_busy`, and once the count drops (senders finish, idle
+  /// sockets time out) the next request is served. `0` (the default)
+  /// keeps the option off - the wire never refuses for open sockets
+  /// alone. A negative value throws [ArgumentError] at server
+  /// construction.
+  final int maxOpenConnections;
 
 
   /// JSON structural element cap - `{`, `[`, and `,` outside strings, counted
