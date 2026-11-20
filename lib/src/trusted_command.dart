@@ -105,8 +105,14 @@ class TrustedCommand {
 class CommandOutcome {
   /// Builds the outcome: [ok] true with no error fields for an executed
   /// command, false with [errorCode] (and optionally [errorMessage]) for
-  /// a refusal or a failure.
-  const CommandOutcome({required this.ok, this.errorCode, this.errorMessage});
+  /// a refusal or a failure. [data] carries optional reply data for the
+  /// page and is read on success only.
+  const CommandOutcome({
+    required this.ok,
+    this.errorCode,
+    this.errorMessage,
+    this.data,
+  });
 
   /// Whether the host executed the command: true answers the sender with
   /// `200` and `{"ok": true}`; false answers `500` with the error fields.
@@ -121,6 +127,19 @@ class CommandOutcome {
   /// the protection marks verbose (a correct token or a listed origin);
   /// the allow-all path sees the code without this text.
   final String? errorMessage;
+
+  /// Optional JSON-encodable data the page reads back on success - sent
+  /// as the `data` field of the `{"ok": true}` reply. Read on success
+  /// only: a failed command's reply carries the error contract and never
+  /// data, whatever this field holds. The encoded size is bounded by the
+  /// package's internal reply-data cap (64 KiB of UTF-8 after
+  /// `jsonEncode`): data over the cap refuses the whole result with
+  /// `413 reply_data_too_large` - no truncation, and the command stays
+  /// executed (the refusal is about the reply, not the work). A value
+  /// `jsonEncode` cannot serialize fails the reply into the
+  /// internal-error path with the real cause on the host's telemetry -
+  /// keep [data] plain JSON types (null, bool, num, String, List, Map).
+  final Object? data;
 }
 
 /// The host's single registration point (it knows nothing of ports).

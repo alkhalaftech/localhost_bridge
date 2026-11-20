@@ -891,6 +891,14 @@ class LocalIntakeServer {
   /// other gates.
   static const _maxPairingHeaderBytes = 256;
 
+  /// سقف بيانات الرد المرتجعة للصفحة، بالبايتات الفعلية بعد ترميز JSON -
+  /// ثابت داخلي غير قابل للضبط بنمط سقفي الترويسات أعلاه، لا خيار جديد.
+  /// فوقه تُرد النتيجة كلها برمزها المسجل ولا قصّ صامت: القص يكذب على
+  /// الصفحة (إيصال مقطوع أسوأ من غيابه)، والرفض الصريح يُخبرها بالسبب.
+  /// 64KiB أوسع من أي إيصال أمر حقيقي (نصه ورقمه وحالته) وأضيق من أن
+  /// يهدم ردٌّ واحد صفحةَ المرسل أو ينفخ سطر الرد وحده.
+  static const int _maxReplyDataBytes = 64 * 1024;
+
   /// The pairing route - the one path the intake answers specially while
   /// the pairing layer is armed. Disarmed, it is no path at all: it rides
   /// the ordinary non-root behavior (a warning and the handler), wire
@@ -1692,6 +1700,27 @@ class LocalIntakeServer {
             return;
           }
 
+          // بيانات الرد المرتجعة: النجاح حصرا (فشل الأمر عقد الخطأ لا
+          // بيانات)، والقياس بالترميز الفعلي UTF-8 بعد jsonEncode، وفوق
+          // السقف الداخلي تُرد النتيجة كلها بالرمز المسجل من مخرج الرفض
+          // الواحد — عدّها في العدادات تلقائي، ولا قصّ صامت ولا بيانات
+          // مقطوعة تصل الصفحة. أي قيمة لا يرميها jsonEncode تهبط مسار
+          // internal العام (الcatch المرحلي نفسه) وسببها الحقيقي على
+          // telemetry المضيف.
+          final Object? pageData = result.ok ? result.data : null;
+          if (pageData != null &&
+              utf8.encode(jsonEncode(pageData)).length > _maxReplyDataBytes) {
+            await _replyRejection(
+              response,
+              code: 'reply_data_too_large',
+              message:
+                  'The command succeeded, but its reply data is over the '
+                  '$_maxReplyDataBytes-byte page cap - the result is '
+                  'refused whole, never truncated',
+              bodyFullyRead: true,
+            );
+            return;
+          }
           await _reply(
             response,
             status: result.ok ? HttpStatus.ok : HttpStatus.internalServerError,
@@ -1702,6 +1731,8 @@ class LocalIntakeServer {
               // نص المضيف للمعتمدين حصرا — الرمز عقد الجميع
               if (!result.ok && verboseErrors)
                 'message': result.errorMessage ?? 'Command execution failed',
+              // بيانات المضيف للصفحة: فوق السقف رُفض الرد كله أعلاه
+              if (pageData != null) 'data': pageData,
             },
             bodyFullyRead: true,
           );

@@ -5,10 +5,13 @@
 /// walk loudly; a new rejection is added here first, then to the README.
 ///
 /// The registry covers rejection codes only - the replies shaped
-/// `{"ok": false, "error": <code>, ...}` the server refuses a request
-/// with. Handler-outcome codes (`internal`, the handler's own codes, the
-/// `command_failed` fallback) are the handler contract, pinned by their
-/// own guards, and stay outside this table.
+/// `{"ok": false, "error": <code>, ...}` the server itself answers a
+/// request with. The server-generated handler-phase codes ride it too
+/// (`handler_timeout`, and `reply_data_too_large` for reply data over
+/// the internal page cap); the handler's own outcome codes (`internal`,
+/// the handler's chosen codes, the `command_failed` fallback) are the
+/// handler contract, pinned by their own guards, and stay outside this
+/// table.
 library;
 
 /// One registry row: the wire status of one rejection code and how the
@@ -82,6 +85,7 @@ const Map<String, IntakeRejectSpec> intakeRejectionRegistry =
       // 413 / 415
       'payload_too_complex': IntakeRejectSpec(413),
       'payload_too_large': IntakeRejectSpec(413),
+      'reply_data_too_large': IntakeRejectSpec(413),
       'unsupported_media_type': IntakeRejectSpec(415),
       // 429
       'origin_rate_limited': IntakeRejectSpec(429),

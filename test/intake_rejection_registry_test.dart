@@ -914,6 +914,29 @@ List<_Scenario> _scenarios() {
     },
   ));
 
+  // 413 - the handler-phase reply data over the internal page cap: the
+  // command ran, and the whole result is refused (a read body - the
+  // managed close), the code counted at the single reply exit
+  cases.add((
+    code: 'reply_data_too_large',
+    preBody: false,
+    run: () async {
+      final srv = await _listen(
+        _server(
+          pr: _allowlist(),
+          onCommand: (cmd) async =>
+              CommandOutcome(ok: true, data: 'x' * 100_000),
+        ),
+      );
+      final link = await _Link.openFull(
+        srv.port,
+        _head(srv.port, origin: 'https://portal.example', cl: 9),
+        utf8.encode('["CMD"]\r\n'),
+      );
+      return _Walk(srv, link, () async {}, preBody: false);
+    },
+  ));
+
   return cases;
 }
 
