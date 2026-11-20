@@ -118,6 +118,19 @@
   `TrustedCommand.admission` delivers that record to the host, and
   `intakeRejectionRegistry` is the single table behind every rejection
   code on the wire.
+- Changed: a `413` over an unread body now writes the reply and flushes
+  before the write side closes - the sender reads the code even when it
+  never stops sending, the seat frees at the reply, and the remaining
+  body drains in the background within the existing discard limits.
+- Changed: `update()` refuses a configured token longer than the wire's
+  header cap (a request carrying it could never pass `token_too_long`),
+  and a saved token over the cap boots the token layer inert with one
+  loud rotation warning instead of silently never matching.
+- Changed: a `HEAD` response carries headers only - no JSON body on the
+  wire.
+- Documentation: the allowlist port semantics are stated and pinned by a
+  witness - an entry with an explicit port matches that port alone; a
+  bare or wildcard entry matches the host on any port.
 - Added: the pairing route - `POST /pair` (only while pairing is armed)
   exchanges the displayed one-time code for the origin-bound token; its
   replies always echo CORS (the code is the gate, not the origin), and
