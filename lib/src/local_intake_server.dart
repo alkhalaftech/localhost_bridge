@@ -216,6 +216,7 @@ class LocalIntakeServer {
     this.config = const BridgeConfig(),
     this.requestTimeout,
     this.handlerTimeout,
+    this.onOrphanSettled,
   }) : _nowMs = nowMs,
        protection = protection ?? IntakeProtection(telemetry: telemetry) {
     _validateLimits();
@@ -354,6 +355,13 @@ class LocalIntakeServer {
     if (explicit == Duration.zero) return null;
     return explicit;
   }
+
+  /// Called once per orphaned-handler settlement - the budget-expired
+  /// work that finished after its seat was freed, whether still current-
+  /// generation or retired at a stop's return. Runs on the settle path:
+  /// a throw inside it is contained (telemetry.error) and never breaks
+  /// the wire or the drain bookkeeping.
+  final void Function()? onOrphanSettled;
 
   /// Injectable defaults - caps, idle time, and extraHosts authorities; the
   /// single source of truth for the numbers (no duplicated static constants).
@@ -785,8 +793,10 @@ class LocalIntakeServer {
     return rest <= 0 ? Duration.zero : Duration(milliseconds: rest);
   }
 
-  /// One orphaned handler settled - leaves its pool and rings the drain
-  /// bell when the last one settled.
+  /// One orphaned handler settled - leaves its pool, rings the drain bell
+  /// when the last one settled, and tells the host's callback (contained:
+  /// a throwing callback is said once in the telemetry, never breaks the
+  /// wire or the drain).
   void _settleOrphan(_OrphanTicket ticket) {
     _pendingOrphans.remove(ticket);
     if (ticket.retired) {
@@ -800,6 +810,20 @@ class LocalIntakeServer {
       final bell = _orphanDrain;
       _orphanDrain = null;
       bell?.complete();
+    }
+    final callback = onOrphanSettled;
+    if (callback != null) {
+      try {
+        callback();
+      } catch (e, s) {
+        telemetry.error(
+          'onOrphanSettled callback threw - contained, the drain keeps '
+          'its course',
+          error: e,
+          stackTrace: s,
+          category: BridgeCategory.network,
+        );
+      }
     }
   }
 
