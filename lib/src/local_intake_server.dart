@@ -47,6 +47,49 @@ class _HandlerBudgetExceeded implements Exception {
   const _HandlerBudgetExceeded();
 }
 
+/// One working orphan: the budget-expired command future holds a ticket
+/// from creation to settlement, so a stop can retire the whole still-
+/// working generation at its return with per-ticket routing (a retired
+/// ticket's settlement decrements the retired pool, never the active one
+/// a new generation is budgeted against).
+class _OrphanTicket {
+  /// Set once, at the stop's return that retires this generation.
+  bool retired = false;
+}
+
+/// What one [LocalIntakeServer.stop] left still working when it returned -
+/// a reading, not a handle. A fully drained stop reports zeros; a stop
+/// bounded by its [LocalIntakeServer.stop] timeout (or by the orphan
+/// grace) reports the remainder, so the caller never guesses whether work
+/// outlived the stop.
+class BridgeStopReport {
+  const BridgeStopReport._({
+    required this.seatsStillActive,
+    required this.orphanHandlersStillRunning,
+  });
+
+  /// Requests still holding a seat when the stop returned. Seats are real
+  /// work on live sockets, so they are never silently dropped - the count
+  /// lets a bounded stop own that honestly.
+  final int seatsStillActive;
+
+  /// Orphaned handlers (budget-expired work) still running when the stop
+  /// returned, across generations: orphans retired at an earlier stop's
+  /// return count here while they are still working.
+  final int orphanHandlersStillRunning;
+
+  /// Seats plus orphans still working at the return.
+  int get stillRunning => seatsStillActive + orphanHandlersStillRunning;
+
+  /// Whether nothing was left working at the return.
+  bool get fullyDrained => stillRunning == 0;
+
+  @override
+  String toString() =>
+      'BridgeStopReport(seatsStillActive: $seatsStillActive, '
+      'orphanHandlersStillRunning: $orphanHandlersStillRunning)';
+}
+
 /// Failure to reserve any listen port - a plain [Exception]: a failed bind
 /// is an environmental condition (another process holds the ports), caught
 /// by `on Exception` handlers without the Error semantics Dart reserves
@@ -319,9 +362,20 @@ class LocalIntakeServer {
   /// Handlers still running after their request already timed out (504) and
   /// left - the seat model does not see them, but the work is real: a local
   /// Dart app's command could outlive stop() unless counted. Seats plus
-  /// orphans are one live-work budget, and stop() drains the orphans up to
-  /// the handler budget.
-  int _orphanHandlers = 0;
+  /// current-generation orphans are one live-work budget, and stop() drains
+  /// the orphans up to the handler budget.
+  int _activeOrphans = 0;
+
+  /// Working orphans retired at a stop's return: the previous generation's
+  /// orphans never count against a new generation's live-work budget, but
+  /// they stay visible in the public orphan counter until they settle.
+  int _retiredOrphans = 0;
+
+  /// One ticket per working orphan - the budget-expired command future
+  /// keeps it so a stop can retire the whole generation at its return
+  /// (per-ticket routing: a retired ticket's settlement leaves the retired
+  /// pool, not the active one).
+  final Set<_OrphanTicket> _pendingOrphans = <_OrphanTicket>{};
 
   /// Armed when stop() arrives while orphans still run - completed when the
   /// last orphan settles.
@@ -488,14 +542,35 @@ class LocalIntakeServer {
     });
   }
 
-  /// Stops listening - a graceful close, not an amputation: listening stops at
-  /// once, in-flight replies finish (force used to cut them mid-send), then
-  /// the seats are awaited until drained; orphaned handlers (timed out of
-  /// their seat but still running) are awaited up to the handler budget and
-  /// the remainder is announced instead of silently outliving the stop. A
-  /// [start] issued while this drain is still running waits for it, so the
-  /// new generation binds only after the old one has fully stopped.
-  Future<void> stop() async {
+  /// Stops listening - a graceful close, not an amputation: listening stops
+  /// at once, in-flight replies finish, the seats are awaited until
+  /// drained, and orphaned handlers (timed out of their seat but still
+  /// running) are awaited up to the handler budget - the remainder is
+  /// announced in a warning and named in the returned [BridgeStopReport],
+  /// never silently outliving the stop. At the return every still-working
+  /// orphan is retired to the previous generation: it stops counting
+  /// against the live-work budget and a following [start] serves the new
+  /// generation from a clean budget, while the retired orphans stay
+  /// visible in the public orphan counter until they settle.
+  ///
+  /// With [timeout] given, the whole drain - the graceful close, the seat
+  /// wait, and the orphan grace - is bounded by it: stop returns inside
+  /// the deadline (a listener that has not closed gracefully by then is
+  /// force-closed so no socket is left behind), and the drain continues in
+  /// the background with the report telling what still runs. With no
+  /// timeout the drain is waited out fully, as before. A [start] issued
+  /// while this drain is still inside its call waits for it, so the new
+  /// generation binds only after the stop returned. A joining call that
+  /// lands on a stop still in flight returns that stop's outcome; a call
+  /// after it returned takes its own bounded pass.
+  Future<BridgeStopReport> stop({Duration? timeout}) async {
+    if (timeout != null && timeout.isNegative) {
+      throw ArgumentError.value(
+        timeout,
+        'timeout',
+        'must not be negative - omit it for the full drain',
+      );
+    }
     // بداية جارية: ينتظر حسمها أولا — الرد
     // الفوري يدع الربط يكتمل خادما يتيما بعد عودة stop
     final pendingStart = _startingFuture;
@@ -510,53 +585,132 @@ class LocalIntakeServer {
     // المسلّحان المشتركان (_drain و_orphanDrain) لا يُطحنان
     final inFlight = _stoppingFuture;
     if (inFlight != null) {
-      return inFlight;
+      await inFlight;
+      return _stopSnapshot();
     }
     // مستقبل الفراغ يُسلَّح قبل أول انتظار: بداية تستدعى في نافذة
-    // الفراغ تنتظره كاملاً — لا يربط جيل جديد فوق كشّاف لم يفض ولا
-    // يتشارك عدّاد المقاعد مع الجيل القديم
+    // الفراغ تنتظر عودة stop لا نضب اليتامى — والعودة داخل المهلة
+    // تُحرر البوابة فلا يعلق جيل جديد على يتامى الجيل القديم
     final settled = Completer<void>();
     _stoppingFuture = settled.future;
+    var timedOut = false;
+    // الموعد الكلي للمهلة المطلوبة: يحكم الإغلاق الرشيق والمقاعد
+    // واليتامى معا؛ وبلا مهلة يبقى الانتظار الكامل كما كان
+    final deadlineMs = timeout == null ? null : _now + timeout.inMilliseconds;
     try {
       final server = _server;
       _server = null;
       _port = 0;
-      await server?.close();
+      if (server != null && deadlineMs != null) {
+        try {
+          await server.close().timeout(_remaining(deadlineMs));
+        } on TimeoutException {
+          timedOut = true;
+          // من لم يفض بclose الرشيق داخل المهلة يُقطع قسرا — لا مقبس
+          // يستمع بعد عودة stop
+          unawaited(
+            server.close(force: true).catchError((Object _, StackTrace _) {}),
+          );
+        }
+      } else {
+        await server?.close();
+      }
       while (_activeRequests > 0) {
         // أعد استخدام المسلح: نداءان متداخلان لstop
         // يطحن الثاني _drain فيبقى الأول معلقا على مستقبل لا يكتمل
         final drained = _drain ??= Completer<void>();
-        await drained.future;
+        if (deadlineMs == null) {
+          await drained.future;
+          _drain = null;
+          continue;
+        }
+        final remaining = deadlineMs - _now;
+        if (remaining <= 0) {
+          timedOut = true;
+          break;
+        }
+        try {
+          await drained.future.timeout(Duration(milliseconds: remaining));
+        } on TimeoutException {
+          timedOut = true;
+          break;
+        }
         _drain = null;
       }
       _drain = null;
-      // اليتامى: مقاعدهم فرغت برد 504 لكن عملهم حي — stop ينتظرهم
-      // حتى الميزانية الفعالة نفسها (الافتراضية من config أو الصريحة)،
-      // والباقي فوقها يُعلن بعدّه لا يُترك صامتا
+      // اليتامى: مقاعدهم فرغت برد 504 لكن عملهم حي — stop ينتظرهم حتى
+      // الميزانية الفعالة (الافتراضية من config أو الصريحة) وسقف المهلة
+      // أيهما أقرب، والباقي فوقها يُعلن بعدّه ويظهر في التقرير لا يُترك
+      // صامتا
       final grace = effectiveHandlerTimeout;
-      if (_orphanHandlers > 0 && grace != null) {
+      if (_activeOrphans + _retiredOrphans > 0 && grace != null) {
         final orphaned = _orphanDrain ??= Completer<void>();
-        try {
-          await orphaned.future.timeout(grace);
-        } on TimeoutException {
-          telemetry.warn(
-            'intake stopped with $_orphanHandlers orphan handler(s) still '
-            'running',
-            category: BridgeCategory.network,
-          );
+        var wait = grace;
+        if (deadlineMs != null) {
+          final remaining = deadlineMs - _now;
+          if (remaining <= 0) {
+            timedOut = true;
+          } else if (remaining < grace.inMilliseconds) {
+            wait = Duration(milliseconds: remaining);
+          }
+        }
+        if (!timedOut) {
+          try {
+            await orphaned.future.timeout(wait);
+          } on TimeoutException {
+            timedOut = true;
+          }
         }
       }
     } finally {
+      // التقاعد عند العودة: يتامى هذا الجيل لا يحملهم جيل تالٍ في
+      // ميزانية العمل الحي، ويبقون في عدّاد العرض حتى يسكنوا
+      for (final ticket in _pendingOrphans.toList()) {
+        ticket.retired = true;
+        _retiredOrphans++;
+      }
+      _activeOrphans = 0;
+      final stillWorking = _activeOrphans + _retiredOrphans;
+      if (timedOut || stillWorking > 0) {
+        telemetry.warn(
+          'intake stopped with $stillWorking orphan handler(s) still '
+          'running',
+          category: BridgeCategory.network,
+        );
+      }
       _stoppingFuture = null;
       settled.complete();
     }
+    return _stopSnapshot();
   }
 
-  /// One orphaned handler settled - ring the drain bell when it was the last.
-  void _orphanSettled() {
-    _orphanHandlers--;
-    if (_orphanHandlers <= 0) {
-      _orphanHandlers = 0;
+  /// The snapshot a stop returns: what was still working at the return
+  /// moment, read from the live counters.
+  BridgeStopReport _stopSnapshot() => BridgeStopReport._(
+    seatsStillActive: _activeRequests,
+    orphanHandlersStillRunning: _activeOrphans + _retiredOrphans,
+  );
+
+  /// Milliseconds left before [deadlineMs], floored at zero -
+  /// `Future.timeout(Duration.zero)` fires at once, which is exactly the
+  /// expired-deadline reading.
+  Duration _remaining(int deadlineMs) {
+    final rest = deadlineMs - _now;
+    return rest <= 0 ? Duration.zero : Duration(milliseconds: rest);
+  }
+
+  /// One orphaned handler settled - leaves its pool and rings the drain
+  /// bell when the last one settled.
+  void _settleOrphan(_OrphanTicket ticket) {
+    _pendingOrphans.remove(ticket);
+    if (ticket.retired) {
+      _retiredOrphans--;
+      if (_retiredOrphans < 0) _retiredOrphans = 0;
+    } else {
+      _activeOrphans--;
+      if (_activeOrphans < 0) _activeOrphans = 0;
+    }
+    if (_activeOrphans + _retiredOrphans == 0) {
       final bell = _orphanDrain;
       _orphanDrain = null;
       bell?.complete();
@@ -1187,14 +1341,14 @@ class LocalIntakeServer {
           final source = _firstHeader(request, 'Origin') ?? 'unknown-origin';
           // سقف العمل الحي عند المعالج: المقاعد وحدها لا تحرس شيئا بعد
           // مهلة المعالج — اليتامى ما زالوا يعملون فعلا، فالميزانية
-          // المقاعد+اليتامى معا، وفوقها يُرد 503 قبل استدعاء معالج جديد
-          if (_activeRequests + _orphanHandlers >
-              config.maxConcurrentRequests) {
+          // المقاعد+يتامى الجيل الحي معا (يتامى الأجيال المتقاعدة لا
+          // يعدّون هنا بعقد ج5)، وفوقها يُرد 503 قبل استدعاء معالج جديد
+          if (_activeRequests + _activeOrphans > config.maxConcurrentRequests) {
             // كبح السطر نفسه: فيض رفض اليتامى يكتب سطرا واحدا في
             // الثانية على الأكثر، والسطر التالي بعد النافذة يحمل
             // عدد المكتوم، والرفض نفسه لكل طلب.
             final line = _orphanBusyWarnThrottle.admit(
-              'intake busy: $_orphanHandlers orphan handler(s) still '
+              'intake busy: $_activeOrphans orphan handler(s) still '
               'running — rejecting before invoking another',
             );
             if (line != null) {
@@ -1211,10 +1365,11 @@ class LocalIntakeServer {
           // المعرف يمر للمتحكم عبر خريطة الترويسات (مفتاح صغير
           // كالبقية) — بلا تغيير توقيع الدالة أو مستهلكيها.
           // آخر ما قبل المعالج: المهلة الكلية تُلغى عند هذا الاستدعاء
-          // قبل تنفيذ المعالج — وقت المعالج عقد handlerTimeout وحده:
-          // null بلا مهلة إطلاقاً (المعالج يمسك مقعده إلى أن يكمل)،
-          // والقيمة تحرر المقعد برد 504 ويُعدّ المعالج يتيماً —
-          // والنتيجة المتأخرة تُهمل.
+          // قبل تنفيذ المعالج — وقت المعالج عقد الميزانية وحدها:
+          // null يطلب الافتراضية من config، والثابت المسماة بلا مهلة
+          // إطلاقاً (المعالج يمسك مقعده إلى أن يكمل)، والقيمة الصريحة
+          // تحرر المقعد برد 504 ويُعدّ المعالج يتيماً — والنتيجة
+          // المتأخرة تُهمل.
           totalDeadlineLive = false;
           final commandFuture = onCommand(
             TrustedCommand(
@@ -1241,13 +1396,16 @@ class LocalIntakeServer {
                   );
           } on _HandlerBudgetExceeded {
             commandFuture.ignore();
-            // اليتيم ما زال يعمل فعلا: يُعدّ ضمن ميزانية العمل الحي،
-            // وفراغه يدق جرس تفريغ stop — then بمعالج خطأ فارغ كي لا
-            // يُحيى خطأه المتأخر (تجاهلُ ignore للمستقبل الأصلي وحده)
-            _orphanHandlers++;
+            // اليتيم ما زال يعمل فعلا: يُعدّ ضمن ميزانية العمل الحي
+            // بتذكرة حية، وفراغه يدق جرس تفريغ stop — then بمعالج خطأ
+            // فارغ كي لا يُحيى خطأه المتأخر (تجاهلُ ignore للمستقبل
+            // الأصلي وحده)
+            final ticket = _OrphanTicket();
+            _pendingOrphans.add(ticket);
+            _activeOrphans++;
             commandFuture.then<void>(
-              (_) => _orphanSettled(),
-              onError: (_) => _orphanSettled(),
+              (_) => _settleOrphan(ticket),
+              onError: (_) => _settleOrphan(ticket),
             );
             // كبح السطر نفسه: موجة معالجات بطيئة تكتب تحذيرا واحدا في
             // الثانية على الأكثر، والسطر التالي بعد النافذة يحمل عدد
