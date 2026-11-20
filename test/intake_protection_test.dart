@@ -1932,9 +1932,13 @@ void main() {
           isNull,
           reason: 'the previous allowlist still decides after a failed update',
         );
-        // And the zero listed quota stays legal: it means unquotaed.
+        // And the zero listed quota stays legal: it is the explicit
+        // documented opt-out (the shipped default is 120).
         p.update(
-          policy: const OriginPolicy(allowed: ['https://portal.example']),
+          policy: const OriginPolicy(
+            allowed: ['https://portal.example'],
+            listedPerOriginPerMinute: 0,
+          ),
         );
         expect(p.policy.listedPerOriginPerMinute, 0);
       },

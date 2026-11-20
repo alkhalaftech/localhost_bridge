@@ -57,6 +57,10 @@ class _Rec extends BridgeTelemetry {
       policy: const OriginPolicy(
         allowed: ['https://portal.example'],
         requireOriginWithToken: true,
+        // موضوع هذا الملف إثبات الحيازة وذاكرة الإعادة لا الحصص —
+        // والفيضان هنا 4100 طلباً من أصل واحد فيصارح خيار الصفر
+        // (بلا حصة) هو ما يبقي مشهده كما وُلد
+        listedPerOriginPerMinute: 0,
       ),
       token: _t64,
     )

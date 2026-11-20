@@ -20,8 +20,8 @@ class OriginPolicy {
   /// Builds the policy - every field is optional and defaults to the
   /// closed shape: an empty `allowed` list with no allow-all and no
   /// discovery callback, a per-origin quota of 30 requests/minute on the
-  /// allow-all path only, listed origins unquotaed, Fetch Metadata
-  /// required, and a 60-second consent-question timeout.
+  /// allow-all path, a listed-origin quota of 120 requests/minute, Fetch
+  /// Metadata required, and a 60-second consent-question timeout.
   const OriginPolicy({
     this.allowed = const [],
     this.allowAllHardened = false,
@@ -29,7 +29,7 @@ class OriginPolicy {
     this.reportOnly = false,
     this.onUnknownOrigin,
     this.perOriginPerMinute = 30,
-    this.listedPerOriginPerMinute = 0,
+    this.listedPerOriginPerMinute = 120,
     this.requireFetchMetadata = true,
     this.requireOriginWithToken = false,
     this.askTimeout = const Duration(seconds: 60),
@@ -63,10 +63,13 @@ class OriginPolicy {
   /// (sane values that never break a legitimate gate and bound one origin's damage).
   final int perOriginPerMinute;
 
-  /// Optional per-origin quota for the listed path - 0 (the default) keeps
-  /// listed origins unquotaed; a positive value bounds a compromised listed
-  /// origin's flood over the shared seats. Rejections use the same
-  /// `origin_rate_limited` code as the allow-all quota.
+  /// Per-origin quota for the listed path - 120 requests/minute shipped
+  /// (two sustained commands a second per listed origin: a real page
+  /// fires commands per user action and sits far below it, while a
+  /// compromised listed origin cannot flood the shared seats faster).
+  /// `0` is the explicit opt-out keeping listed origins unquotaed.
+  /// Rejections use the same `origin_rate_limited` code as the allow-all
+  /// quota, with the honest `Retry-After`.
   final int listedPerOriginPerMinute;
 
   /// Refuse requests that carry no `Sec-Fetch-Mode: cors` /
@@ -1383,7 +1386,7 @@ class IntakeProtection {
   /// counts first), so it answers 429 to every request, and a zero ask
   /// timeout closes every consent question before any answer can arrive.
   /// Zero [OriginPolicy.listedPerOriginPerMinute] stays legal - it is the
-  /// documented "listed origins are unquotaed" default.
+  /// documented explicit "listed origins are unquotaed" opt-out.
   void _validatePolicyNumbers(OriginPolicy policy) {
     if (policy.perOriginPerMinute <= 0) {
       throw ArgumentError.value(
