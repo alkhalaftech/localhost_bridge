@@ -19,7 +19,10 @@ IntakeProtection _allowlist() {
 
 /// مقبس كاذب: ترويسات كاملة وجسم معلن ناقص — اتصال مفتوح يبقى حيا
 /// (يحمل مقعداً في طور قراءة الجسم) حتى الهدم.
-Future<Socket> _stall(int port, {String origin = 'https://portal.example'}) async {
+Future<Socket> _stall(
+  int port, {
+  String origin = 'https://portal.example',
+}) async {
   final sock = await Socket.connect(InternetAddress.loopbackIPv4, port);
   unawaited(sock.done.catchError((Object _) {}));
   sock.add(

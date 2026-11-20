@@ -77,7 +77,6 @@ class BridgeConfig {
   /// construction.
   final int maxOpenConnections;
 
-
   /// JSON structural element cap - `{`, `[`, and `,` outside strings, counted
   /// in one linear pass before any decoding. A body over it is rejected with
   /// `413 payload_too_complex`: a tiny body of empty elements must not

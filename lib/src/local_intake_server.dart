@@ -1297,16 +1297,14 @@ class LocalIntakeServer {
           response,
           // القطع الفوري الموثق يقرأه من السجل لا من هذا الموضع
           code: 'origin_seat_limit',
-          message:
-              'This origin holds its full seat share — retry shortly',
+          message: 'This origin holds its full seat share — retry shortly',
           bodyFullyRead: false,
           headOnly: headOnly,
         );
         return;
       }
       _activeRequests++;
-      _seatsByOrigin[seatOriginKey] =
-          (_seatsByOrigin[seatOriginKey] ?? 0) + 1;
+      _seatsByOrigin[seatOriginKey] = (_seatsByOrigin[seatOriginKey] ?? 0) + 1;
       try {
         await _handleRequest(request, response, admission);
       } finally {

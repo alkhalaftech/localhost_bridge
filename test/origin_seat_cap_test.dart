@@ -16,10 +16,9 @@ String _cid() => 'seat-${_idSeq++}';
 IntakeProtection _allowlist() {
   final pr = IntakeProtection();
   pr.update(
-    policy: const OriginPolicy(allowed: [
-      'https://busy.example',
-      'https://other.example',
-    ]),
+    policy: const OriginPolicy(
+      allowed: ['https://busy.example', 'https://other.example'],
+    ),
   );
   return pr;
 }
@@ -46,7 +45,10 @@ Future<(int, String)> _post(
 }) async {
   final client = HttpClient();
   try {
-    final req = await client.openUrl(method, Uri.parse('http://127.0.0.1:$port/'));
+    final req = await client.openUrl(
+      method,
+      Uri.parse('http://127.0.0.1:$port/'),
+    );
     if (origin != null) req.headers.set('Origin', origin);
     if (token != null) req.headers.set('X-Bridge-Token', token);
     req.headers.set(HttpHeaders.contentTypeHeader, 'application/json');
@@ -115,10 +117,7 @@ void main() {
         // أربعة مقاعد حصرا للمحتكر، والرفض الثالث عشر فما فوق بالرمز
         final replies = await Future.wait([
           for (final f in holders)
-            f.timeout(
-              const Duration(seconds: 3),
-              onTimeout: () => (-1, ''),
-            ),
+            f.timeout(const Duration(seconds: 3), onTimeout: () => (-1, '')),
         ]);
         final seatLimited = replies
             .where((r) => r.$1 == 503 && r.$2.contains('origin_seat_limit'))
