@@ -61,12 +61,16 @@ class _Rec extends BridgeTelemetry {
 LocalIntakeServer _server({
   required BridgeTelemetry telemetry,
   Future<CommandOutcome> Function()? handler,
+  // الافتراض null يعني ميزانية config الافتراضية منذ ج5 — ومن يحتاج
+  // «بلا مهلة» يمرر الثابت المسماة صراحة
+  Duration? handlerTimeout,
 }) => LocalIntakeServer(
   telemetry: telemetry,
   correlationIdGenerator: _counterId,
   onCommand: (_) async =>
       handler == null ? const CommandOutcome(ok: true) : await handler(),
   protection: _openProtection(),
+  handlerTimeout: handlerTimeout,
 );
 
 String _post(String hostHeader, String body, [String extraHeaders = '']) =>
@@ -644,8 +648,8 @@ void main() {
   );
 
   test(
-    'without a handlerTimeout a never-ending handler holds start() until the '
-    'drain settles',
+    'under the noHandlerTimeout constant a never-ending handler holds '
+    'start() until the drain settles',
     timeout: const Timeout(Duration(seconds: 20)),
     () async {
       final entered = Completer<void>();
@@ -657,6 +661,8 @@ void main() {
           await release.future;
           return const CommandOutcome(ok: true);
         },
+        // الثابت المسماة هي «بلا مهلة» منذ ج5 — null صار طلب الافتراضية
+        handlerTimeout: LocalIntakeServer.noHandlerTimeout,
       );
       final p = await srv.start(preferredPort: 0);
 
@@ -685,9 +691,10 @@ void main() {
         order,
         isNot(contains('start')),
         reason:
-            'without a handlerTimeout the seat never frees, so stop() drains '
-            'forever and start() stays held until the handler settles - the '
-            'hold is documented, and a handler budget is the full remedy',
+            'under the no-deadline constant the seat never frees, so stop() '
+            'drains forever and start() stays held until the handler '
+            'settles - with the default budget the wait is bounded by the '
+            'orphan grace instead',
       );
 
       release.complete();
@@ -815,15 +822,16 @@ void main() {
   });
 
   test(
-    'handlerTimeout: null waits for handler to finish — unchanged behavior',
+    'handlerTimeout: null selects the default budget and a fast handler '
+    'still completes',
     timeout: const Timeout(Duration(seconds: 20)),
     () async {
       final srv = LocalIntakeServer(
         telemetry: const SilentTelemetry(),
         correlationIdGenerator: _counterId,
         onCommand: (_) async {
-          // تأخير محاكاة خادم: البطء صناعة الشاهد — بلا هذه المهلة
-          // يثبت الفارق الذي يقيس عليه الاختبار مهلة null مقابل المحددة
+          // تأخير محاكاة خادم: البطء صناعة الشاهد — المعالج السريع
+          // تحت الميزانية الافتراضية يكمل ويُرد 200 كما كان
           await Future<void>.delayed(const Duration(milliseconds: 250));
           return const CommandOutcome(ok: true);
         },
@@ -835,7 +843,9 @@ void main() {
       expect(
         r['status'],
         200,
-        reason: 'no timeout: waiting behaves exactly as before',
+        reason:
+            'null selects the configured default budget (30s shipped) - a '
+            'handler finishing inside it is answered 200 unchanged',
       );
       await srv.stop();
     },
@@ -921,8 +931,10 @@ void main() {
         r['status'],
         500,
         reason:
-            'null يعني لا مهلة: رمي المعالج يمر بمساره الأصلي '
-            'لا يصير 504 handler_timeout',
+            'الميزانية لا تحول رمي المعالج نفسه TimeoutException إلى '
+            '504 handler_timeout — العلامة الخاصة للجسر وحدها تفعل، '
+            'والرمي يعود لمسار 500 العام سواء كانت الميزانية '
+            'الافتراضية أو صريحة',
       );
       expect(r['body'], contains('internal'));
       await srv.stop();

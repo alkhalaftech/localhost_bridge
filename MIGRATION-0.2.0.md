@@ -70,3 +70,60 @@ clients and similar).
   with `400 duplicate_header`.
 - The `Access-Control-Allow-Headers` list is
   `Content-Type, X-Bridge-Token, X-Correlation-Id`.
+
+## The origin+token requirement and pairing (new in 0.2.0)
+
+Everything below is **off by default** - a host that configures only
+what it configured in 0.1.x sees today's wire letter by letter.
+
+### Requiring the origin and the token together
+
+Set `OriginPolicy.requireOriginWithToken: true` when your page must be
+admitted while other local programs must not. The mode closes the two
+one-legged doors:
+
+- a qualified origin without a valid token answers `403 token_required`
+  (readable for the qualified origin, so its page can retry with a
+  proof);
+- the token alone - correct or not - never admits from an unqualified
+  origin or with no Origin at all: the origin rejection answers it, and
+  a sender learns nothing about its token.
+
+Headerless native clients have **no door** in this mode: run them on a
+separate listener (or leave the requirement off there). Wrong shared
+tokens still feed the wrong-guess budget (`429 token_locked` above it),
+and `token_required` is a registry row in the wire tables.
+
+### Pairing a browser page
+
+Arms through `protection.enablePairing(...)`: the host displays a
+six-digit code from `startPairing()` (120-second life), the page sends
+`{"pairingCode": "..."}` to `POST /pair` with its origin, and receives
+`{"ok": true, "token": ..., "pairingId": ..., "expiresInSeconds": 86400}`
+- a token bound to that origin, expiring after 24 hours. The host is
+told through `onPaired`; `revokePairedOrigin(origin)` kills the
+bindings at once and `rotatePairedOrigin(origin)` revokes and offers a
+fresh code. The save hooks (`onPairedSave`, `onPairedRevoke`,
+`onConsentSave`) hand persistence to the host - the package writes no
+file - and `restorePairedOrigin` / `restoreSavedConsent` re-arm what
+the host persisted after a restart.
+
+Pairing adds one wire surface while armed: the `X-Bridge-Pairing`
+header joins the allowed CORS list, and `POST /pair` answers the
+pairing codes (`pair_code_invalid`, `pair_code_expired`,
+`pair_budget_exceeded`). Disarmed, `/pair` is no path at all - the
+ordinary non-root behavior rides, wire letter unchanged.
+
+### Proving possession instead of sending the token
+
+The paired page never sends its token raw: it signs every request -
+HMAC-SHA-256 over the canonical string
+`v1\n<pairingId>\n<stampMs>\n<METHOD>\n<path>\n<correlationId>`, keyed
+by the token's 32 decoded bytes - and presents
+`X-Bridge-Pairing: <pairingId>.<stampMs>.<signature>`. The stamp is the
+page's `Date.now()`; keep it unique (never sign twice within one
+millisecond) and within one minute of the server's clock. A reused or
+stale signature reads `403 pair_signature_replay` - sign a fresh
+request. The page-side reference in README.md shows the whole WebCrypto
+helper, and `dart run tool/emulator_pairing_lab.dart` drives the same
+story against an emulator's browser.

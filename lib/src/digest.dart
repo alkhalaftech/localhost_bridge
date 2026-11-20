@@ -189,3 +189,23 @@ String hexEncode(List<int> bytes) {
   }
   return out.toString();
 }
+
+/// Constant-time comparison of two byte lists - the verdict a signature
+/// check reads, so a wrong guess learns nothing from how long the check
+/// took. The iteration count is fixed before any byte logic: the longer
+/// side's length, never the shorter's and never a shared prefix - a
+/// difference at the first byte costs exactly what a difference at the
+/// last costs, and a length difference folds into the accumulator like
+/// any positional difference. Every byte of both sides is consumed (a
+/// supplied side longer than the expected one is still fully read), so
+/// equal lists match and nothing else does.
+bool fixedTimeEquals(List<int> a, List<int> b) {
+  var diff = a.length ^ b.length;
+  final pad = a.length > b.length ? a.length : b.length;
+  for (var i = 0; i < pad; i++) {
+    diff |= (i < a.length ? a[i] : 0) ^ (i < b.length ? b[i] : 0);
+  }
+  // الأصفار وحدها تعني تطابقا — الطرفان بايتات صغيرة والفرق يبقى عددا
+  // صغيرا على المنصتين فلا قناع لازما هنا
+  return diff == 0;
+}

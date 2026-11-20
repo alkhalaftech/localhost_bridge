@@ -1,7 +1,9 @@
 // عقد المهلتين بعد تصحيحه: المهلة الكلية تحرس ما قبل المعالج وحرف
-// الاستدعاء، ووقت المعالج عقد handlerTimeout وحده (null بلا مهلة
-// إطلاقاً). العناوين بالإنجليزية (حزمة منشورة) والسلوك موصوف سلكياً
-// بطلبات حقيقية ومهل قصيرة بمعاملات البناء — لا نوماً يبطئ الطقم.
+// الاستدعاء، ووقت المعالج عقد الميزانية وحدها — و«بلا مهلة إطلاقاً»
+// منذ ج5 ثابت مسمّى (noHandlerTimeout) لا null (فnull صار يطلب
+// الميزانية الافتراضية من config). العناوين بالإنجليزية (حزمة منشورة)
+// والسلوك موصوف سلكياً بطلبات حقيقية ومهل قصيرة بمعاملات البناء —
+// لا نوماً يبطئ الطقم.
 import 'dart:async';
 import 'dart:convert';
 import 'dart:io';
@@ -90,18 +92,20 @@ Future<(int, String)> _post(
 
 void main() {
   test(
-    'a null handler budget lets a handler run past the request timeout and '
-    'answer 200 - the total deadline never reaches the handler phase',
+    'the noHandlerTimeout constant lets a handler run past the request '
+    'timeout and answer 200 - the total deadline never reaches the '
+    'handler phase',
     timeout: const Timeout(Duration(seconds: 30)),
     () async {
       // ضعف المهلة مقصود نصاً: المعالج 800ms والمهلة الكلية 400ms —
       // على العقد المصحح يكمل المعالج ويُرد 200، وعلى الكود القديم
       // تحرق المهلة الكلية الاتصال عند 400ms فيُسجل -1 بلا رد (نقطة
-      // القطع القديمة 400+250 اليَن تقع قبل اكتمال المعالج حتماً)
+      // القطع القديمة 400+250 اليَن تقع قبل اكتمال المعالج حتماً).
+      // الثابت المسماة هي «بلا مهلة» منذ ج5 — null صار طلب الافتراضية
       var calls = 0;
       final srv = _server(
         requestTimeout: const Duration(milliseconds: 400),
-        handlerTimeout: null,
+        handlerTimeout: LocalIntakeServer.noHandlerTimeout,
         onCommand: (_) async {
           calls++;
           await Future<void>.delayed(const Duration(milliseconds: 800));
@@ -115,8 +119,8 @@ void main() {
           status,
           200,
           reason:
-              'handlerTimeout: null means no handler deadline at all - the '
-              'handler runs to completion and the reply is 200',
+              'the noHandlerTimeout constant means no handler deadline at '
+              'all - the handler runs to completion and the reply is 200',
         );
         expect(body, contains('"ok":true'));
         expect(calls, 1, reason: 'the handler was invoked exactly once');
@@ -190,19 +194,21 @@ void main() {
   );
 
   test(
-    'sixteen handlers without a handler budget hold their seats past the '
-    'request timeout - the seventeenth request is refused 503 server_busy',
+    'sixteen handlers under the noHandlerTimeout constant hold their seats '
+    'past the request timeout - the seventeenth request is refused 503 '
+    'server_busy',
     timeout: const Timeout(Duration(seconds: 30)),
     () async {
       // الانتظار بعد نقطة القطع القديمة عمداً (150ms مهلة + 250ms يَن
       // القطع): على العقد المصحح المعالجات الست عشرة تمسك مقاعدها
       // فيرد السابع عشر 503، وعلى الكود القديم تُقطع كلها عند المهلة
-      // فيتحرر المقاعد ويرد السابع عشر 200 - وهذا هو انقلاب الشاهد
+      // فيتحرر المقاعد ويرد السابع عشر 200 - وهذا هو انقلاب الشاهد.
+      // الثابت المسماة هي «بلا مهلة» منذ ج5 — null صار طلب الافتراضية
       final never = Completer<CommandOutcome>();
       var calls = 0;
       final srv = _server(
         requestTimeout: const Duration(milliseconds: 150),
-        handlerTimeout: null,
+        handlerTimeout: LocalIntakeServer.noHandlerTimeout,
         onCommand: (_) {
           calls++;
           return never.future;
@@ -229,9 +235,9 @@ void main() {
           status,
           503,
           reason:
-              'a handler with no budget holds its seat - sixteen stuck '
-              'handlers exhaust the service and the next command is '
-              'answered server_busy',
+              'a handler under the no-deadline constant holds its seat - '
+              'sixteen stuck handlers exhaust the service and the next '
+              'command is answered server_busy',
         );
         expect(body, contains('server_busy'));
         expect(calls, 16, reason: 'the seventeenth never reaches the handler');

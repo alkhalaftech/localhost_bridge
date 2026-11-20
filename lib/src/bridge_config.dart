@@ -15,6 +15,7 @@ class BridgeConfig {
     this.maxJsonDepth = 32,
     this.requestTimeout = const Duration(seconds: 30),
     this.idleTimeout = const Duration(seconds: 60),
+    this.handlerTimeout = defaultHandlerTimeout,
     this.extraHosts = const <String>[],
     this.allowedContentTypes = defaultContentTypes,
     this.payloadWrapperKeys = defaultPayloadWrapperKeys,
@@ -58,6 +59,21 @@ class BridgeConfig {
 
   /// Idle timeout - an occupied seat outlives it by the close-handling grace.
   final Duration idleTimeout;
+
+  /// The default handler budget - the deadline over the host's command
+  /// handler itself, applied when [LocalIntakeServer.handlerTimeout] is
+  /// left at null. A handler running past it is answered `504
+  /// handler_timeout`, its seat is freed, and the still-running work
+  /// becomes a counted orphan, so a stuck handler can never hold a seat
+  /// forever nor stall [LocalIntakeServer.stop] without a bound. To ask
+  /// for no handler deadline at all, pass
+  /// [LocalIntakeServer.noHandlerTimeout] - null no longer means
+  /// unbounded. Must be positive; a non-positive value throws
+  /// [ArgumentError] at server construction.
+  static const Duration defaultHandlerTimeout = Duration(seconds: 30);
+
+  /// The default budget field itself.
+  final Duration handlerTimeout;
 
   /// Extra hosts accepted as local authorities - a bare name also matches
   /// `name:boundPort` (browsers always send the port). A public DNS name

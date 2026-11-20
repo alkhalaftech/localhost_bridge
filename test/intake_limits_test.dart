@@ -343,10 +343,19 @@ void main() {
         throwsArgumentError,
         reason: 'a zero timeout override must fail loudly',
       );
+      // الصفر صار الثابت المسماة noHandlerTimeout (بلا مهلة) بعقد ج5 —
+      // والسالب يبقى خطأ إعداد يُرفض صاخباً وقت البناء
       expect(
-        () => buildWith(handlerTimeout: Duration.zero),
+        () => buildWith(handlerTimeout: Duration(milliseconds: -1)),
         throwsArgumentError,
-        reason: 'a zero handler timeout must fail loudly',
+        reason: 'a negative handler budget must fail loudly',
+      );
+      expect(
+        buildWith(handlerTimeout: LocalIntakeServer.noHandlerTimeout),
+        isA<LocalIntakeServer>(),
+        reason:
+            'Duration.zero is the named noHandlerTimeout constant - a '
+            'valid explicit no-deadline marker, not a mistake',
       );
     },
   );
