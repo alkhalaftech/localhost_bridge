@@ -51,8 +51,16 @@ class _HandlerBudgetExceeded implements Exception {
 /// from creation to settlement, so a stop can retire the whole still-
 /// working generation at its return with per-ticket routing (a retired
 /// ticket's settlement decrements the retired pool, never the active one
-/// a new generation is budgeted against).
+/// a new generation is budgeted against). The ticket carries the
+/// command's cancel signal so the cooperative fires stay addressable per
+/// orphan.
 class _OrphanTicket {
+  _OrphanTicket(this.signal);
+
+  /// The command's own cancel signal - fired at the budget expiry, and
+  /// removed from the live set when the future settles either way.
+  final CommandCancelSignal signal;
+
   /// Set once, at the stop's return that retires this generation.
   bool retired = false;
 }
@@ -430,6 +438,13 @@ class LocalIntakeServer {
   /// pool, not the active one).
   final Set<_OrphanTicket> _pendingOrphans = <_OrphanTicket>{};
 
+  /// The cancel signals of every command still holding a seat or working
+  /// as an orphan - stop fires them all so cooperative handlers wrap up
+  /// and free their work inside the drain instead of finishing into a
+  /// reply nobody reads. Removal rides the command future's own
+  /// completion, so a crashing handler leaks nothing.
+  final Set<CommandCancelSignal> _liveSignals = <CommandCancelSignal>{};
+
   /// Armed when stop() arrives while orphans still run - completed when the
   /// last orphan settles.
   Completer<void>? _orphanDrain;
@@ -687,6 +702,12 @@ class LocalIntakeServer {
     // تُحرر البوابة فلا يعلق جيل جديد على يتامى الجيل القديم
     final settled = Completer<void>();
     _stoppingFuture = settled.future;
+    // الإلغاء التعاوني عند الإيقاف: كل معالج حي (مقعداً أو يتماً)
+    // يقرأ الإشارة إن شاء فيغلف عمله فيفرغ داخل الفراغ بدل أن يكمل
+    // في رد لن يقرأه أحد
+    for (final signal in _liveSignals.toList()) {
+      signal.cancel();
+    }
     var timedOut = false;
     // الموعد الكلي للمهلة المطلوبة: يحكم الإغلاق الرشيق والمقاعد
     // واليتامى معا؛ وبلا مهلة يبقى الانتظار الكامل كما كان
@@ -1481,6 +1502,11 @@ class LocalIntakeServer {
           // تحرر المقعد برد 504 ويُعدّ المعالج يتيماً — والنتيجة
           // المتأخرة تُهمل.
           totalDeadlineLive = false;
+          // إشارة الإلغاء التعاوني لهذا الأمر: حية لكل أمر، وتخرج من
+          // الأحياء عند حسم المستقبل أيّاً كان حسمه (نتيجة أو رمي) —
+          // فلا تسرب ولا إشعال لميت
+          final cancelSignal = CommandCancelSignal();
+          _liveSignals.add(cancelSignal);
           final commandFuture = onCommand(
             TrustedCommand(
               source: source,
@@ -1491,6 +1517,12 @@ class LocalIntakeServer {
               },
               correlationId: correlationId,
               admission: admission,
+              cancellation: cancelSignal,
+            ),
+          );
+          unawaited(
+            commandFuture.whenComplete(
+              () => _liveSignals.remove(cancelSignal),
             ),
           );
           final CommandOutcome result;
@@ -1505,12 +1537,15 @@ class LocalIntakeServer {
                     onTimeout: () => throw const _HandlerBudgetExceeded(),
                   );
           } on _HandlerBudgetExceeded {
+            // احترقت الميزانية: الإشارة تُشعل كي يغلف المعالج عمله إن
+            // شاء — الرد 504 فوصل وحده ولن يقرأ أحد نتيجته المتأخرة
+            cancelSignal.cancel();
             commandFuture.ignore();
             // اليتيم ما زال يعمل فعلا: يُعدّ ضمن ميزانية العمل الحي
             // بتذكرة حية، وفراغه يدق جرس تفريغ stop — then بمعالج خطأ
             // فارغ كي لا يُحيى خطأه المتأخر (تجاهلُ ignore للمستقبل
             // الأصلي وحده)
-            final ticket = _OrphanTicket();
+            final ticket = _OrphanTicket(cancelSignal);
             _pendingOrphans.add(ticket);
             _activeOrphans++;
             commandFuture.then<void>(

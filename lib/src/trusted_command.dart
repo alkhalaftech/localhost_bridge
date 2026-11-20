@@ -4,6 +4,56 @@ library;
 
 import 'intake_protection.dart';
 
+/// The cooperative cancellation signal a handler may read: the intake
+/// fires it when the command leaves its seat (the handler budget expired
+/// and the `504 handler_timeout` is on its way) and when the server stops,
+/// so long work can wrap up early instead of finishing into a reply
+/// nobody will read. Reading it is the handler's choice - the signal
+/// never interrupts anything on its own, and no client-disconnect
+/// detection is wired (dart:io exposes no clean way without watching the
+/// socket): the two fires above are the whole contract.
+abstract class CommandCancelSignal {
+  /// Whether the intake has asked this command to wrap up.
+  bool get isCancelled;
+
+  /// Builds a fresh, not-cancelled signal - the intake builds one per
+  /// command; a host composing its own pipeline may build its own.
+  factory CommandCancelSignal() = _LiveCancelSignal;
+
+  /// The const, shared, never-cancelled instance carried by commands
+  /// built outside the intake: no lifecycle ever fires it.
+  const factory CommandCancelSignal.never() = _NeverCancelSignal;
+
+  /// Fires the signal. The intake calls it at the budget expiry and at
+  /// [stop]; a handler may fire its own copy to mark its work abandoned -
+  /// firing changes nothing but the flag.
+  void cancel();
+}
+
+/// The live per-command signal the intake hands out.
+class _LiveCancelSignal implements CommandCancelSignal {
+  bool _cancelled = false;
+
+  @override
+  bool get isCancelled => _cancelled;
+
+  @override
+  void cancel() {
+    _cancelled = true;
+  }
+}
+
+/// The const default: false forever, by construction.
+class _NeverCancelSignal implements CommandCancelSignal {
+  const _NeverCancelSignal();
+
+  @override
+  bool get isCancelled => false;
+
+  @override
+  void cancel() {}
+}
+
 /// The pipeline's end contract: the package ends at delivering a "trusted
 /// command" - it knows neither its meaning nor any specific hardware (neutrality).
 class TrustedCommand {
@@ -18,6 +68,7 @@ class TrustedCommand {
     required this.headers,
     required this.correlationId,
     this.admission = IntakeAdmission.unrecorded,
+    this.cancellation = const CommandCancelSignal.never(),
   });
 
   /// The sender's origin as protection read it ('unknown-origin' when absent).
@@ -42,6 +93,12 @@ class TrustedCommand {
   /// echo decision, and the verbose-error decision in one place. A command
   /// built outside the intake carries [IntakeAdmission.unrecorded].
   final IntakeAdmission admission;
+
+  /// The cooperative cancellation signal for this command: the intake
+  /// passes a live per-command signal and fires it at the handler-budget
+  /// expiry and at stop; a command built outside the intake carries the
+  /// const never-cancelled instance. Reading it is the handler's choice.
+  final CommandCancelSignal cancellation;
 }
 
 /// The host-side command execution result.
