@@ -4,7 +4,41 @@
 deprecation window: the old header name is not accepted, the old
 generator does not exist, and the originless command source marker
 carries the new value. This guide names the three renames and the path
-for each; later 0.2.0 items extend this guide as they land.
+for each; later 0.2.0 items extend this guide as they land. It also
+changes two defaults on purpose - the per-origin seat share and the
+listed-origin rate budget - both documented below.
+
+## The per-origin seat share is bounded by default
+
+0.1.x let one origin hold all sixteen concurrency seats; 0.2.0 bounds
+each origin's share to `BridgeConfig.maxSeatsPerOrigin` (default 4).
+A monopolizing origin past its share now reads `503 origin_seat_limit`
+instead of pushing every other sender into `503 server_busy`.
+
+- A page that legitimately holds more than four concurrent commands
+  (a dashboard firing batches) raises the value: `BridgeConfig(
+  maxSeatsPerOrigin: 8)` - a value at or above `maxConcurrentRequests`
+  never binds, which restores the 0.1.x shape exactly.
+- Requests without an `Origin` header (the token layer's clients) share
+  one originless bucket under the same cap; split heavy integrations
+  across distinct tokens if one bucket is too small for them.
+- Nothing else moves: the global seats, the pairing layer, and the
+  quotas keep their contracts, and one origin filling its share never
+  deducts from another origin's.
+
+## Listed origins ship with a rate budget
+
+0.1.x left listed origins unquotaed (`listedPerOriginPerMinute` was 0);
+0.2.0 defaults it to 120 requests/minute per listed origin. Over the
+budget the page reads `429 origin_rate_limited` with the honest
+`Retry-After` - it already handles that code on the allow-all path.
+
+- A listed page that can legitimately burst past 120 commands a minute
+  raises the value, or writes `listedPerOriginPerMinute: 0` explicitly
+  to restore the 0.1.x unquotaed shape.
+- Nothing else moves: the same code, the same honest `Retry-After`, and
+  watch mode (`reportOnly`) still covers the quota before you commit to
+  it.
 
 ## The three renames
 

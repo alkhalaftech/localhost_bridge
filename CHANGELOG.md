@@ -1,5 +1,30 @@
 ## 0.2.0
 
+- **Breaking: one sender can no longer monopolize the seats** -
+  `BridgeConfig.maxSeatsPerOrigin` (default 4 of the 16) bounds the
+  seats a single origin holds at once; requests without an `Origin`
+  header share one originless bucket under the same cap, and an
+  `OPTIONS` preflight counts into its origin's share exactly like a
+  command. Past the share the sender reads `503 origin_seat_limit`
+  while the server still has room for others - one listed page or one
+  allow-all page holding every seat with slow requests used to answer
+  every other sender `503`. The gate lives inside the global seats
+  (the full server still answers `server_busy` first, a value at or
+  above `maxConcurrentRequests` never binds, and one origin filling
+  its share never deducts from another origin's).
+- **Breaking: listed origins ship with a rate budget** -
+  `OriginPolicy.listedPerOriginPerMinute` defaults to 120/minute
+  instead of unquotaed, so a compromised listed origin cannot flood
+  the shared seats faster than two sustained commands a second; over
+  it the page reads `429 origin_rate_limited` with the honest
+  `Retry-After`. `0` remains the explicit documented opt-out keeping
+  listed origins unquotaed. See MIGRATION-0.2.0.md for both default
+  changes.
+- Added: `BridgeConfig.maxOpenConnections` - an optional hard ceiling
+  on open connections (`dart:io` never bounds them): a request arriving
+  while more sockets than the cap are open answers `503`, and once the
+  count drops the next request is served. `0` - the default - keeps it
+  off, and the wire never refuses for open sockets alone.
 - **Breaking: the handler budget is on by default** - `handlerTimeout`
   left at null no longer means "no deadline"; it selects the configured
   default budget (`BridgeConfig.handlerTimeout`, 30 seconds shipped). A

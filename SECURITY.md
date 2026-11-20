@@ -195,6 +195,12 @@ What the bridge guards now:
 - **Seats are one bounded budget.** `maxConcurrentRequests` (default 16)
   bounds requests in flight; seats and orphaned handlers count as one
   live-work budget and above it new commands get `503 server_busy`.
+  Inside that budget one sender cannot monopolize it:
+  `maxSeatsPerOrigin` (default 4) bounds the seats a single origin
+  holds at once — requests without an `Origin` share one originless
+  bucket under the same cap, an `OPTIONS` preflight counts into its
+  origin's share, and past the share the sender reads `503
+  origin_seat_limit` while the server still has room for others.
   The total request deadline (`requestTimeout`, 30 s default) bounds
   the pre-handler phase — the gates, the policy checks, and the body
   read — so no pre-handler seat outlives it; a handler without a
@@ -212,25 +218,28 @@ What the bridge guards now:
 
 What remains:
 
-- **A listed origin or an allow-all page can keep the seats cycling.**
-  Listed origins carry no quota by default (`listedPerOriginPerMinute`
-  stays 0), and an allow-all page is quotaed per origin but can rotate
-  subdomains into fresh windows; each in-flight request holds its seat
-  for as long as it stays in flight, so a sustained flood from such an
-  origin keeps answering every legitimate command `503` while its
-  requests sit. Set `listedPerOriginPerMinute` to bound a compromised
-  listed origin, and set `handlerTimeout` so a slow handler frees its
-  seat early with a reconcilable `504 handler_timeout` - without one a
-  slow handler holds its seat until it completes.
+- **An allow-all flood rotating origins can still fill the global
+  seats.** The per-origin seat cap (`maxSeatsPerOrigin`, 4 by default)
+  bounds each sender's share, and the listed quota (120/minute by
+  default, `0` the explicit opt-out) bounds each listed origin's rate —
+  but a flood rotating across four or more distinct origin buckets can
+  still occupy all sixteen seats, answering every further sender `503`.
+  The cap bounds one sender's share, never the sum of senders; set
+  `handlerTimeout` so a slow handler frees its seat early with a
+  reconcilable `504 handler_timeout` - without one a slow handler
+  holds its seat until it completes.
 - **Peak memory under origin rotation is bounded by the caps** — the
   two 10,000-entry maps plus `dart:io`'s own per-connection buffers,
   which the package does not bound.
-- **`dart:io` sets no limit on a single header's length or on the
-  number of open connections.** The package caps only the headers it
-  reads (`Origin` over 1,024 characters, `X-Bridge-Token` over 1,024
-  bytes); the seats bound requests in flight, not sockets — idle
-  connections close after `idleTimeout` (60 s default), but the count
-  of active open connections stays unbounded.
+- **`dart:io` sets no limit on a single header's length.** The package
+  caps the headers it reads (`Origin` over 1,024 characters,
+  `X-Bridge-Token` over 1,024 bytes); the seats bound requests in
+  flight, and idle connections close after `idleTimeout` (60 s
+  default). The count of open connections is unbounded by `dart:io`
+  itself — a host that wants a hard ceiling sets
+  `BridgeConfig.maxOpenConnections` above zero, and a request arriving
+  over the cap answers `503` until the count drops; `0` (the default)
+  keeps the option off.
 
 ## Recommended setup for irreversible commands
 
