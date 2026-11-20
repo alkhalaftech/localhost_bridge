@@ -1732,7 +1732,7 @@ class LocalIntakeServer {
               if (!result.ok && verboseErrors)
                 'message': result.errorMessage ?? 'Command execution failed',
               // بيانات المضيف للصفحة: فوق السقف رُفض الرد كله أعلاه
-              if (pageData != null) 'data': pageData,
+              'data': ?pageData,
             },
             bodyFullyRead: true,
           );

@@ -13,7 +13,6 @@
 //     -d '{"data":["PAY"]}' http://127.0.0.1:9101/
 // The first send executes the work; a second send with the same id gets the
 // stored reply without executing anything.
-import 'dart:async';
 import 'dart:io';
 
 import 'package:localhost_bridge/localhost_bridge.dart';
