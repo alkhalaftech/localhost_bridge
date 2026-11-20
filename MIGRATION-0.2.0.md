@@ -127,3 +127,36 @@ stale signature reads `403 pair_signature_replay` - sign a fresh
 request. The page-side reference in README.md shows the whole WebCrypto
 helper, and `dart run tool/emulator_pairing_lab.dart` drives the same
 story against an emulator's browser.
+
+## The handler budget default
+
+In 0.1.x, `handlerTimeout` was null by default and null meant "no
+deadline": a stuck handler held its seat forever, `stop()` waited for it
+without a bound, and orphaned handlers kept counting across a restart -
+after sixteen of them, every command was answered `503 server_busy`.
+
+In 0.2.0:
+
+- Leaving `handlerTimeout` at null selects the configured default
+  budget: `BridgeConfig.handlerTimeout`, 30 seconds shipped. A handler
+  running past the budget is answered `504 handler_timeout` (the reply
+  and the "outcome unknown" contract are unchanged), its seat is freed,
+  and the still-running work becomes a counted orphan.
+- To keep the old unbounded behavior, pass the named constant:
+  `handlerTimeout: LocalIntakeServer.noHandlerTimeout`. Its value is
+  `Duration.zero` - which used to throw `ArgumentError` and is now the
+  constant's value; a negative duration still throws at construction.
+- `stop({Duration? timeout})` returns a `BridgeStopReport`. With a
+  timeout the whole drain is bounded and the report names what still
+  runs; without one the full drain is waited out, as before. At every
+  stop's return the still-working orphans are retired: the next `start()`
+  serves from a clean live-work budget while the retired orphans stay
+  visible in `server.counters` until they settle.
+- New reads and hooks need no migration: `server.counters` (seats,
+  orphans across generations, rejections by code, and the protocol-shape
+  and pairing tallies), `onOrphanSettled`, and
+  `TrustedCommand.cancellation` are additive; commands built by hand
+  carry the const never-cancelled signal and keep compiling.
+- The pairing layer's idle sweeps are wire-compatible: only a session
+  swept by idleness answers `pair_code_invalid` for its code instead of
+  `pair_code_expired` (both 403, both telling the page to pair again).

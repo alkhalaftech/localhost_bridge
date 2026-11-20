@@ -89,9 +89,13 @@ void main() async {
     correlationIdGenerator: () =>
         '${DateTime.now().microsecondsSinceEpoch.toRadixString(16)}'
         '-${Random.secure().nextInt(1 << 32).toRadixString(36)}',
-    // Frees a slow handler's seat with a reconcilable 504
-    // handler_timeout; without it a slow handler holds its seat until
-    // it completes - pass a value in production.
+    // Customizes the handler budget (the default is 30 seconds from
+    // BridgeConfig.handlerTimeout): a handler running past the budget is
+    // answered 504 handler_timeout, its seat is freed, the still-running
+    // work becomes a counted orphan, and stop() retires whatever remains
+    // at its return. To ask for no handler deadline at all, pass
+    // LocalIntakeServer.noHandlerTimeout - null selects the configured
+    // default budget.
     handlerTimeout: Duration(seconds: 10),
     protection: IntakeProtection(telemetry: telemetry)
       ..update(
@@ -587,11 +591,24 @@ nothing listens in this release, and another local program can listen on
 - If you pass fallback ports to `start()`, the page must use the port
   `start()` returns — never assume the preferred one (a same-session
   program may hold it).
-- Handlers that never complete keep counting against the seats across
-  `stop()` and `start()` — that counter is per server object, so only
-  building a new `LocalIntakeServer` clears it. At the default seat cap
-  (16), sixteen stuck handlers mean every command is answered
-  `503 server_busy`.
+- The handler budget is on by default (`BridgeConfig.handlerTimeout`,
+  30 seconds shipped): a handler running past it is answered `504
+  handler_timeout`, its seat is freed, and the still-running work
+  becomes a counted orphan. `stop({Duration? timeout})` is bounded by
+  its timeout when given, returns a `BridgeStopReport` naming what
+  still runs, and retires whatever orphans remain at its return — a
+  restart never inherits the previous generation's orphans into its
+  live-work budget, while they stay visible in the read-only counters
+  (`server.counters`: seats, orphans across generations with the
+  retired ones named, rejections by wire code, and the protocol-shape
+  and pairing tallies). Only the explicit
+  `LocalIntakeServer.noHandlerTimeout` constant removes the deadline —
+  null selects the configured default budget — and under it sixteen
+  stuck handlers still mean every command is answered `503
+  server_busy`. A handler may also read the cooperative cancel signal
+  (`TrustedCommand.cancellation`) — the intake fires it at the budget
+  expiry and at stop — and the host may watch
+  `onOrphanSettled` for each orphan settlement.
 - `BridgeConfig.extraHosts` adds host authorities the server answers for
   (a bare name matches `name:boundPort` too, like the built-ins). Every
   entry must be a name you control that resolves to this machine — a

@@ -1,5 +1,46 @@
 ## 0.2.0
 
+- **Breaking: the handler budget is on by default** - `handlerTimeout`
+  left at null no longer means "no deadline"; it selects the configured
+  default budget (`BridgeConfig.handlerTimeout`, 30 seconds shipped). A
+  handler running past the budget is answered `504 handler_timeout`, its
+  seat is freed, and the still-running work becomes a counted orphan;
+  `stop()` awaits orphans up to the same budget and retires whatever
+  remains at its return. To ask for no handler deadline at all, pass the
+  named constant `LocalIntakeServer.noHandlerTimeout` (its value is
+  `Duration.zero`, which is no longer an error - a negative budget still
+  throws `ArgumentError` at construction). See MIGRATION-0.2.0.md.
+- Added: a bounded stop - `stop({Duration? timeout})` returns a
+  `BridgeStopReport` (seats and orphan handlers still running at the
+  return); with a timeout the whole drain - the graceful close, the seat
+  wait, the orphan grace - is bounded by it, and a listener that misses
+  the graceful close inside the deadline is force-closed. Every
+  still-working orphan is retired at the stop's return: a restart never
+  inherits the previous generation's orphans into its live-work budget,
+  and they stay visible in the orphan counter until they settle.
+- Added: read-only counters - `LocalIntakeServer.counters` answers a
+  `BridgeCounters` snapshot: active seats, working orphans across
+  generations with the retired ones named, every rejection by wire code
+  (counted at the single reply exit), and two overlapping tallies -
+  protocol-shape rejections (the pre-admission gates the protection
+  counter never sees) and pairing rejections (the pairing route plus the
+  pairing-family codes off it).
+- Added: `onOrphanSettled` on the server - fired once per orphaned
+  handler settlement, current-generation or retired alike; a throwing
+  callback is contained with one telemetry error line and never breaks
+  the wire or the drain.
+- Added: the cooperative cancel signal - `TrustedCommand.cancellation`
+  carries a per-command `CommandCancelSignal` the handler may read; the
+  intake fires it at the handler-budget expiry (the 504 moment) and at
+  stop. A command built outside the intake carries the const
+  never-cancelled instance. No client-disconnect detection is wired.
+- Changed: the periodic idle sweeps cover the three pairing maps -
+  expired sessions, paired records (their id-index mirror leaving with
+  them), and replay-cache entries leave on ordinary request traffic, at
+  most once a second. A session swept by idleness answers
+  `pair_code_invalid` for its code instead of `pair_code_expired` (both
+  403, both telling the page to pair again); records and replay are
+  wire-invisible.
 - **Breaking: the three intake names are renamed, the old ones removed
   with no deprecation window** - the token header `X-Portal-Token`
   becomes `X-Bridge-Token`, the generator `generatePortalToken()`
