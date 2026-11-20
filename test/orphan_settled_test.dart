@@ -32,6 +32,7 @@ class _Rec extends BridgeTelemetry {
   }) {
     errors.add(m);
   }
+
   @override
   Future<T> measure<T>(
     String label,
@@ -89,11 +90,7 @@ void main() {
       );
       final port = await srv.start(preferredPort: 0);
       final (status, _) = await _post(port);
-      expect(
-        status,
-        504,
-        reason: 'the held handler is orphaned at the budget',
-      );
+      expect(status, 504, reason: 'the held handler is orphaned at the budget');
       // يتيم حي فوق الميزانية؛ stop بمهلة قصيرة تعود ويُتقاعد اليتيم
       final report = await srv.stop(timeout: const Duration(milliseconds: 50));
       expect(report.orphanHandlersStillRunning, 1);

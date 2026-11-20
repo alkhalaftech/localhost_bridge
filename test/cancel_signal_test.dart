@@ -91,10 +91,8 @@ void main() {
       final srv = LocalIntakeServer(
         telemetry: _Rec(),
         correlationIdGenerator: _cid,
-        onCommand: (cmd) => _pollUntilCancelled(
-          cmd,
-          (cancelled) => observed = cancelled,
-        ),
+        onCommand: (cmd) =>
+            _pollUntilCancelled(cmd, (cancelled) => observed = cancelled),
         protection: _allowlist(),
         handlerTimeout: const Duration(milliseconds: 200),
       );
@@ -128,10 +126,8 @@ void main() {
       final srv = LocalIntakeServer(
         telemetry: _Rec(),
         correlationIdGenerator: _cid,
-        onCommand: (cmd) => _pollUntilCancelled(
-          cmd,
-          (cancelled) => sawCancelled = cancelled,
-        ),
+        onCommand: (cmd) =>
+            _pollUntilCancelled(cmd, (cancelled) => sawCancelled = cancelled),
         protection: _allowlist(),
         handlerTimeout: LocalIntakeServer.noHandlerTimeout,
       );
@@ -160,26 +156,23 @@ void main() {
     },
   );
 
-  test(
-    'a command built outside the intake carries the never-cancelled '
-    'signal',
-    () {
-      const cmd = TrustedCommand(
-        source: 'unknown-origin',
-        payloads: ['X'],
-        headers: {},
-        correlationId: 'c',
-      );
-      expect(
-        cmd.cancellation.isCancelled,
-        isFalse,
-        reason:
-            'the const default never cancels - the intake always passes '
-            'its own live per-command signal',
-      );
-      // وإشعالها اليدوي لا يفعل شيئا: العقد الثابت لا يُلمس
-      cmd.cancellation.cancel();
-      expect(cmd.cancellation.isCancelled, isFalse);
-    },
-  );
+  test('a command built outside the intake carries the never-cancelled '
+      'signal', () {
+    const cmd = TrustedCommand(
+      source: 'unknown-origin',
+      payloads: ['X'],
+      headers: {},
+      correlationId: 'c',
+    );
+    expect(
+      cmd.cancellation.isCancelled,
+      isFalse,
+      reason:
+          'the const default never cancels - the intake always passes '
+          'its own live per-command signal',
+    );
+    // وإشعالها اليدوي لا يفعل شيئا: العقد الثابت لا يُلمس
+    cmd.cancellation.cancel();
+    expect(cmd.cancellation.isCancelled, isFalse);
+  });
 }

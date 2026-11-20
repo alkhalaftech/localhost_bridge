@@ -51,24 +51,23 @@ class _Rec extends BridgeTelemetry {
 
 /// حماية صارمة مقترنة بساعة محقونة — نمط شاهد التوقيع القائم حرفا
 IntakeProtection _strictPaired() {
-  final protection = IntakeProtection(telemetry: _Rec(), nowMs: () => _clockMs[0])
-    ..update(
-      policy: const OriginPolicy(
-        allowed: ['https://portal.example'],
-        requireOriginWithToken: true,
-      ),
-      token: _t64,
-    )
-    ..enablePairing();
+  final protection =
+      IntakeProtection(telemetry: _Rec(), nowMs: () => _clockMs[0])
+        ..update(
+          policy: const OriginPolicy(
+            allowed: ['https://portal.example'],
+            requireOriginWithToken: true,
+          ),
+          token: _t64,
+        )
+        ..enablePairing();
   return protection;
 }
 
 /// توكن حشو مميز بالموقع — كل سجل حشو يحتاج توكناً مختلفاً كي لا يستبدل
 /// أحدهم الآخر في الخريطة (مفتاحها digest التوكن)
-String _fillerToken(int i) => _t64.replaceFirst(
-  'a3f1',
-  i.toRadixString(16).padLeft(4, '0'),
-);
+String _fillerToken(int i) =>
+    _t64.replaceFirst('a3f1', i.toRadixString(16).padLeft(4, '0'));
 
 /// توقيع صفحة بنفس بناء شاهد التوقيع القائم — الطابع من ساعة الجدار
 /// الحقيقية (نافذة الانحراف تُقاس عليها لا على الساعة المحقونة)
@@ -127,10 +126,7 @@ void main() {
             'the idle sweep removed the expired session - the code is an '
             'unknown one now, not a known-but-expired one',
       );
-      final alive = pr.pair(
-        origin: 'https://portal.example',
-        code: live.code,
-      );
+      final alive = pr.pair(origin: 'https://portal.example', code: live.code);
       expect(
         alive.token,
         isNotNull,
@@ -179,7 +175,11 @@ void main() {
         origin: 'https://portal.example',
         code: pr.startPairing().code,
       );
-      expect(second.token, isNotNull, reason: 'the house has room after the sweep');
+      expect(
+        second.token,
+        isNotNull,
+        reason: 'the house has room after the sweep',
+      );
       // توقيع جديد (طابع جديد فلا إعادة) يثبت أن سجل الحي خرج من الكنس
       // سليماً وقبوله بمسار الربط المقترن نفسه
       final a = await pr.admit(

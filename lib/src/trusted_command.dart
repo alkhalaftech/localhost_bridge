@@ -24,9 +24,9 @@ abstract class CommandCancelSignal {
   /// built outside the intake: no lifecycle ever fires it.
   const factory CommandCancelSignal.never() = _NeverCancelSignal;
 
-  /// Fires the signal. The intake calls it at the budget expiry and at
-  /// [stop]; a handler may fire its own copy to mark its work abandoned -
-  /// firing changes nothing but the flag.
+  /// Fires the signal. The intake calls it at the budget expiry and when
+  /// the server stops; a handler may fire its own copy to mark its work
+  /// abandoned - firing changes nothing but the flag.
   void cancel();
 }
 
