@@ -209,4 +209,83 @@ void main() {
       }
     },
   );
+
+  test(
+    'a second stop over still-working retired orphans counts each one '
+    'exactly once: the report, the counter, and the bell never ghost',
+    timeout: const Timeout(Duration(seconds: 30)),
+    () async {
+      // دورة stop نفسها المصرَّحة بنص عقد stop («a call after it
+      // returned takes its own bounded pass»): stop محدودة فوق يتيم
+      // عامل ثم start ثم stop ثانية — المتقاعد سابقاً يُعد مرة واحدة،
+      // وبعد استقراره الحقيقي يصفر العدّادان فلا شبح يحرق ميزانية
+      // انتظار stop تالية
+      final never = Completer<CommandOutcome>();
+      final srv = LocalIntakeServer(
+        telemetry: _Rec(),
+        correlationIdGenerator: _cid,
+        onCommand: (_) => never.future,
+        protection: _allowlist(),
+        handlerTimeout: const Duration(milliseconds: 150),
+      );
+      final port = await srv.start(preferredPort: 0);
+      try {
+        final (status, _) = await _post(port);
+        expect(status, 504);
+        final first = await srv.stop(timeout: const Duration(milliseconds: 50));
+        expect(first.orphanHandlersStillRunning, 1);
+        expect(srv.counters.retiredOrphanHandlers, 1);
+        await srv.start(preferredPort: 0).timeout(const Duration(seconds: 5));
+        // لا أمر على الجيل الجديد — اليتيم العامل هو وحده ما يُعدّ
+        final second = await srv.stop(
+          timeout: const Duration(milliseconds: 50),
+        );
+        expect(
+          second.orphanHandlersStillRunning,
+          1,
+          reason:
+              'the orphan retired by the first stop is counted once - a '
+              'second stop over the same working ticket must not inflate '
+              'the report',
+        );
+        expect(
+          srv.counters.retiredOrphanHandlers,
+          1,
+          reason: 'the retired pool keeps exactly one still-working orphan',
+        );
+        // الاستقرار الحقيقي يصفر العدّادين — لا شبح باقٍ إلى الأبد
+        if (!never.isCompleted) never.complete(const CommandOutcome(ok: true));
+        var waited = 0;
+        while (srv.counters.orphanHandlers > 0 && waited < 100) {
+          waited++;
+          await Future<void>.delayed(const Duration(milliseconds: 5));
+        }
+        expect(
+          srv.counters.orphanHandlers,
+          0,
+          reason: 'no working orphan remains after the real settlement',
+        );
+        expect(
+          srv.counters.retiredOrphanHandlers,
+          0,
+          reason:
+              'no ghost: the retired pool drains with the very settlement '
+              'that ended the work',
+        );
+        // والجرس دق: stop تالية محدودة تعود بتقرير فراغ لا على أشباح
+        final third = await srv.stop(timeout: const Duration(milliseconds: 50));
+        expect(
+          third.fullyDrained,
+          isTrue,
+          reason:
+              'a later bounded stop reports a clean drain - the drain bell '
+              'rang at the real settlement',
+        );
+        expect(third.orphanHandlersStillRunning, 0);
+      } finally {
+        if (!never.isCompleted) never.complete(const CommandOutcome(ok: true));
+        await srv.stop().timeout(const Duration(seconds: 5));
+      }
+    },
+  );
 }
