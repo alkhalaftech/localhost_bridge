@@ -1521,8 +1521,14 @@ class LocalIntakeServer {
             ),
           );
           unawaited(
-            commandFuture.whenComplete(
-              () => _liveSignals.remove(cancelSignal),
+            // سلسلة تمتص خطأ المستقبل: whenComplete المجرد يعيد خطأ
+            // المعالج المرمي كخطأ غير معالَج يهرب إلى الـzone — وthen
+            // بمعالجي القيمة والخطأ يبتلعه هنا حصراً (الخطأ نفسه ما
+            // زال يصل مسار الـ500 من await الأصلي عادة)
+            commandFuture.then<void>(
+              (_) => _liveSignals.remove(cancelSignal),
+              onError: (Object _, StackTrace _) =>
+                  _liveSignals.remove(cancelSignal),
             ),
           );
           final CommandOutcome result;
