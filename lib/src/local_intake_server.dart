@@ -90,6 +90,51 @@ class BridgeStopReport {
       'orphanHandlersStillRunning: $orphanHandlersStillRunning)';
 }
 
+/// A read-only snapshot of the intake's live-work and rejection counters -
+/// what a host dashboard reads: the seats in use, the working orphans
+/// (current and retired generations), and the rejections by wire code with
+/// the two overlapping tallies (protocol shape and pairing). Values are
+/// copied at snapshot time; the rejection map cannot be written.
+class BridgeCounters {
+  const BridgeCounters._({
+    required this.activeSeats,
+    required this.orphanHandlers,
+    required this.retiredOrphanHandlers,
+    required this.rejectionsByCode,
+    required this.protocolShapeRejections,
+    required this.pairingRejections,
+  });
+
+  /// Requests holding a seat right now.
+  final int activeSeats;
+
+  /// Orphaned handlers (budget-expired work) still running, across
+  /// generations: the current generation's orphans plus the retired ones.
+  final int orphanHandlers;
+
+  /// The subset of [orphanHandlers] retired at a previous stop's return -
+  /// visible here, never counted against the live-work budget.
+  final int retiredOrphanHandlers;
+
+  /// Every rejection answered since the server was built, by wire code -
+  /// counted at the single reply exit, so no path can bypass the tally.
+  final Map<String, int> rejectionsByCode;
+
+  /// Rejections answered by the pre-admission wire-shape gates and the
+  /// HTTP parser reject (`origin_too_long`, `origin_malformed`,
+  /// `token_too_long`, `pairing_too_long`, `duplicate_header`, and
+  /// `bad_request` from the parser) - exactly the codes the protection
+  /// layer's rejection counter never sees. An overlapping view over
+  /// [rejectionsByCode], not a partition.
+  final int protocolShapeRejections;
+
+  /// Pairing refusals: everything answered on the pairing route, plus the
+  /// pairing-family codes refused off the route (the `pairing_too_long`
+  /// gate and the command-path `pair_signature_replay`). An overlapping
+  /// view over [rejectionsByCode], not a partition.
+  final int pairingRejections;
+}
+
 /// Failure to reserve any listen port - a plain [Exception]: a failed bind
 /// is an environmental condition (another process holds the ports), caught
 /// by `on Exception` handlers without the Error semantics Dart reserves
@@ -381,6 +426,35 @@ class LocalIntakeServer {
   /// last orphan settles.
   Completer<void>? _orphanDrain;
 
+  /// The rejection tally by wire code - written at the single reply exit
+  /// only, so no rejection path can bypass the count.
+  final Map<String, int> _rejectionsByCode = <String, int>{};
+  int _protocolShapeRejections = 0;
+  int _pairingRejections = 0;
+
+  /// The wire-shape codes: the pre-admission gates that never reach the
+  /// protection counter (plus the parser's `bad_request`, flagged at its
+  /// call site - the pairing route reuses the code for a body fact, and
+  /// that one is not a wire shape).
+  static const _protocolShapeRejectionCodes = <String>{
+    'origin_too_long',
+    'origin_malformed',
+    'token_too_long',
+    'pairing_too_long',
+    'duplicate_header',
+  };
+
+  /// The pairing-family codes: refused on the pairing route and off it
+  /// (the length gate rides every request, and the replay refusal rides
+  /// the command path).
+  static const _pairingRejectionCodes = <String>{
+    'pair_code_invalid',
+    'pair_code_expired',
+    'pair_budget_exceeded',
+    'pair_signature_replay',
+    'pairing_too_long',
+  };
+
   /// An in-progress start guards the race: two parallel start calls would both
   /// see no server and bind two - the first leaking live with no reference.
   bool _starting = false;
@@ -410,6 +484,18 @@ class LocalIntakeServer {
   /// failing start, during a drain, and after a mid-start failure whose
   /// orphan was closed. [port] is 0 whenever this is false.
   bool get isListening => _server != null;
+
+  /// The read-only counter snapshot: seats in use, working orphans across
+  /// generations, and the rejections by wire code with the protocol-shape
+  /// and pairing tallies. Read it anytime - it never touches the wire.
+  BridgeCounters get counters => BridgeCounters._(
+    activeSeats: _activeRequests,
+    orphanHandlers: _activeOrphans + _retiredOrphans,
+    retiredOrphanHandlers: _retiredOrphans,
+    rejectionsByCode: Map.unmodifiable(Map<String, int>.of(_rejectionsByCode)),
+    protocolShapeRejections: _protocolShapeRejections,
+    pairingRejections: _pairingRejections,
+  );
 
   /// Starts listening - tries the preferred port, then the fallbacks.
   ///
@@ -1568,6 +1654,9 @@ class LocalIntakeServer {
         code: 'bad_request',
         message: 'The HTTP parser rejected this request',
         bodyFullyRead: false,
+        // خطأ محلل = شكل بروتوكولي في العداد؛ bad_request على مسار
+        // الاقتران (حقيقة جسم) لا يدخل عداد الشكل
+        protocolShape: true,
       );
     } else {
       // خطأ مقبس أثناء الجسم ليس علة صيغة عند العميل: يُطلق
@@ -1613,6 +1702,8 @@ class LocalIntakeServer {
         code: 'bad_request',
         message: 'Send {"pairingCode": "<the code the host displays>"} as JSON',
         bodyFullyRead: true,
+        // حقيقة جسم على مسار الاقتران — تدخل عداد الاقتران لا عداد الشكل
+        pairingRoute: true,
       );
       return;
     }
@@ -1631,6 +1722,8 @@ class LocalIntakeServer {
         code: rejection.code,
         message: rejection.message,
         bodyFullyRead: true,
+        // كل رفض على مسار الاقتران يدخل عداد الاقتران برمزه
+        pairingRoute: true,
       );
       return;
     }
@@ -1867,17 +1960,28 @@ class LocalIntakeServer {
   /// مخرج الرفض: يقرأ سطر رمزه من سجل الرموز الواحد — الحالة والقطع
   /// الفوري من السجل حصراً لا من الموضع — ثم يُنعطي مخرج الرد به، وطريقة
   /// الإغلاق تبقى من حقيقة قراءة الجسم فيه. رمزٌ بلا سجل انحراف بنيوي:
-  /// يُرفع صوتاً فلا رد صامت بترميز مغلوط.
+  /// يُرفع صوتاً فلا رد صامت بترميز مغلوط. والعدّ هنا حصراً: عدّاد
+  /// بالرمز، وعداد شكل بروتوكولي، وعداد اقتران — الاثنان الأخيران
+  /// منظران متداخلان فوق الأول لا قسمة حصرية.
   Future<void> _replyRejection(
     HttpResponse response, {
     required String code,
     required String message,
     required bool bodyFullyRead,
     bool headOnly = false,
+    bool protocolShape = false,
+    bool pairingRoute = false,
   }) async {
     final spec = intakeRejectionRegistry[code];
     if (spec == null) {
       throw StateError('unregistered intake rejection code: $code');
+    }
+    _rejectionsByCode[code] = (_rejectionsByCode[code] ?? 0) + 1;
+    if (protocolShape || _protocolShapeRejectionCodes.contains(code)) {
+      _protocolShapeRejections++;
+    }
+    if (pairingRoute || _pairingRejectionCodes.contains(code)) {
+      _pairingRejections++;
     }
     await _reply(
       response,

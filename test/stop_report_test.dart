@@ -191,6 +191,18 @@ void main() {
           16,
           reason: 'the stop announces the sixteen it retired',
         );
+        final p2 = await srv
+            .start(preferredPort: 0)
+            .timeout(const Duration(seconds: 5));
+        final (nextStatus, nextBody) = await _post(p2);
+        expect(
+          nextStatus,
+          200,
+          reason:
+              'retired orphans do not count against the new generation - '
+              'the first command after the restart is served',
+        );
+        expect(nextBody, contains('"ok":true'));
       } finally {
         if (!never.isCompleted) never.complete(const CommandOutcome(ok: true));
         await srv.stop().timeout(const Duration(seconds: 5));
