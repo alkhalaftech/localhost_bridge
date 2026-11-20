@@ -230,7 +230,10 @@ void main() {
   LocalIntakeServer make({
     int delayMs = 0,
     required IntakeProtection pr,
-    BridgeConfig config = const BridgeConfig(),
+    // موضوع هذا الملف طقم رموز السلك لا حصص الأصول — وحالة
+    // التزامن فيه تمسك ستة عشر مقعداً من أصل واحد بنيویاً، فسقف
+    // مقاعد المرسل الواحد يُرفع صراحة في الافتراضي هنا
+    BridgeConfig config = const BridgeConfig(maxSeatsPerOrigin: 16),
   }) => LocalIntakeServer(
     telemetry: rec,
     correlationIdGenerator: _counterId,

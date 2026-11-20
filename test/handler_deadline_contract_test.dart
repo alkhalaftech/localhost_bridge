@@ -65,7 +65,13 @@ LocalIntakeServer _server({
   protection: _allowlist(),
   requestTimeout: requestTimeout,
   handlerTimeout: handlerTimeout,
-  config: BridgeConfig(maxConcurrentRequests: maxConcurrentRequests),
+  config: BridgeConfig(
+    maxConcurrentRequests: maxConcurrentRequests,
+    // موضوع هذا الملف السقف العام للمقاعد تحت الثابت المسماة —
+    // والحاصلون الستة عشر من أصل واحد بنيویاً، فسقف مقاعد المرسل
+    // الواحد يُرفع صراحة إلى السقف العام نفسه
+    maxSeatsPerOrigin: maxConcurrentRequests,
+  ),
 );
 
 /// طلب حقيقي عبر HttpClient يعيد (الحالة، الجسم) — وانقطاع الاتصال بلا

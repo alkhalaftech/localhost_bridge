@@ -21,15 +21,16 @@ library;
 /// `payload_too_large` alike (the body crossed the cap mid-read and the
 /// answer leaves at the crossing moment).
 ///
-/// [immediateCut] marks the two documented rows that skip the drain and
+/// [immediateCut] marks the documented rows that skip the drain and
 /// destroy right after the flushed reply - the concurrency-seat busy
-/// reject and the host-authority (DNS-rebinding) reject: a saturated
-/// server spends no drain windows, and a rebinding probe deserves none.
-/// These are the README's honest-exception paths where the code may never
-/// reach the caller; they are the exceptions, not the rule. A rejection
-/// of an already-read body closes managed instead. The close therefore
+/// reject, the per-origin seat-share reject, and the host-authority
+/// (DNS-rebinding) reject: a saturated server spends no drain windows,
+/// and a rebinding probe deserves none. These are the README's
+/// honest-exception paths where the code may never reach the caller;
+/// they are the exceptions, not the rule. A rejection of an
+/// already-read body closes managed instead. The close therefore
 /// follows the body fact plus this row together - never the call site's
-/// choice, and never one universal flavor: the two immediate-cut rows
+/// choice, and never one universal flavor: the immediate-cut rows
 /// are the documented exceptions to the drain.
 class IntakeRejectSpec {
   /// Builds the row - [status] is the wire status, [immediateCut] marks the
@@ -88,6 +89,7 @@ const Map<String, IntakeRejectSpec> intakeRejectionRegistry =
       'token_locked': IntakeRejectSpec(429),
       // 503 / 504
       'handler_timeout': IntakeRejectSpec(504),
+      'origin_seat_limit': IntakeRejectSpec(503, immediateCut: true),
       'protection_disposed': IntakeRejectSpec(503),
       'server_busy': IntakeRejectSpec(503, immediateCut: true),
     };

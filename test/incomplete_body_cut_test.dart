@@ -64,6 +64,10 @@ Future<LocalIntakeServer> _startServer({
     onCommand: onCommand ?? (cmd) async => const CommandOutcome(ok: true),
     protection: protection,
     requestTimeout: requestTimeout,
+    // موضوع هذا الملف أشكال الرد والقطع فوق الأجسام الناقصة لا حصص
+    // الأصول — وسقف مقاعد المرسل الواحد يُرفع صراحة كي يبقى مشهد
+    // الانشغال العام (ستة عشر حاجزاً من أصل واحد) كما وُلد
+    config: const BridgeConfig(maxSeatsPerOrigin: 16),
   );
   await srv.start(preferredPort: 0);
   return srv;

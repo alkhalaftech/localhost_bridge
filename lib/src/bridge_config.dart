@@ -11,6 +11,7 @@ class BridgeConfig {
   const BridgeConfig({
     this.maxBodyBytes = 1024 * 1024,
     this.maxConcurrentRequests = 16,
+    this.maxSeatsPerOrigin = defaultMaxSeatsPerOrigin,
     this.maxJsonElements = 10_000,
     this.maxJsonDepth = 32,
     this.requestTimeout = const Duration(seconds: 30),
@@ -41,6 +42,29 @@ class BridgeConfig {
   /// Concurrent seat cap - a synchronous check + 503 before the first await
   /// (a hard cap; time-based relief is the host's separate knob).
   final int maxConcurrentRequests;
+
+  /// The default share of the seats one sender may hold at once - see
+  /// [maxSeatsPerOrigin].
+  static const int defaultMaxSeatsPerOrigin = 4;
+
+  /// Per-origin seat cap - the share of [maxConcurrentRequests] a single
+  /// origin may hold at the same moment (default [defaultMaxSeatsPerOrigin]).
+  /// Without it one listed page - or one allow-all page - can occupy every
+  /// seat with slow requests and answer every other sender `503`; with it
+  /// the monopolizer is refused `503 origin_seat_limit` past its share
+  /// while the server still has room for others. Requests without an
+  /// `Origin` header (the token layer's clients) share one originless
+  /// bucket under the same cap, and an `OPTIONS` preflight counts into
+  /// its origin's share exactly like a command. The gate sits inside the
+  /// global seats: the full server still answers `server_busy` first, a
+  /// value at or above [maxConcurrentRequests] never binds (the global
+  /// gate binds first), and one origin filling its share never deducts
+  /// from another origin's - each sender is bounded by its own bucket,
+  /// and the pairing layer's session and record caps are protection-state
+  /// limits, not seats: a paired page's signed requests count into its
+  /// origin's seat share like any other request.
+  final int maxSeatsPerOrigin;
+
 
   /// JSON structural element cap - `{`, `[`, and `,` outside strings, counted
   /// in one linear pass before any decoding. A body over it is rejected with

@@ -20,9 +20,10 @@ commands *mean* stays entirely in your handler.
   not a dependency.)
 - Rejections carry a stable error `code` — the developer contract. The
   honest exceptions cut the connection immediately: the busy 503, the
-  403 Host reject (a request whose Host is not this bridge's local
-  address), and a 413 whose body cannot be drained within the discard
-  limits — on those paths the code may never reach the caller.
+  per-origin seat 503, the 403 Host reject (a request whose Host is not
+  this bridge's local address), and a 413 whose body cannot be drained
+  within the discard limits — on those paths the code may never reach
+  the caller.
 
 ## Quick start
 
@@ -366,7 +367,7 @@ Stable error codes:
 | 415 | `unsupported_media_type` | POST body carries a `Content-Type` outside `BridgeConfig.allowedContentTypes` (default `application/json` and `text/plain`, which covers JSON clients and textual gateways; an absent header passes for raw-socket integrations). Hidden-HTML-form types (`application/x-www-form-urlencoded`, `multipart/form-data`) are refused. Checked after intake admission, so an untrusted origin still sees its origin rejection. Note: `text/plain` itself is a valid HTML form enctype, so it passes this gate — the browser-facing form defense is the fetch-mode hardening (`cross_site_blocked`), with `OriginPolicy.requireFetchMetadata` extending it to headerless requests. |
 | 429 | `origin_rate_limited` / `token_locked` | Per-origin budget exhausted / too many **wrong** token attempts in the last 60 seconds from this origin — the wrong-guess budget is 5 attempts per window (originless attempts share one window). The budget is a signal about wrong guesses, never a refusal of the verified sender: the correct token is compared and accepted whatever the failure history, and a match clears the window. |
 | 429 | `pair_budget_exceeded` | On `POST /pair` (pairing armed): five wrong code attempts per pairing session have been absorbed — the honest `Retry-After` carries the remaining life of the displayed session. The budget is per session, never per origin. |
-| 503 | `server_busy` / `protection_disposed` | Concurrency seats full (seats plus timed-out handlers still running are one live-work budget) / the protection object was disposed — create a new one. |
+| 503 | `server_busy` / `origin_seat_limit` / `protection_disposed` | Concurrency seats full (seats plus timed-out handlers still running are one live-work budget) / one origin holds its full seat share while the server still has room (see `BridgeConfig.maxSeatsPerOrigin`) / the protection object was disposed — create a new one. |
 | 504 | `handler_timeout` | Your handler exceeded `handlerTimeout`; the seat is freed and the late result ignored. **The command may still have run** — treat 504 as "outcome unknown", not "not executed": a blind retry can double-execute. Deduplicate on `X-Correlation-Id` before retrying — the page sends its own id and the bridge echoes it back unchanged on a retry; a server-generated id is not one you can settle on when a reply is lost. |
 | 500 | `internal` / your code / `command_failed` | Handler failure; `command_failed` is the fallback code when your handler fails without one (set `BridgeConfig.fallbackErrorCode` to keep an existing wire contract). Host error *text* is echoed only to trusted origins; everyone gets the code. |
 
@@ -604,11 +605,24 @@ nothing listens in this release, and another local program can listen on
   and pairing tallies). Only the explicit
   `LocalIntakeServer.noHandlerTimeout` constant removes the deadline —
   null selects the configured default budget — and under it sixteen
-  stuck handlers still mean every command is answered `503
-  server_busy`. A handler may also read the cooperative cancel signal
+  stuck handlers still mean every further sender is refused (`503
+  server_busy` past the global cap, `503 origin_seat_limit` past its
+  own share). A handler may also read the cooperative cancel signal
   (`TrustedCommand.cancellation`) — the intake fires it at the budget
   expiry and at stop — and the host may watch
   `onOrphanSettled` for each orphan settlement.
+- One sender cannot monopolize the seats: `BridgeConfig.maxSeatsPerOrigin`
+  (default 4 of the 16) bounds the seats a single origin holds at once,
+  requests without an `Origin` header share one originless bucket under
+  the same cap, and an `OPTIONS` preflight counts into its origin's
+  share exactly like a command. The gate lives inside the global seats:
+  the full server still answers `server_busy` first, a value at or above
+  `maxConcurrentRequests` never binds, and one origin filling its share
+  never deducts from another origin's — each sender is bounded by its
+  own bucket. The pairing layer's session and record caps are
+  protection-state limits, not seats: a paired page's signed requests
+  count into its origin's seat share like any other request. Past the
+  share the sender reads `503 origin_seat_limit`.
 - `BridgeConfig.extraHosts` adds host authorities the server answers for
   (a bare name matches `name:boundPort` too, like the built-ins). Every
   entry must be a name you control that resolves to this machine — a

@@ -176,6 +176,10 @@ void main() {
               perOriginPerMinute: 1000,
             ),
           ),
+        // موضوع الشاهد السقف العام ومعرف الارتباط في رفض الانشغال لا
+        // حصص الأصول — الشوارع الستة عشر من أصل واحد فالسقف لكل أصل
+        // يُرفع صراحة للمشهد الأصلي
+        config: const BridgeConfig(maxSeatsPerOrigin: 16),
       );
       final port = await slowServer.start(preferredPort: 0);
       addTearDown(() => slowServer.stop());

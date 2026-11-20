@@ -709,6 +709,10 @@ List<_Scenario> _scenarios() {
       final srv = await _listen(
         _server(
           pr: _allowlist(),
+          // مشهد البوابة العامة بنيةً: ستة عشر حاجزاً من أصل واحد —
+          // وسقف مقاعد المرسل الواحد يُرفع صراحة كي يبقى المشهد
+          // مسارَ server_busy لا مسار حصة الأصل
+          config: const BridgeConfig(maxSeatsPerOrigin: 16),
           onCommand: (cmd) {
             entered.add(Completer<void>()..complete());
             final release = Completer<CommandOutcome>();
@@ -724,6 +728,50 @@ List<_Scenario> _scenarios() {
       }
       final sw = Stopwatch()..start();
       while (entered.length < 16 && sw.elapsed < const Duration(seconds: 5)) {
+        await Future<void>.delayed(const Duration(milliseconds: 10));
+      }
+      final link = await _Link.open(
+        srv.port,
+        _head(srv.port, origin: 'https://portal.example'),
+      );
+      return _Walk(srv, link, () async {
+        for (final r in releases) {
+          if (!r.isCompleted) r.complete(const CommandOutcome(ok: true));
+        }
+        for (final f in holders) {
+          await f.timeout(const Duration(seconds: 5), onTimeout: () => (0, ''));
+        }
+      }, preBody: true);
+    },
+  ));
+
+  // 503 - the per-origin seat share, the same immediate-cut family as
+  // the busy gate: one origin holds its full share and the next request
+  // over an unread body is refused past it
+  cases.add((
+    code: 'origin_seat_limit',
+    preBody: true,
+    run: () async {
+      final entered = <Completer<void>>[];
+      final releases = <Completer<CommandOutcome>>[];
+      final srv = await _listen(
+        _server(
+          pr: _allowlist(),
+          onCommand: (cmd) {
+            entered.add(Completer<void>()..complete());
+            final release = Completer<CommandOutcome>();
+            releases.add(release);
+            return release.future;
+          },
+        ),
+      );
+      // أربعة مقاعد حصّة الأصل كاملة، والخامس فوق جسم غير مقروء
+      final holders = <Future<(int, String)>>[];
+      for (var i = 0; i < 4; i++) {
+        holders.add(_post(srv.port, origin: 'https://portal.example'));
+      }
+      final sw = Stopwatch()..start();
+      while (entered.length < 4 && sw.elapsed < const Duration(seconds: 5)) {
         await Future<void>.delayed(const Duration(milliseconds: 10));
       }
       final link = await _Link.open(

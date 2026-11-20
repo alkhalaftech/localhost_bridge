@@ -252,6 +252,15 @@ class LocalIntakeServer {
       'config.maxConcurrentRequests',
       config.maxConcurrentRequests,
     );
+    if (config.maxSeatsPerOrigin < 1) {
+      throw ArgumentError.value(
+        config.maxSeatsPerOrigin,
+        'config.maxSeatsPerOrigin',
+        'must be positive - a value below one refuses every origin its '
+            'own seats; raise it toward maxConcurrentRequests to widen a '
+            "sender's share (the global cap still binds first)",
+      );
+    }
     require(
       config.maxJsonElements > 0,
       'config.maxJsonElements',
@@ -419,6 +428,13 @@ class LocalIntakeServer {
   late final Duration _closeGuardWindow = _discardWindow;
 
   int _activeRequests = 0;
+
+  /// Live seats per sender bucket - the key is the normalized Origin
+  /// (`IntakeAdmission.normalizedOrigin`) and `''` is the shared bucket of
+  /// the requests that carried no Origin header. The map is bounded by
+  /// the seats themselves (one entry per held seat, emptied on release),
+  /// so it cannot grow past [BridgeConfig.maxConcurrentRequests].
+  final Map<String, int> _seatsByOrigin = <String, int>{};
 
   /// Handlers still running after their request already timed out (504) and
   /// left - the seat model does not see them, but the work is real: a local
@@ -917,6 +933,10 @@ class LocalIntakeServer {
     nowMs: () => _now,
     windowMs: _warnThrottleWindowMs,
   );
+  late final _WarnThrottle _originBusyWarnThrottle = _WarnThrottle(
+    nowMs: () => _now,
+    windowMs: _warnThrottleWindowMs,
+  );
   late final _WarnThrottle _orphanBusyWarnThrottle = _WarnThrottle(
     nowMs: () => _now,
     windowMs: _warnThrottleWindowMs,
@@ -1198,11 +1218,57 @@ class LocalIntakeServer {
         );
         return;
       }
+      // (سقف المقاعد لكل أصل) الأصل المطبَّع يأتي من سجل القبول، ومن
+      // لا يرسل أصلاً دلو واحد مشترك بسقف مثله. البوابة داخل
+      // المقاعد العامة: الخادم الممتلئ يرد server_busy أولا، وسقف
+      // الأصل لا يخصم من مقاعد أصل آخر — كل مرسل محدود بدلو هو
+      final seatOriginKey = admission.normalizedOrigin ?? '';
+      if ((_seatsByOrigin[seatOriginKey] ?? 0) >= config.maxSeatsPerOrigin) {
+        // كبح السطر نفسه: فيض رفض حصص الأصول سطر واحد في الثانية
+        // على الأكثر، والسطر التالي بعد النافذة يحمل عدد المكتوم،
+        // والرفض نفسه على السلك لكل طلب
+        final line = _originBusyWarnThrottle.admit(
+          'intake origin seat limit: '
+          '${_seatsByOrigin[seatOriginKey] ?? 0} held seats for one sender '
+          '(cap ${config.maxSeatsPerOrigin}) — rejecting',
+        );
+        if (line != null) {
+          telemetry.warn(line, category: BridgeCategory.network);
+        }
+        response.headers.set(
+          'X-Correlation-Id',
+          _sanitizeCorrelationId(_firstHeader(request, 'X-Correlation-Id')),
+        );
+        // الصفحة تقرأ رمزها وتحاول لاحقا: صدى الرفض للمؤهل كالانشغال
+        _echoCors(
+          response,
+          _firstHeader(request, 'Origin'),
+          admitted: admission.echoesCors,
+        );
+        await _replyRejection(
+          response,
+          // القطع الفوري الموثق يقرأه من السجل لا من هذا الموضع
+          code: 'origin_seat_limit',
+          message:
+              'This origin holds its full seat share — retry shortly',
+          bodyFullyRead: false,
+          headOnly: headOnly,
+        );
+        return;
+      }
       _activeRequests++;
+      _seatsByOrigin[seatOriginKey] =
+          (_seatsByOrigin[seatOriginKey] ?? 0) + 1;
       try {
         await _handleRequest(request, response, admission);
       } finally {
         _activeRequests--;
+        final originLeft = (_seatsByOrigin[seatOriginKey] ?? 1) - 1;
+        if (originLeft <= 0) {
+          _seatsByOrigin.remove(seatOriginKey);
+        } else {
+          _seatsByOrigin[seatOriginKey] = originLeft;
+        }
         if (_activeRequests <= 0) {
           // إشارة فراغ المقاعد لمن ينتظرها في stop
           final drain = _drain;

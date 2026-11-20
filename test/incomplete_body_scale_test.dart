@@ -70,6 +70,10 @@ Future<LocalIntakeServer> _startServer({
     onCommand: onCommand ?? (cmd) async => const CommandOutcome(ok: true),
     protection: protection,
     requestTimeout: requestTimeout,
+    // موضوع هذا الملف مقياس مسارات القطع قبل المقعد لا حصص الأصول —
+    // وسقف مقاعد المرسل الواحد يُرفع صراحة كي يبقى مشهد الستة عشر
+    // حاجزاً قبل كتلة الانشغال العام كما وُلد
+    config: const BridgeConfig(maxSeatsPerOrigin: 16),
   );
   await srv.start(preferredPort: 0);
   return srv;

@@ -305,7 +305,12 @@ void main() {
       final srv = _server(
         rec,
         nowMs: () => fakeNow,
-        config: const BridgeConfig(maxConcurrentRequests: 16),
+        config: const BridgeConfig(
+          maxConcurrentRequests: 16,
+          // موضوع الشاهد سطر الكبح لا حصص الأصول — البذرة ستة عشر
+          // من أصل واحد فالسقف لكل أصل يُرفع صراحة هنا
+          maxSeatsPerOrigin: 16,
+        ),
         handlerTimeout: const Duration(milliseconds: 200),
         onCommandCall: () => handlerCalls++,
         handler: () => Completer<CommandOutcome>().future,
@@ -377,7 +382,12 @@ void main() {
       final srv = _server(
         rec,
         nowMs: () => fakeNow,
-        config: const BridgeConfig(maxConcurrentRequests: 2000),
+        config: const BridgeConfig(
+          maxConcurrentRequests: 2000,
+          // موضوع الشاهد سطر كبح مهلة المعالج لا حصص الأصول — وفيض
+          // الألف من أصل واحد يجعل السقف لكل أصل مصارحاً هنا
+          maxSeatsPerOrigin: 2000,
+        ),
         handlerTimeout: const Duration(milliseconds: 30),
         onCommandCall: () => handlerCalls++,
         handler: () async {
@@ -440,7 +450,12 @@ void main() {
       final srv = _server(
         rec,
         nowMs: () => fakeNow,
-        config: const BridgeConfig(maxConcurrentRequests: 2000),
+        config: const BridgeConfig(
+          maxConcurrentRequests: 2000,
+          // موضوع الشاهد القطع الكلية لا حصص الأصول — وفيض الألف من
+          // أصل واحد يجعل السقف لكل أصل مصارحاً هنا
+          maxSeatsPerOrigin: 2000,
+        ),
         requestTimeout: const Duration(milliseconds: 400),
         onCommandCall: () => handlerCalls++,
         handler: () => Completer<CommandOutcome>().future,

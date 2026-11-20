@@ -157,6 +157,9 @@ void main() {
               perOriginPerMinute: 1000,
             ),
           ),
+        // موضوع الشاهد سقف الذاكرة فوق ستة عشر جسماً متزامناً لا حصص
+        // الأصول — سقف مقاعد المرسل الواحد يُرفع صراحة للمشهد الأصلي
+        config: const BridgeConfig(maxSeatsPerOrigin: 16),
       );
       final p = await srv.start(preferredPort: 0);
       addTearDown(srv.stop);
