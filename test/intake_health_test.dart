@@ -696,6 +696,17 @@ void main() {
             'settles - with the default budget the wait is bounded by the '
             'orphan grace instead',
       );
+      // الامتحان الفاصل: لو تصرف الثابت كميزانية قصيرة لتحرر المقعد
+      // عند ميزانيتها ولحق البدء قبل هذا السطر — فالبقاء محتجزاً بعد
+      // هامش واسع هو إثبات «بلا مهلة» الحقيقي
+      await Future<void>.delayed(const Duration(milliseconds: 600));
+      expect(
+        order,
+        isNot(contains('start')),
+        reason:
+            'the hold persists well past any plausible budget break - the '
+            'constant really means no deadline, not a short one',
+      );
 
       release.complete();
       final p2 = await restart.timeout(const Duration(seconds: 5));

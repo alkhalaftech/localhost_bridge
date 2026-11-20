@@ -241,6 +241,20 @@ void main() {
         );
         expect(body, contains('server_busy'));
         expect(calls, 16, reason: 'the seventeenth never reaches the handler');
+        // المقاعد ما زالت محتجزة لا يتيمة: لو تصرف الثابت كميزانية
+        // قصيرة لتحررت المقاعد عند ميزانيتها وصارت عدّادها صفراً
+        expect(
+          srv.counters.activeSeats,
+          16,
+          reason:
+              'the sixteen seats are still held - the constant never '
+              'frees them',
+        );
+        expect(
+          srv.counters.orphanHandlers,
+          0,
+          reason: 'no budget fired, so no orphan exists',
+        );
       } finally {
         never.complete(const CommandOutcome(ok: true));
         for (final f in futures) {
