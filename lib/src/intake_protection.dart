@@ -434,9 +434,10 @@ class _BeyondOutcome {
 /// headers (server-side integrations, or when origins multiply).
 ///
 /// The remembered state is bounded: discovery decisions kept for the
-/// session are capped at 1,000 (oldest evicted), one-time grants at 64,
-/// consent questions open at once at 3, and new questions at 10 per
-/// 10 minutes.
+/// session are capped at 1,000 (at the cap the oldest remembered denial
+/// is evicted before any always-allow; a cap with no denial evicts the
+/// oldest entry), one-time grants at 64, consent questions open at once
+/// at 3, and new questions at 10 per 10 minutes.
 class IntakeProtection {
   /// [nowMs] is an injectable test clock (lock, grant, and quota windows);
   /// the default is an internal monotonic clock owned by the object.
@@ -519,12 +520,26 @@ class IntakeProtection {
 
   /// Persist a discovery decision (always-allow and deny) within the map cap -
   /// used alike by the awaiter and the standalone listener of a late reply.
+  /// At the cap the oldest remembered DENIAL leaves before any always-allow:
+  /// a denial is the cheaper loss (the origin is merely asked again), while
+  /// an always-allow is the user's standing approval a flood of denied
+  /// origins must not wash out. Only a cap holding no denial at all falls
+  /// back to the oldest entry whatever its kind.
   void _rememberConsent(String key, OriginConsent decision) {
     if (decision == OriginConsent.allowOnce) return;
     if (!_consents.containsKey(key)) {
       _consentOrder.addLast(key);
       if (_consentOrder.length > _maxConsents) {
-        _consents.remove(_consentOrder.removeFirst());
+        String? evict;
+        for (final candidate in _consentOrder) {
+          if (_consents[candidate] == OriginConsent.reject) {
+            evict = candidate;
+            break;
+          }
+        }
+        evict ??= _consentOrder.first;
+        _consents.remove(evict);
+        _consentOrder.remove(evict);
       }
     }
     _consents[key] = decision;
