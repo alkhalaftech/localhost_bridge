@@ -304,7 +304,13 @@ jobs:
           cd "$archive"
           dart pub get
           dart analyze --fatal-infos
-          dart test
+          test_status=0
+          dart test --reporter=expanded > "$RUNNER_TEMP/archive_test_out.txt" 2>&1 || test_status=$?
+          grep -E "\[E\]" "$RUNNER_TEMP/archive_test_out.txt" | head -10 | while IFS= read -r line; do
+            echo "::error::${line:0:200}"
+          done || true
+          tail -n 3 "$RUNNER_TEMP/archive_test_out.txt" || true
+          if [ "$test_status" -ne 0 ]; then exit "$test_status"; fi
           # No CR character may survive in any text file of the archive.
           # A scan that errors is a failure, not a pass: only exit 1
           # means "no match".
