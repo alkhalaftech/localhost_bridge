@@ -84,12 +84,19 @@ jobs:
       # A third mention - or one outside the server file - fails the run.
       - name: legacy intake names are gone from lib
         shell: bash
+        # Every grep wraps in ( ... || true) before the count: this step
+        # runs under bash -eo pipefail, where a grep that finds nothing
+        # exits 1 and would fail the assignment - the clean tree is this
+        # gate's pass condition, not its failure. A planted name still
+        # prints a nonzero count and the check below turns it red; a
+        # missing file makes grep exit 2 and the count 0, which fails
+        # the expected srv=2 just the same.
         run: |
-          gen="$(grep -rn 'generatePortalToken' lib | wc -l)"
-          unk="$(grep -rn 'unknown-portal' lib | wc -l)"
-          param="$(grep -rn 'portalToken' lib | wc -l)"
-          legacy="$(grep -rn 'X-Portal-Token' lib | wc -l)"
-          srv="$(grep -c 'X-Portal-Token' lib/src/local_intake_server.dart)"
+          gen="$( (grep -rn 'generatePortalToken' lib || true) | wc -l)"
+          unk="$( (grep -rn 'unknown-portal' lib || true) | wc -l)"
+          param="$( (grep -rn 'portalToken' lib || true) | wc -l)"
+          legacy="$( (grep -rn 'X-Portal-Token' lib || true) | wc -l)"
+          srv="$(grep -c 'X-Portal-Token' lib/src/local_intake_server.dart || true)"
           echo "gen=$gen unk=$unk param=$param legacy=$legacy srv=$srv"
           if [ "$gen" -eq 0 ] && [ "$unk" -eq 0 ] && [ "$param" -eq 0 ] && [ "$legacy" -eq "$srv" ] && [ "$srv" -eq 2 ]; then
             echo "legacy intake names: only the two documented rejection sites remain."
