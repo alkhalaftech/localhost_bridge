@@ -622,6 +622,14 @@ iframe تحتاج الصفحة إلى `allow="loopback-network"` على الوس
 معتم ترفضه سياسةُ الأصول، وفي بعض المتصفحات لا تظهر مطالبة لإطار محمي
 بـsandbox؛ امنحه `allow-same-origin`.
 
+ترويسة الإجابة القديمة للشبكة الخاصة
+(`Access-Control-Allow-Private-Network`) غائبة عمداً عن كل فحص مسبق
+تكتبه هذه الحزمة: التحقق الحي من الصفحات الرسمية للمزودين يوم
+2026-11-22 أثبت أنه لا يوجد متصفح حالي يطلبها. دليل Chrome للوصول إلى
+الشبكة المحلية يقول «DO NOT rely on deprecated Private Network Access
+(PNA) preflight headers» وأن «PNA preflights were never enforced as a
+blocking requirement and are not needed as a fallback» ([دليل Chrome: Local Network Access](https://developer.chrome.com/docs/modern-web-guidance/guides/security/local-network-access) — جُلبت 2026-11-22)؛ وخطة PNA وُضعت على الحجز قبل أي إجبار شاحن ([Chrome: Private Network Access on hold](https://developer.chrome.com/blog/pna-on-hold) — نُشرت 2024-10-09: «This rollout is currently on hold» و«PNA preflights are not currently enforced») وشغّل Chrome مطالبةَ إذن الوصول إلى الشبكة المحلية بديلاً عنها منذ Chrome 142 ([Chrome: Local Network Access](https://developer.chrome.com/blog/local-network-access) — نُشرت 2025-06-09: «Local Network Access replaces that effort, after PNA was put on hold»)؛ وFirefox يسأل الإذن قبل الوصول لأجهزة الشبكة المحلية والقيود مفعلة افتراضياً منذ 153.0 بلا أي ترويسة فحص مسبق ([ملاحظات إصدار Firefox 153.0](https://www.firefox.com/en-US/firefox/153.0/releasenotes/) — 2026-07-21: «Local Network Access restrictions are now enabled by default for all users» و«Firefox requires websites to request permission before connecting to devices on your local network or to apps and services on your device»)؛ وMDN لم تعد توثق الترويسة إطلاقاً — صفحة الترويسة وصفحة مفهوم Private Network Access كلتاهما أجابتا HTTP 404 يوم 2026-11-22، وصفحة [MDN: Local network access](https://developer.mozilla.org/en-US/docs/Web/Security/Defenses/Local_network_access) الحالية (آخر تعديل 2026-08-12) توثق مطالبات الإذن وحدها. وما تعذر تحقيقه من صفحات الشاحنين يومها: أي تصريح من أبل أو WebKit عن فحوص PNA — تدوينة [WebKit Features for Safari 26.2](https://webkit.org/blog/17640/webkit-features-for-safari-26-2) المجلوبة يوم 2026-11-22 لا تسمي الوصول إلى الشبكة المحلية إطلاقاً — فلا ادعاء عن Safari يحمله هذا السطر.
+
 ## منصات المضيف
 
 | المنصة | الحالة | بتاريخ | المصدر |

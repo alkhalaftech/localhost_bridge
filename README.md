@@ -868,6 +868,15 @@ the behavior they share.
 the prompt. The fetch-mode hardening does not depend on any prompt — it
 applies wherever the request arrives.
 
+The legacy Private Network Access answer header
+(`Access-Control-Allow-Private-Network`) is deliberately absent from
+every preflight this package writes: verified against the vendors'
+official pages on 2026-11-22, no current browser asks for it. Chrome's
+Local Network Access guide says "DO NOT rely on deprecated Private
+Network Access (PNA) preflight headers" and "PNA preflights were never
+enforced as a blocking requirement and are not needed as a fallback"
+([Chrome: Local Network Access guide](https://developer.chrome.com/docs/modern-web-guidance/guides/security/local-network-access), fetched 2026-11-22); the PNA rollout was put on hold before any enforcement shipped ([Chrome: Private Network Access on hold](https://developer.chrome.com/blog/pna-on-hold), published 2024-10-09: "This rollout is currently on hold", "PNA preflights are not currently enforced"), and Chrome ships the Local Network Access permission prompt instead, launching in Chrome 142 ([Chrome: Local Network Access](https://developer.chrome.com/blog/local-network-access), published 2025-06-09: "Local Network Access replaces that effort, after PNA was put on hold"); Firefox asks permission before connecting to local devices, the restrictions on by default since 153.0 and no preflight header named ([Firefox 153.0 release notes](https://www.firefox.com/en-US/firefox/153.0/releasenotes/), 2026-07-21: "Local Network Access restrictions are now enabled by default for all users", "Firefox requires websites to request permission before connecting to devices on your local network or to apps and services on your device"); and MDN no longer documents the header at all — the header page and the Private Network Access concept page both answered HTTP 404 on 2026-11-22, and the current [MDN: Local network access](https://developer.mozilla.org/en-US/docs/Web/Security/Defenses/Local_network_access) page (last modified 2026-08-12) documents permission prompts only. What could not be verified on the vendors' own pages that day: any Apple or WebKit statement about PNA preflights — the [WebKit Features for Safari 26.2](https://webkit.org/blog/17640/webkit-features-for-safari-26-2) post fetched on 2026-11-22 names no Local Network Access — so no Safari claim rides this line.
+
 ## Host platforms
 
 | Host platform | Status | As of | Source |
