@@ -320,18 +320,21 @@ class BridgeInstanceInfo {
 /// Resource limits (body cap / timeout / seat cap) apply in every protection
 /// mode - even allow-all - because they are what makes accepting any site memory-safe.
 class LocalIntakeServer {
-  /// Builds the server. [onCommand], [telemetry], and
-  /// [correlationIdGenerator] are required; [protection] defaults to an
-  /// [IntakeProtection] wired to this server's telemetry, and [config]
-  /// defaults to `const BridgeConfig()`. Non-positive caps or timeouts -
-  /// in [config], [requestTimeout], or [handlerTimeout] - throw
+  /// Builds the server. Only [onCommand] is required: [telemetry]
+  /// defaults to the line-writing [PrintTelemetry] (the security warnings
+  /// reach stderr, never swallowed by a missing sink) and
+  /// [correlationIdGenerator] defaults to the internal secure-random
+  /// generator; [protection] defaults to an [IntakeProtection] wired to
+  /// this server's telemetry, and [config] defaults to
+  /// `const BridgeConfig()`. Non-positive caps or timeouts - in
+  /// [config], [requestTimeout], or [handlerTimeout] - throw
   /// [ArgumentError] here at construction, never as mystery rejects on
   /// the wire. [nowMs] is an injectable monotonic test clock.
   LocalIntakeServer({
     int Function()? nowMs,
     required this.onCommand,
-    required this.telemetry,
-    required this.correlationIdGenerator,
+    this.telemetry = const PrintTelemetry(),
+    this.correlationIdGenerator = _defaultCorrelationId,
     IntakeProtection? protection,
     this.config = const BridgeConfig(),
     this.requestTimeout,
@@ -576,11 +579,25 @@ class LocalIntakeServer {
   final TrustedCommandHandler onCommand;
 
   /// The measurement and log seam: the host adapts its own logger, keeping
-  /// intake latency and classification alive.
+  /// intake latency and classification alive. Optional - the default is
+  /// the line-writing [PrintTelemetry], so a host that passes none still
+  /// hears the security warnings (they reach stderr) instead of running
+  /// muted; pass your own sink to route the lines elsewhere.
   final BridgeTelemetry telemetry;
 
-  /// Correlation-id generator - required with no default: the host passes its own.
+  /// Correlation-id generator - the host may pass its own; the default is
+  /// the internal secure-random generator below, so the host passes
+  /// nothing to get unique ids. Only requests that carry no
+  /// `X-Correlation-Id` reach it - an incoming id is honored verbatim and
+  /// never passes through the generator.
   final String Function() correlationIdGenerator;
+
+  /// The internal default correlation-id generator: a wall-clock stamp and
+  /// a secure-random draw, so two calls in the same microsecond still
+  /// differ. One string per call, no state, no dependency beyond dart:.
+  static String _defaultCorrelationId() =>
+      '${DateTime.now().microsecondsSinceEpoch.toRadixString(36)}-'
+      '${Random.secure().nextInt(0x7fffffff).toRadixString(36)}';
 
   /// Optional intake protection (open/allowlist/token) - read live on every
   /// request so a settings change takes effect without restarting the listener.

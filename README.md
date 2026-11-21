@@ -27,6 +27,26 @@ commands *mean* stays entirely in your handler.
 
 ## Quick start
 
+Three lines and a running bridge - the host passes nothing but its
+handler: the telemetry defaults to a sink that writes the security
+warnings to stderr, the correlation ids get an internal secure-random
+generator, and the `mobile` preset arms the paired-host shape (the
+token plus the origin-with-token requirement and pairing):
+
+```dart
+import 'package:localhost_bridge/localhost_bridge.dart';
+
+final server = LocalIntakeServer(
+    onCommand: (cmd) async => const CommandOutcome(ok: true),
+    protection: BridgePresets.mobile(token: generateBridgeToken()));
+final port = await server.start(preferredPort: 9100);
+```
+
+Prefer a different posture? Swap the preset - `closed()`, `allowList()`,
+or `tokenOnly()` (the preset the command-line demo below runs) - each
+one documented in [Ready-made presets](#ready-made-presets) below. The
+rest of this section walks the full setup, every knob named:
+
 ```dart
 import 'dart:math';
 import 'package:localhost_bridge/localhost_bridge.dart';
@@ -82,11 +102,13 @@ void main() async {
       print('from ${cmd.source}: ${cmd.payloads}');
       return const CommandOutcome(ok: true);
     },
-    // Required: your telemetry sink — print the warnings while you wire
-    // the bridge up; the silent sink hides the security lines.
+    // Optional: your telemetry sink — the default already writes the
+    // security warnings to stderr; this custom sink keeps them in your
+    // own log (the silent sink hides the security lines entirely).
     telemetry: telemetry,
-    // Required: correlation ids — any unique string per request. A
-    // Random.secure-based UUID-v4-style generator lives in example/main.dart.
+    // Optional: correlation ids — an incoming X-Correlation-Id is honored
+    // verbatim, and requests without one already get an id from the
+    // internal secure-random generator. Pass your own to shape the ids.
     correlationIdGenerator: () =>
         '${DateTime.now().microsecondsSinceEpoch.toRadixString(16)}'
         '-${Random.secure().nextInt(1 << 32).toRadixString(36)}',
@@ -186,6 +208,47 @@ curl -X POST http://127.0.0.1:9100/ \
   -H "X-Bridge-Token: $BRIDGE_TOKEN" \
   -d '{"data": ["your-command"]}'
 ```
+
+## Ready-made presets
+
+`BridgePresets` returns a fully built `IntakeProtection` for one of four
+postures; each factory's policy is exactly the shape its row names, so
+you can assert what you shipped:
+
+| Preset | The policy it arms | What admits |
+|---|---|---|
+| `BridgePresets.closed()` | The closed shape: empty list, no allow-all, no discovery, pairing disarmed, no token | Nothing - every page and every token attempt reads `403 origin_not_listed` |
+| `BridgePresets.allowList(origins: [...])` | Your origins stored with the standing normalization and matched like every listed entry; everything else stays off | Listed origins alone |
+| `BridgePresets.tokenOnly(token: ...)` | The policy stays closed and the token is the one door; `requireOriginWithToken` stays off (the token crosses its own independent path) | A correct `X-Bridge-Token` from a headerless local client; everything else reads the origin rejection - a wrong token learns nothing about itself |
+| `BridgePresets.mobile(token: ..., origins: [...])` | `requireOriginWithToken: true` plus pairing armed (the paired-host shape) | An origin carrying its proof: the shared token, or a paired origin-bound signature; a qualified origin without proof reads `403 token_required`, and the token alone never admits |
+
+None of the four opens allow-all and none of them arms discovery - the
+widest thing a preset can produce is your own origin list. Token
+validation is the standing one: a token below the 32-byte floor, over
+the header cap, or too low in character diversity throws at build
+time, so a preset never arms a token the wire would refuse. `mobile`
+is the preset a mobile host starts from: it pairs the pages it serves,
+and pages the bridge itself serves qualify on their own while the
+local-pages option is armed; any external origins it lists go beside
+them.
+
+### Try it in a minute from the command line
+
+`bin/bridge_demo.dart` runs a real bridge on the `tokenOnly` preset: it
+generates its own token, prints it with the port it bound, a ready
+`curl` carrying that exact token, and the stop method - then serves
+commands. It accepts only `--port <n>`: an allow-all or discovery
+opener cannot be passed to it, and any other argument refuses loudly
+before anything binds:
+
+```bash
+dart bin/bridge_demo.dart              # from a checkout of the package
+dart run localhost_bridge:bridge_demo  # from any project that depends on it
+```
+
+Ctrl+C stops it - the listener drains and closes cleanly (a SIGINT
+watch; sigint is watchable on Windows too, per dart:io's `ProcessSignal.watch`
+docs, [verified 2026-11-22](https://api.dart.dev/stable/dart-io/ProcessSignal/watch.html)).
 
 ## Security model — read before choosing a policy
 
@@ -333,8 +396,14 @@ CommandOutcome handle(TrustedCommand cmd) {
 }
 ```
 
-The decision to keep this class in the public API or remove it is
-deferred to a later release; treat it as provisional.
+The class is settled as **experimental** in 0.2.0: it stays in the
+public API as a standalone host-side tool and stays deliberately
+unwired from the server - its facts (the fingerprint, the budgets) are
+yours to record, and the bridge's own admission path enforces its
+per-origin budgets on the wire without it. Depend on it as a helper,
+not as a package guarantee; whether it graduates to a wired option or
+leaves the API is a question for a future major release, decided by
+how hosts actually use it.
 
 ## Wire contract (what your page sees)
 

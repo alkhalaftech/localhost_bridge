@@ -544,6 +544,16 @@ class IntakeProtection {
 
   /// Called after every rejection so the counter refreshes live in the UI -
   /// with no subscriber (the protection object also runs inside the intake with no UI).
+  ///
+  /// Kept for hosts until the planned removal: the admission record is the
+  /// single rejection surface, and the counter remains readable on its own.
+  @Deprecated(
+    'Refresh your UI from the admission records you settle - a record '
+    'whose rejection field is non-null is a rejection - and route '
+    'rejections decided outside the protection through '
+    'IntakeAdmission.noteAuthorityReject; or read the rejectedCount '
+    'getter (removal planned in 0.3.0)',
+  )
   void Function()? onRejected;
 
   /// Fired exactly once when a consent question window ends - the answer
@@ -1652,6 +1662,17 @@ class IntakeProtection {
   /// [maxBridgeTokenHeaderBytes] header cap - boots the token layer inert
   /// (fail-closed) with one security warning naming the rotation path;
   /// updateFromSaved never throws.
+  ///
+  /// Kept for hosts until the planned removal: the policy objects are the
+  /// single shape now, and [update] validates at set time instead of
+  /// landing a corrupt saved value on a silent fallback.
+  @Deprecated(
+    'Build the OriginPolicy from your own saved settings and call '
+    'update(policy: ..., token: ...) - it validates the token and the '
+    'policy numbers at set time and names the mistake, instead of '
+    'landing an unknown savedMode string on the closed default in '
+    'silence (removal planned in 0.3.0)',
+  )
   void updateFromSaved({
     required String? savedMode,
     List<String> allowedOrigins = const [],

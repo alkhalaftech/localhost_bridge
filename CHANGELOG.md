@@ -401,6 +401,44 @@
   browser send-method checks, listed quota, and seat caps as a
   listed origin, while any other loopback origin (another port
   included) stays refused exactly as before.
+- Added: the four protection presets - `BridgePresets.closed()`,
+  `allowList(origins:)`, `tokenOnly(token:)`, and
+  `mobile(token:, origins:)` (the paired-host shape: the token plus
+  `requireOriginWithToken` and pairing armed with the host's
+  callbacks). Each preset returns an `IntakeProtection` whose policy is
+  exactly the shape its documentation names, none of them opens
+  allow-all and none arms discovery, and the standing token validation
+  runs at build time - a preset never arms a token the wire would
+  refuse.
+- Added: `LocalIntakeServer.telemetry` and
+  `LocalIntakeServer.correlationIdGenerator` are optional - the host
+  passes nothing to get sensible defaults. Telemetry defaults to the
+  line-writing `PrintTelemetry` (security warnings reach stderr;
+  pass `SilentTelemetry` to hide them), and correlation ids default to
+  an internal secure-random generator; an incoming `X-Correlation-Id`
+  is still honored verbatim and never passes through the generator.
+- Added: `bin/bridge_demo.dart` - a token-only bridge a host can try
+  from the command line in a minute (`dart bin/bridge_demo.dart`, or
+  `dart run localhost_bridge:bridge_demo` from a depending project).
+  It generates and prints its own token with the bound port, a ready
+  `curl` carrying that token, and the stop method; it serves real
+  commands with that token and refuses every argument beyond
+  `--port <n>` loudly before anything binds - an allow-all or
+  discovery opener cannot be passed to it.
+- Deprecated: `IntakeProtection.updateFromSaved` - build the
+  `OriginPolicy` from your own saved settings and call
+  `update(policy:, token:)`, which validates at set time instead of
+  landing an unknown mode string on the closed default in silence; and
+  `IntakeProtection.onRejected` - refresh from the admission records
+  you settle (a record with a non-null `rejection` is a rejection; the
+  outside ones ride `IntakeAdmission.noteAuthorityReject`), or read
+  the `rejectedCount` getter. Both keep working unchanged; removal is
+  planned for 0.3.0.
+- Changed: `ArrivalGuard` settles as an experimental host-side tool -
+  it stays in the public API as a standalone meter you record arrival
+  facts into and stays deliberately unwired from the server's admission
+  path (the intake never calls it; the wire enforces its per-origin
+  budgets without it).
 
 ## 0.1.3
 

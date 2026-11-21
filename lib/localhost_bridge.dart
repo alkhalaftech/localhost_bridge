@@ -6,6 +6,7 @@ library;
 
 export 'src/arrival_guard.dart';
 export 'src/bridge_config.dart';
+export 'src/bridge_presets.dart';
 export 'src/bridge_telemetry.dart';
 export 'src/command_dedup.dart';
 export 'src/intake_protection.dart';
