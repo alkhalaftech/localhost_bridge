@@ -578,6 +578,29 @@ void main() {
           'is split, the whole character is dropped instead',
     );
     server.stop();
+    // وسقفٌ دون أول محرف يقص إلى رسالة فارغة: التراجع إلى بداية المحرف
+    // لا يتخطاه — فلا نصف محرف يسافر ولا محرف كامل فوق حده
+    final tinyCap = _server(
+      config: const BridgeConfig(maxErrorMessageLength: 1),
+      onCommand: (cmd) async => const CommandOutcome(
+        ok: false,
+        errorCode: 'e',
+        errorMessage: 'أهلاً',
+      ),
+    );
+    server = tinyCap;
+    await tinyCap.start(preferredPort: 0);
+    final emptied = await _post(tinyCap);
+    expect(emptied.status, 500);
+    final emptiedFields = jsonDecode(emptied.body) as Map<String, Object?>;
+    expect(
+      emptiedFields['message'],
+      '',
+      reason:
+          'a one-byte cap under a two-byte character truncates to an '
+          'empty message - the cut backs off below the first character',
+    );
+    server.stop();
     // والقصيرة تعبر بمحارفها كلها ما دامت بايتاتها تحت السقف
     final shortServer = _server(
       config: const BridgeConfig(maxErrorMessageLength: 12),
