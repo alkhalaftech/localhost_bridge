@@ -12,6 +12,13 @@ topics:
   - security
   - local-network
 
+# The browser lab's throwaway TLS key: a self-signed loopback-only
+# fixture (127.0.0.1/localhost, guards nothing) embedded so the lab
+# runs without an openssl dependency at test time. Declared here as an
+# intentional false positive for the secret scanner.
+false_secrets:
+  - test/browser_lab_test.dart
+
 environment:
   sdk: ^3.8.0
 
