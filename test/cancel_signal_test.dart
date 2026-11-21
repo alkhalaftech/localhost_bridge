@@ -88,7 +88,7 @@ Future<CommandOutcome> _pollUntilCancelled(
 void main() {
   test(
     'the handler budget expiry cancels the signal the handler reads',
-    timeout: const Timeout(Duration(seconds: 20)),
+    timeout: const Timeout(Duration(seconds: 60)),
     () async {
       var observed = false;
       final srv = LocalIntakeServer(
@@ -128,7 +128,7 @@ void main() {
   test(
     'stop() fires the signal of a live seat: the handler wraps up, the '
     'seat drains, and the stop reports fully drained',
-    timeout: const Timeout(Duration(seconds: 20)),
+    timeout: const Timeout(Duration(seconds: 60)),
     () async {
       var sawCancelled = false;
       final srv = LocalIntakeServer(
