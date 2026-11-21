@@ -106,12 +106,22 @@ jobs:
           fi
 
       # The github reporter puts pass/fail/skip counts in the step
-      # summary and each failure in the run's annotations, so a red
-      # matrix run names its test without opening the job log - the
-      # runner class is slower than any dev machine, which is where
-      # timing-sensitive tests break first.
+      # summary, and the post-run grep repeats each failing test line
+      # as its own error annotation - the counts alone say how many,
+      # the lines say which, so a red matrix run names its test
+      # without opening the job log. The runner class is slower than
+      # any dev machine, which is where timing-sensitive tests break
+      # first.
       - name: test
-        run: dart test --reporter=github
+        shell: bash
+        run: |
+          status=0
+          dart test --reporter=github > "$RUNNER_TEMP/test_out.txt" 2>&1 || status=$?
+          grep -E "\[E\]" "$RUNNER_TEMP/test_out.txt" | head -10 | while IFS= read -r line; do
+            echo "::error::${line:0:200}"
+          done || true
+          tail -n 3 "$RUNNER_TEMP/test_out.txt" || true
+          exit "$status"
 
   browser-lab:
     # The real-browser lab (test/browser_lab_test.dart): a system
