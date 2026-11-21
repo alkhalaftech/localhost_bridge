@@ -152,8 +152,10 @@
   millisecond wall-clock stamp, the method, the path, and the
   correlation id, and presents the proof in `X-Bridge-Pairing`: the raw
   paired token never travels after pairing day. The stamp accepts one
-  minute of clock skew; a reused or stale stamp answers `403
-  pair_signature_replay`; verification compares constant-time, the
+  minute of clock skew; a reused proof or a stale stamp answers `403
+  pair_signature_replay` (the replay cache keys the full proof, so two
+  different commands signed within the same millisecond never collide);
+  verification compares constant-time, the
   origin binding is checked before any token verdict, and an unqualified
   origin never learns whether its proof was valid.
 - Deprecated: the per-question protection probes (`check`,

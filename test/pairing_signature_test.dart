@@ -128,7 +128,7 @@ void main() {
   });
 
   test('a replayed signature is refused pair_signature_replay: the same '
-      'stamp never proves twice', () async {
+      'proof never proves twice', () async {
     final (pr, token, pairingId) = _strictPaired();
     final proof = _sign(token: token, pairingId: pairingId);
     final first = await pr.admit(
@@ -144,13 +144,55 @@ void main() {
     second.settle();
     expect(second.rejection?.code, 'pair_signature_replay');
     expect(second.rejection!.status, 403);
-    // وتوقيع آخر بطابع آخر يعبر فورا — الإعادة تحكم الطابع لا الطبقة
+    // وتوقيع آخر بطابع آخر يعبر فورا — الإعادة تحكم الإثبات لا الطبقة
     final fresh = await pr.admit(
       origin: 'https://portal.example',
       pairingProof: _sign(token: token, pairingId: pairingId),
     );
     fresh.settle();
     expect(fresh.rejection, isNull);
+  });
+
+  test('two different proofs stamped at the same millisecond both pass - '
+      'the replay cache keys the proof, not the clock tick', () async {
+    // الصفحة السريعة توقّع أمرين مختلفين في الملي ثانية نفسها: الطابع
+    // واحد والتوقيعان مختلفان (معرّفا ارتباط مختلفان) — مفتاح الإعادة
+    // بالإثبات الكامل لا بالطابع وحده، فلا يُرفض الأمر الثاني زورا
+    // بإعادةٍ لم تحدث (وهذا بعينه كان يسقط الشاهد السابق على عدّاء
+    // بطيء حيث تُوقَّع الطلبات الثلاثة داخل مِلّي واحد)
+    final (pr, token, pairingId) = _strictPaired();
+    final stamp = DateTime.now().millisecondsSinceEpoch;
+    final first = await pr.admit(
+      origin: 'https://portal.example',
+      correlationId: 'same-ms-a',
+      pairingProof: _sign(
+        token: token,
+        pairingId: pairingId,
+        correlationId: 'same-ms-a',
+        stampOverride: stamp,
+      ),
+    );
+    first.settle();
+    expect(first.rejection, isNull);
+    final second = await pr.admit(
+      origin: 'https://portal.example',
+      correlationId: 'same-ms-b',
+      pairingProof: _sign(
+        token: token,
+        pairingId: pairingId,
+        correlationId: 'same-ms-b',
+        stampOverride: stamp,
+      ),
+    );
+    second.settle();
+    expect(
+      second.rejection,
+      isNull,
+      reason:
+          'a fresh proof over the same millisecond is a different command, '
+          'not a replay of the first (got '
+          '${second.rejection?.code})',
+    );
   });
 
   test('a stale signature (outside the skew window) is refused as a replay '

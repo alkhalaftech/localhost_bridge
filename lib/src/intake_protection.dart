@@ -1200,14 +1200,15 @@ class IntakeProtection {
   /// cache matters). No third case.
   static const _pairReplayWindowMs = 120_000;
 
-  /// Cap on replay-cache entries (pairingId + stamp keys): the oldest
-  /// inserted is evicted past it. The cache ceiling is the worst case for
-  /// memory, never an open replay door - a stamp outside the skew window
-  /// refuses whatever its cache fate was.
+  /// Cap on replay-cache entries (pairingId + stamp + signature keys): the
+  /// oldest inserted is evicted past it. The cache ceiling is the worst
+  /// case for memory, never an open replay door - a stamp outside the skew
+  /// window refuses whatever its cache fate was.
   static const _maxPairReplayEntries = 4096;
 
-  /// The replay cache: `(pairingId.stamp)` -> first-seen reading. The
-  /// projection reads it (a pure read); settle records into it.
+  /// The replay cache: `(pairingId.stamp.signature)` -> first-seen
+  /// reading. The projection reads it (a pure read); settle records into
+  /// it.
   final Map<String, int> _pairReplay = <String, int>{};
   int _nextPairReplaySweepMs = 0;
 
@@ -1258,7 +1259,12 @@ class IntakeProtection {
     if ((serverEpoch - stampMs).abs() > _pairStampSkewMs) {
       return _PairCheck.bad('stale', replay: true);
     }
-    final replayKey = '$id.$stampText';
+    // مفتاح الإعادة بالإثبات الكامل (المعرف والطابع والتوقيع): إعادة
+    // الإثبات الأسير بعينها تصل بمفتاحها نفسه فتُرفض، بينما أمران
+    // مشروعان وقّعتهما الصفحة داخل الملي ثانية نفسها (طابع واحد
+    // وتوقيعان مختلفان لاختلاف معرف الارتباط) لا يتصادمان — الطابع
+    // وحده كان يرفض الثاني زورا بإعادة لم تحدث
+    final replayKey = '$id.$stampText.$sigHex';
     if (_pairReplay.containsKey(replayKey)) {
       return _PairCheck.bad('reused-stamp', replay: true);
     }
