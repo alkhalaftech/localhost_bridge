@@ -571,6 +571,28 @@ final bridge = LocalIntakeServer(
 البدء على المسار نفسه تعيد الربط نظيفة. وسقف الاتصالات المفتوحة يحسب
 هذا المستمع أيضاً.
 
+**مستمع TLS الاختياري** — ‏`BridgeConfig.securityContext` (سياق
+`SecurityContext` جاهز يمرره المضيف) يربط مستمعات الجسر البروتوكولية —
+مستمع `127.0.0.1` ومستمع الـ`::1` الاختياري — عبر
+`HttpServer.bindSecure`، فيصير العنوان الذي تستعمله الصفحة
+`https://127.0.0.1:<port>` (و`wss://` لقناة الويب سوكيت)، وأصل الصفحة
+المحلية المُخدمة يتسلح بصيغته `https://`. هذا هو الشرط الذي تسميه
+Safari وWebKit بنفسهما: فاحص المحتوى المختلط عندهما يعامل عنوان الحلقة
+الراجعة على HTTP الخام بوصفه غير آمن «ما لم يُحمَّل عبر HTTPS» (انظر
+جدول دعم المتصفحات أدناه). الحزمة لا تولّد شهادة ولا تثبت أو تثق
+بواحدة ولا تقرأ أو تكتب أي ملف لأجل TLS: أنت تمرر سياقاً يحمل سلسلة
+شهادة ومفتاحها الخاص، وثقة الجهاز بهذه الشهادة مسؤوليتك وحدك — وتثبيت
+جهة إصدار محلية على جهاز قرار يُوازن بمخاطره (الجهاز سيؤمن بكل ما توقّعه
+تلك الجهة، لكل تطبيق عليه، حتى تزيلها). خطوة القبول ورموز السلك
+والسقوف وعقد الردود كلها بايتاً ببايت نفسها على النقلين. والخيار مطفأ
+افتراضياً: بترك `securityContext` بلا قيمة يبقى كل مسار ربط حرفاً
+مطابقاً والمنفذ يتكلم HTTP خاماً. وضبطه مع `unixSocketPath` يرمي
+`ArgumentError` عند البناء — dart:io لا يملك ربطاً آمناً لمقبس يونكس،
+ومستمع يبقى عارياً بصمت تحت خيار TLS يوعد حماية لا يوصلها. ومختبر
+شاهد Safari الحقيقي على ماك تملكه: ‏`dart run
+tool/safari_https_loopback_lab.dart --cert <pem> --key <pem>` (الأداة
+تطبع خطواتها وتقرأ أعلامها؛ ولا تولّد شهادة ولا تثبتها).
+
 **‏`pause()` و`resume()`** — ‏ثنائية دورة حياة الجوال: ‏`pause()` تغلق
 كل مستمع مربوط تحت الفراغ الرشيق نفسه الذي تجريه `stop()` (الردود
 المتوسطة تكمل، والمقاعد تُنتظر، واليتامى لميزانيتهم) وتحفظ المنفذ
@@ -612,7 +634,7 @@ Chromium، فمصادر Chromium في هذا الجدول هي حاكمة للس
 | Chrome وEdge (سطح المكتب وAndroid) | صدر — المتصفح يسأل المستخدم إذنَ الوصول إلى الشبكة المحلية | 2026-11-15 | [Chrome: Local Network Access](https://developer.chrome.com/blog/local-network-access) · [ملاحظات إصدار Chrome 142](https://chromestatus.com/release-notes/142) |
 | Firefox (سطح المكتب 153+) | صدر — بمطالبة الإذن نفسها مفعلة افتراضياً | 2026-11-15 | [Firefox 153.0 release notes](https://www.mozilla.org/en-US/firefox/153.0/releasenotes/) |
 | Firefox (Android 160+) | صدر — وجبة إصدارات الشاحن تعد 160.0 لحظة إعادة التحقق | 2026-11-15 | [تفاصيل منتج موزيلا: إصدارات فايرفوكس لأندرويد](https://product-details.mozilla.org/1.0/mobile_versions.json) · [تقويم إصدارات موزيلا](https://wiki.mozilla.org/Release_Management/Calendar) |
-| Safari وكل متصفحات iOS المبنية على WebKit | غير مدعوم — WebKit يحجب `http://127.0.0.1` من صفحة `https` بوصفه محتوى مختلطاً، بلا مطالبة إذن تعفيه. أبل تسمح بمحركات أخرى في الاتحاد الأوروبي (iOS 17.4+)؛ ولا واحد منها مختبر هنا | 2026-11-15 | [WebKit bug 171934](https://bugs.webkit.org/show_bug.cgi?id=171934) · [Apple: alternative browser engines](https://developer.apple.com/support/alternative-browser-engines) |
+| Safari وكل متصفحات iOS المبنية على WebKit | غير مدعوم على HTTP الخام — فاحص المحتوى المختلط في WebKit نفسه يعامل عنوان الحلقة الراجعة على HTTP الخام بوصفه غير آمن «ما لم يُحمَّل عبر HTTPS» ([WebKit bug 281149](https://bugs.webkit.org/show_bug.cgi?id=281149)، مُعاد فتحه، آخر تغيير 2026-04-20، جُلب 2026-11-22)؛ وطلبات الإعفاء بمستوى المواصفة ما تزال مفتوحة ([WebKit bug 171934](https://bugs.webkit.org/show_bug.cgi?id=171934)، حالة NEW بنشاط إلى 2026-08-19، جُلب 2026-11-22 · [WebKit bug 218623](https://bugs.webkit.org/show_bug.cgi?id=218623)، حالة NEW، جُلب 2026-11-22)، وصفحة المحتوى المختلط في MDN (آخر تعديل 2026-08-15، جُلبت 2026-11-22) تسمي Safari المتصفحَ الذي يحجب افتراضياً كل المحتوى المختلط بينما تبقى أصول الحلقة الراجعة سياقات آمنة بوصفها أصولاً. وخيار TLS أعلاه هو الشرط الذي يسميه فاحص WebKit حرفاً («ما لم يُحمَّل عبر HTTPS») — لكن هل يقبُل إصدار Safari شاحن حالي `https://127.0.0.1` بشهادة موثوقة في الجهاز **لا يُدَّعى هنا**: فهو شاهد مختبر الأجهزة (`tool/safari_https_loopback_lab.dart`)، غير متحقق إلى أن يشغّله ماك بشهادة موثوقة. أبل تسمح بمحركات أخرى في الاتحاد الأوروبي (iOS 17.4+)؛ ولا واحد منها مختبر هنا | 2026-11-22 | [WebKit bug 281149](https://bugs.webkit.org/show_bug.cgi?id=281149) · [WebKit bug 171934](https://bugs.webkit.org/show_bug.cgi?id=171934) · [MDN: Mixed content](https://developer.mozilla.org/en-US/docs/Web/Security/Defenses/Mixed_content) · [Apple: alternative browser engines](https://developer.apple.com/support/alternative-browser-engines) |
 | Android WebView | غير مختبَر هنا — بلا مطالبة إذن خاصة به؛ الوصول يخضع لصلاحيات التطبيق الذي يضمّ الـ WebView. وعلى Android 17 ترث حركة WebView حالة إذن الشبكة المحلية من التطبيق المضيف، وإذن `ACCESS_LOCAL_NETWORK` لمن يستهدف SDK 37 فقط؛ وتعريف «الشبكة المحلية» الرسمي لا يذكر loopback | 2026-11-15 | [Android: local network permission](https://developer.android.com/privacy-and-security/local-network-permission) · [Android: local network definition](https://developer.android.com/privacy-and-security/local-network-definition) |
 
 «صدر» تعني أن الصفحة ترسل وتقرأ الرد بعد منح المستخدم الإذن. وتحصين
@@ -636,7 +658,7 @@ blocking requirement and are not needed as a fallback» ([دليل Chrome: Local
 |---|---|---|---|
 | سطح المكتب (Windows وmacOS وLinux) | صدر — نموذج خادم الحلقة الراجعة المعتاد؛ Windows وLinux بلا بوابة منصة، ومضيف macOS داخل App Sandbox يحتاج الاستحقاق `com.apple.security.network.server` | 2026-11-15 | [Apple: App Sandbox entitlements](https://developer.apple.com/documentation/bundleresources/entitlements/com.apple.security.network.server) |
 | Android | صدر — خادم حلقة راجعة داخل التطبيق؛ شغّل التطبيق في الواجهة أو خلف خدمة أمامية وإلا فقد يوقفه النظام. يصل إليه Chrome وFirefox بعد منح المستخدم إذن الشبكة المحلية. وعلى Android 17 حركة الحلقة الراجعة بين ملفين شخصيين (العمل والشخصي) ممنوعة افتراضياً لكل التطبيقات مهما كان targetSdk، وداخل الملف الواحد لا تتأثر. على Android يستطيع أي تطبيق مثبت أن يصل إلى المنفذ ويرسل أي `Origin`، فشرط الأصل مع التوكن مع الاقتران هو الحاجز الحقيقي هناك: تقترن الصفحة برمز معروض لمرة واحدة وتثبت حيازتها بتواقيع حممية — ويستطيع التطبيق المثبت تقديم الأصل المدرج نفسه لكنه لا يستطيع التوقيع. والعملاء الأصليون على الجهاز يرسلون التوكن المشترك. وبالخيار مطفأً (الافتراضي) تقدّم صفحة المتصفح التوكن حيثما يُجاب لها الفحص المسبق حصراً: أصل مدرج، أو أي أصل https صالح لم يُرفض بعد في وضعَي الاكتشاف و«الكل-المحصَّن» — ويستطيع تطبيق مثبت آخر تقديم الأصل المدرج نفسه. وجهة المحاكي من قصة الاقتران تُشغَّل بـ`dart run tool/emulator_pairing_lab.dart` (تطبع أوامر adb reverse وعنوان الصفحة، وتقرأ الأحكام من مجمّع تقارير الصفحة). | 2026-11-18 | [Android: local network permission](https://developer.android.com/privacy-and-security/local-network-permission) · [Android 17 behavior changes](https://developer.android.com/about/versions/17/behavior-changes-all) |
-| iOS | غير مختبَر هنا — لا مسار متصفح: WebKit يحجب `http://127.0.0.1` من صفحات `https` (محتوى مختلط)، ونظام iOS يعلّق مقابس التطبيق حين ينتقل للخلفية | 2026-11-15 | [WebKit bug 171934](https://bugs.webkit.org/show_bug.cgi?id=171934) |
+| iOS | غير مختبَر هنا — لا مسار متصفح متحقق: WebKit يعامل عنوان الحلقة الراجعة على HTTP الخام بوصفه غير آمن «ما لم يُحمَّل عبر HTTPS» (محتوى مختلط — صف Safari أعلاه، جُلب 2026-11-22)، ونظام iOS يعلّق مقابس التطبيق حين ينتقل للخلفية | 2026-11-22 | [WebKit bug 281149](https://bugs.webkit.org/show_bug.cgi?id=281149) · [WebKit bug 171934](https://bugs.webkit.org/show_bug.cgi?id=171934) |
 
 ### المضيف على الجوال (‏Android وiOS) — تحقق 2026-11-21
 
@@ -741,6 +763,12 @@ blocking requirement and are not needed as a fallback» ([دليل Chrome: Local
   (`BridgeConfig.listenIPv6Loopback`) ومستمع مقبس اليونكس الاختياري
   (`BridgeConfig.unixSocketPath`، على Linux/macOS) لا ينضمان إلا
   مسلحين — وعنوان غير حلقي أو مواجه للشبكة لا أبداً.
+- نقل TLS يرث من dart:io حقيقة ما-قبل-المصافحة ويصرّح بها: عميل TCP
+  يتصل بمنفذ TLS ولا يكمل المصافحة أبداً لا يحجز مقعداً ولا يصل إلى
+  الخادم أصلاً — لكن dart:io لا يكشف طريقة عامة لسقف تلك النافذة،
+  فالمقبس يبقى مفتوحاً في طبقة النقل حتى يغلق المستمع (ولا تلتقطه
+  stop القسرية). ومضيف يخدم TLS على شبكة معادية يحمي المنفذ أمامها
+  بضوابط المقابس الخاصة به.
 - تعشيش JSON مسقوف في مرور ما قبل الفك نفسه (`maxJsonDepth`، الافتراضي
   32) — الأعمق يُرد ب`413 payload_too_complex` قبل `jsonDecode`.
 - من يمرر منافذ بديلة ل`start()` فصفحته تقرأ المنفذ الذي **يعيده**

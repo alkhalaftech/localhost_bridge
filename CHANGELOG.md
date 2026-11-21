@@ -61,6 +61,17 @@
   create); the socket file the package created is removed at `stop`, so
   a restart on the same path rebinds cleanly. The open-connection cap
   counts this listener too.
+- Added: an optional TLS transport - `BridgeConfig.securityContext`
+  (default off) binds the bridge's TCP listeners through
+  `HttpServer.bindSecure` with a ready `SecurityContext` the host
+  passes, so the page URL becomes `https://127.0.0.1:<port>` (and
+  `wss://` for the WebSocket channel) and a served local page's own
+  origin arms as its `https://` spelling. The package never generates,
+  installs, or trusts a certificate and never reads or writes any file
+  for TLS - the host supplies the context and owns the device trust in
+  the certificate. Off by default the wire stays letter identical plain
+  HTTP; setting `securityContext` together with `unixSocketPath` throws
+  `ArgumentError` at construction.
 - Added: the mobile lifecycle pair - `pause()` closes every bound
   listener under the same graceful drain `stop()` runs and remembers the
   bound port; `resume()` rebinds on that exact port with no fallbacks,

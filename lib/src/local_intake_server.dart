@@ -459,6 +459,18 @@ class LocalIntakeServer {
         );
       }
     }
+    // نقل TLS ومقبس يونكس معاً رفضٌ وقت البناء: dart:io لا يملك ربطاً
+    // آمناً لمقبس يونكس، ومستمع يبقى عارياً بصمت تحت خيار TLS يوعد
+    // الحماية وهو لا يوصلها - فلا تُقبل التوليفة أصلاً
+    if (config.securityContext != null && config.unixSocketPath != null) {
+      throw ArgumentError.value(
+        config.unixSocketPath,
+        'config.unixSocketPath',
+        'carries no TLS in dart:io - it cannot be combined with '
+            'config.securityContext, which would leave one listener '
+            'silently plain under a TLS option; pass one or the other',
+      );
+    }
     // الصفحات المحلية: null هو الإيقاف حصراً - القائمة الفارغة ليست وضع
     // إيقاف بل خطأ إعداد يُقال صاخباً عند البناء قبل أي طلب على السلك
     final pages = config.localPages;
@@ -1385,12 +1397,19 @@ class LocalIntakeServer {
       }
       final candidates = [preferredPort, ...fallbacks];
       Object? lastError;
+      final tls = config.securityContext;
       for (final candidate in candidates) {
         try {
-          _server = await HttpServer.bind(
-            InternetAddress.loopbackIPv4,
-            candidate,
-          );
+          // النقل يتبع الخيار: بلا سياق الربط HTTP العادي حرفاً كما كان،
+          // ومع سياق جاهز من المضيف يُربط bindSecure على العنوان الحلقي
+          // نفسه - TLS ينتهي تحت طبقة HTTP فلا عقد سلك يتغير
+          _server = tls == null
+              ? await HttpServer.bind(InternetAddress.loopbackIPv4, candidate)
+              : await HttpServer.bindSecure(
+                  InternetAddress.loopbackIPv4,
+                  candidate,
+                  tls,
+                );
           // المنفذ الفعلي المُسند (يُصحّح عيب إعادة 0 عند طلب منفذ عشوائي
           // — والطلب الصريح يساوي الفعلي فلا فرق سلكياً)
           _port = _server!.port;
@@ -1465,13 +1484,23 @@ class LocalIntakeServer {
   /// permission-guard failure throws and the generation bind fails).
   Future<void> _armListenersAtBind() async {
     _authorities = computeAuthorities(_port, config.extraHosts);
+    final tls = config.securityContext;
     if (config.listenIPv6Loopback) {
       try {
-        final v6 = await HttpServer.bind(
-          InternetAddress.loopbackIPv6,
-          _port,
-          v6Only: true,
-        );
+        // مستمع الـ::1 يرتدي نقل المستمع الأول نفسه: بلا سياق HTTP عادي،
+        // ومع سياق جاهز bindSecure — بابٌ واحد لا ينشق نقله
+        final v6 = tls == null
+            ? await HttpServer.bind(
+                InternetAddress.loopbackIPv6,
+                _port,
+                v6Only: true,
+              )
+            : await HttpServer.bindSecure(
+                InternetAddress.loopbackIPv6,
+                _port,
+                tls,
+                v6Only: true,
+              );
         _serverV6 = v6;
         // توسعة السلطات في الربط نفسه: صيغتا الـ::1 اسمتما عنواناً حياً
         // حصراً والمستمع مربوط فعلاً — ومطفأً تبقى المجموعة حرفاً كما هي
@@ -1511,9 +1540,12 @@ class LocalIntakeServer {
     _warnExtraHosts(config.extraHosts);
     // تسليح أصول الصفحة المحلية عند الربط حصراً: المجموعة من
     // المنفذ الفعلي المُسند (لا المطلوب)، وإحلالٌ عند كل ربط
-    // فيقرأ البدءُ الجديد مجموعتَه لا أصل ربطٍ سابق
+    // فيقرأ البدءُ الجديد مجموعتَه لا أصل ربطٍ سابق — والمخطط يتبع
+    // النقل: صفحة على باب TLS أصلها https وحصراً
     protection.armBridgeServedOrigins(
-      config.localPages == null ? const <String>{} : bridgeServedOrigins(_port),
+      config.localPages == null
+          ? const <String>{}
+          : bridgeServedOrigins(_port, secure: tls != null),
     );
     // سجل الحماية الصامت: حماية ممررة بلا مرصد تبتلع تحذيرات
     // الأمن (allow-all وأسطر الرفض) في null — الخادم يقولها مرة
@@ -2007,14 +2039,25 @@ class LocalIntakeServer {
       "form-action 'none'; frame-ancestors 'none'";
 
   /// The loopback origins the bridge itself serves pages from - both
-  /// spellings the browser may show in the address bar of the page URL.
-  /// The admission reads them through the protection's armed set (an
-  /// exact, port-bound normalized match), so the page's own origin
-  /// crosses on its explicit path while any other loopback origin stays
-  /// exactly where the policy keeps it.
-  static Set<String> bridgeServedOrigins(int boundPort) => <String>{
-    'http://127.0.0.1:$boundPort',
-    'http://localhost:$boundPort',
+  /// spellings the browser may show in the address bar of the page URL,
+  /// in the scheme the bound transport actually speaks: `https://` when a
+  /// [BridgeConfig.securityContext] is armed, `http://` otherwise (the
+  /// default, letter identical to previous releases). The admission reads
+  /// them through the protection's armed set (an exact, port-bound
+  /// normalized match), so the page's own origin crosses on its explicit
+  /// path while any other loopback origin stays exactly where the policy
+  /// keeps it.
+  static Set<String> bridgeServedOrigins(
+    int boundPort, {
+    bool secure = false,
+  }) => <String>{
+    if (secure) ...<String>[
+      'https://127.0.0.1:$boundPort',
+      'https://localhost:$boundPort',
+    ] else ...<String>[
+      'http://127.0.0.1:$boundPort',
+      'http://localhost:$boundPort',
+    ],
   };
 
   /// The internal `X-Bridge-Token` length cap in UTF-8 bytes (not

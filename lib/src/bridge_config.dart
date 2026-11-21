@@ -1,3 +1,9 @@
+/// Configuration values for the bridge - the numbers and switches a host
+/// tunes, each checked at construction time.
+library;
+
+import 'dart:io';
+
 /// Literal, injectable defaults - every number is named and valued to match
 /// the behavior it governs; any deviation from them documents its reason.
 /// Values are checked when a LocalIntakeServer is built: a non-positive
@@ -15,6 +21,7 @@ class BridgeConfig {
     this.maxOpenConnections = 0,
     this.listenIPv6Loopback = false,
     this.unixSocketPath,
+    this.securityContext,
     this.healthPath,
     this.maxJsonElements = 10_000,
     this.maxJsonDepth = 32,
@@ -118,8 +125,40 @@ class BridgeConfig {
   /// rebinds cleanly. `null` (the default) keeps the option off. A value
   /// that is empty or carries a NUL byte throws [ArgumentError] at server
   /// construction, and so does any value at all on Windows - unix domain
-  /// sockets are not part of dart:io there.
+  /// sockets are not part of dart:io there. Setting it together with
+  /// [securityContext] also throws [ArgumentError] at construction: dart:io
+  /// has no secure unix-domain bind, and a listener that silently stays
+  /// plain under a TLS option would promise cover it does not deliver.
   final String? unixSocketPath;
+
+  /// The optional TLS transport - when non-null, the bridge's TCP listeners
+  /// (the `127.0.0.1` listener and the optional `::1` listener) bind through
+  /// `HttpServer.bindSecure` with this exact context, so the address the
+  /// browser uses becomes `https://127.0.0.1:<port>` (and `wss://` for the
+  /// WebSocket channel), and the served local pages' own origin arms as its
+  /// `https://` spelling. The host supplies a ready [SecurityContext] - one
+  /// that already carries a certificate chain and its private key: this
+  /// package never generates a certificate, never installs or trusts one,
+  /// and never reads or writes any file for it; device trust in the
+  /// certificate (a locally installed issuing authority or a publicly
+  /// trusted name) is entirely the host's responsibility, and installing a
+  /// local issuing authority on a device is a decision to weigh against the
+  /// risks documented in the README. `null` (the default) keeps the option
+  /// off: every bind path stays letter identical to previous releases and
+  /// the port speaks plain HTTP. Setting it together with
+  /// [unixSocketPath] throws [ArgumentError] at server construction (dart:io
+  /// has no secure unix-domain bind). The admission, the wire codes, the
+  /// caps, and every reply contract are byte-for-byte the same over either
+  /// transport - TLS terminates below the HTTP layer. One transport-level
+  /// fact is inherited from dart:io and stated honestly: a TCP client that
+  /// connects and never finishes the TLS handshake holds no seat and never
+  /// reaches the intake at all, but dart:io exposes no public way to bound
+  /// that pre-handshake window - the socket stays open at the transport
+  /// layer until the listener closes, even a forced stop does not reap it,
+  /// and a host serving TLS on a hostile network should front the port with
+  /// its own socket-level controls. A context without a certificate chain
+  /// fails at connection time with dart:io's own handshake error.
+  final SecurityContext? securityContext;
 
   /// The health page - when non-null, a `GET` on exactly this path is
   /// answered `200` with the literal body `{"ok":true}`: no version
