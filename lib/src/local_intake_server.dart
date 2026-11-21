@@ -422,6 +422,61 @@ class LocalIntakeServer {
         );
       }
     }
+    // الصفحات المحلية: null هو الإيقاف حصراً - القائمة الفارغة ليست وضع
+    // إيقاف بل خطأ إعداد يُقال صاخباً عند البناء قبل أي طلب على السلك
+    final pages = config.localPages;
+    if (pages != null) {
+      if (pages.isEmpty) {
+        throw ArgumentError.value(
+          pages,
+          'config.localPages',
+          'is empty - null is the off value; list at least one page or '
+              'leave the option at null',
+        );
+      }
+      final seen = <String>{};
+      for (final page in pages) {
+        final path = page.path;
+        if (path.isEmpty || !path.startsWith('/')) {
+          throw ArgumentError.value(
+            path,
+            'config.localPages.path',
+            'must be a non-empty path starting with "/"',
+          );
+        }
+        if (path == _pairingPath) {
+          throw ArgumentError.value(
+            path,
+            'config.localPages.path',
+            'collides with the pairing route "/pair" - choose another '
+                'path so both registered routes stay unambiguous',
+          );
+        }
+        if (!seen.add(path)) {
+          throw ArgumentError.value(
+            path,
+            'config.localPages.path',
+            'is registered twice - two pages on one path build an '
+                'ambiguous lookup table',
+          );
+        }
+        if (page.contentType.trim().isEmpty) {
+          throw ArgumentError.value(
+            page.contentType,
+            'config.localPages.contentType',
+            'must be a non-empty media type',
+          );
+        }
+      }
+      if (wsPath != null && pages.any((page) => page.path == wsPath)) {
+        throw ArgumentError.value(
+          wsPath,
+          'config.wsPath',
+          'collides with a registered local page path - choose another '
+              'path so both registered routes stay unambiguous',
+        );
+      }
+    }
   }
 
   /// Called with every trusted command the package hands to the registered host.
@@ -1087,6 +1142,14 @@ class LocalIntakeServer {
             _port = _server!.port;
             _authorities = computeAuthorities(_port, config.extraHosts);
             _warnExtraHosts(config.extraHosts);
+            // تسليح أصول الصفحة المحلية عند الربط حصراً: المجموعة من
+            // المنفذ الفعلي المُسند (لا المطلوب)، وإحلالٌ عند كل ربط
+            // فيقرأ البدءُ الجديد مجموعتَه لا أصل ربطٍ سابق
+            protection.armBridgeServedOrigins(
+              config.localPages == null
+                  ? const <String>{}
+                  : bridgeServedOrigins(_port),
+            );
             // سجل الحماية الصامت: حماية ممررة بلا مرصد تبتلع تحذيرات
             // الأمن (allow-all وأسطر الرفض) في null — الخادم يقولها مرة
             // واحدة بمرصده هو مع طريق الوصل، أما الافتراضية فبُنيت
@@ -1484,6 +1547,40 @@ class LocalIntakeServer {
   /// the ordinary non-root behavior (a warning and the handler), wire
   /// letter identical to previous releases.
   static const _pairingPath = '/pair';
+
+  /// The armed local pages by exact path - empty while the option is
+  /// off, so the page lookup below never fires and every GET keeps its
+  /// standing 405. The lookup is a whole-string match against
+  /// `request.uri.path`: there is no prefix walk and no filesystem
+  /// anywhere behind it - the pages live in the host's memory.
+  late final Map<String, BridgeLocalPage> _localPages =
+      config.localPages == null
+      ? const <String, BridgeLocalPage>{}
+      : <String, BridgeLocalPage>{
+          for (final page in config.localPages!) page.path: page,
+        };
+
+  /// The page's strict CSP: nothing loads from anywhere except the
+  /// page's own inline script and style (a single in-memory page has no
+  /// other files to load), and connections go to the bridge's own origin
+  /// only (`connect-src 'self'` - the page's door to its server).
+  /// Framing, form action, and base-uri injection are dead: the page is
+  /// a display surface the host authored, not a loader.
+  static const String _pageSecurityCsp =
+      "default-src 'none'; script-src 'unsafe-inline'; "
+      "style-src 'unsafe-inline'; connect-src 'self'; base-uri 'none'; "
+      "form-action 'none'; frame-ancestors 'none'";
+
+  /// The loopback origins the bridge itself serves pages from - both
+  /// spellings the browser may show in the address bar of the page URL.
+  /// The admission reads them through the protection's armed set (an
+  /// exact, port-bound normalized match), so the page's own origin
+  /// crosses on its explicit path while any other loopback origin stays
+  /// exactly where the policy keeps it.
+  static Set<String> bridgeServedOrigins(int boundPort) => <String>{
+    'http://127.0.0.1:$boundPort',
+    'http://localhost:$boundPort',
+  };
 
   /// The internal `X-Bridge-Token` length cap in UTF-8 bytes (not
   /// characters): the constant-time comparison in the protection layer runs
@@ -1953,7 +2050,13 @@ class LocalIntakeServer {
       _activeRequests++;
       _seatsByOrigin[seatOriginKey] = (_seatsByOrigin[seatOriginKey] ?? 0) + 1;
       try {
-        await _handleRequest(request, response, admission, wsHandshake);
+        await _handleRequest(
+          request,
+          response,
+          admission,
+          wsHandshake,
+          mounted,
+        );
       } finally {
         _activeRequests--;
         final originLeft = (_seatsByOrigin[seatOriginKey] ?? 1) - 1;
@@ -2000,6 +2103,7 @@ class LocalIntakeServer {
     HttpResponse response,
     IntakeAdmission admission,
     bool wsHandshake,
+    bool mounted,
   ) async {
     // نكرّم ترويسة البوابة إن أرسلت X-Correlation-Id،
     // وإلا نولّد UUID v4 هنا عند الاستقبال — من هذه النقطة يخيط
@@ -2042,6 +2146,18 @@ class LocalIntakeServer {
             totalDeadlineLive = false;
             await _handleWebSocket(request, response, admission, origin);
             return;
+          }
+          // الصفحة المحلية: GET على مسار مسجل حصراً وعلى مستمع الجسر
+          // نفسه - التركيب يجيبه المضيف لمساراته هو فالصفحة لا تجيب
+          // هناك (405 كأي غير POST). المشاهدة قراءة حرة لا تسوّي سجل
+          // قبول ولا تقرأ قراره كالـ204 والـ405، والرد على المقبس
+          // المنتزع بنمط بقية الردود المبكرة لأن جسم GET لا يُقرأ
+          if (!mounted && request.method == 'GET') {
+            final page = _localPages[request.uri.path];
+            if (page != null) {
+              await _replyPage(response, page);
+              return;
+            }
           }
           if (request.method != 'POST') {
             // قطع بعد الرد: الطريقة المخالفة قد تحمل جسما معلنا وغير
@@ -3592,6 +3708,35 @@ class LocalIntakeServer {
     );
   }
 
+  /// رد الصفحة المحلية: الترويسات الأمنية الأربع تُضبط على كائن الرد
+  /// قبل الانتزاع فتُنسخ في الرأس اليدوي، والنوع المعلن هو ما مرّره
+  /// المضيف لا النوع الافتراضي، والجسم نص الصفحة حرفاً من الذاكرة. جسم
+  /// GET لا يُقرأ على هذا المسار فيُكتب الرد أولاً على المقبس المنتزع
+  /// ثم يُفرَّغ الباقي بالصبر المحدود في خلفية بلا مقعد - نفس شكل
+  /// إغلاق ردود بوابة الطريقة.
+  Future<void> _replyPage(HttpResponse response, BridgeLocalPage page) async {
+    final headers = response.headers;
+    // CSP الصارمة وحارسا التأطير والتحويل: الصفحة سطح عرض كتبه المضيف
+    // لا مُحمِّل - لا شيء يُجلب من أي مكان إلا سكربتها ونمطها المضمّنان
+    // والوصل لأصل الجسر نفسه حصراً
+    headers.set('Content-Security-Policy', _pageSecurityCsp);
+    headers.set('X-Frame-Options', 'DENY');
+    headers.set('Referrer-Policy', 'no-referrer');
+    // النوع المعلن لا يُقلب: nosniff يمنع التخمين فوق ما أعلنه المضيف
+    headers.set('X-Content-Type-Options', 'nosniff');
+    try {
+      final socket = await _detachAndReply(
+        response,
+        HttpStatus.ok,
+        utf8.encode(page.content),
+        bodyContentType: page.contentType,
+      );
+      _discardDetached(socket);
+    } on Object {
+      // العميل انقطع قبل الرد أو أثناءه: الدمّر تم من الداخل
+    }
+  }
+
   /// انتظار مستقبل الأمر بميزانية المعالج — الماكينة واحدة لكل مسار
   /// تسليم (الرد الواحد والتدفق معاً) فلا يتشعب حساب اليتامى: انتهاء
   /// الميزانية يشعل إشارة الإلغاء كي يغلف المعالج عمله إن شاء، ويجعل
@@ -3886,6 +4031,7 @@ class LocalIntakeServer {
     bool headOnly = false,
     bool streamBody = false,
     String streamContentType = 'text/event-stream',
+    String bodyContentType = 'application/json; charset=utf-8',
   }) async {
     final socket = await response.detachSocket(writeHeaders: false);
     try {
@@ -3910,10 +4056,7 @@ class LocalIntakeServer {
       });
       if (body != null) {
         head
-          ..write(
-            '${HttpHeaders.contentTypeHeader}: '
-            'application/json; charset=utf-8\r\n',
-          )
+          ..write('${HttpHeaders.contentTypeHeader}: $bodyContentType\r\n')
           ..write('${HttpHeaders.contentLengthHeader}: ${body.length}\r\n');
       } else if (streamBody) {
         // التدفق: النوع المعلن هو نوع القناة، وبلا طول إطلاقاً — الجسم

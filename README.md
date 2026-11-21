@@ -365,7 +365,7 @@ Stable error codes:
 | 400 | `invalid_utf8` / `empty_payload` / `unsupported_payload_shape` | Body not UTF-8 / no valid command payload / JSON object without any of the known command keys. A body that fails JSON decoding altogether is **not** a 400 — it falls through as a raw text command (the tested non-JSON contract); a JSON number, boolean, or `null` body takes the same raw path. Inside a JSON array, non-string and empty-string elements drop without notice. |
 | 400 | `invalid_payload_item` / `malformed_json_shape` / `invalid_json` / `non_json_body` | The payload-contract options — each **off by default**, so the default wire never answers these: `strictPayloadItems` refuses a JSON list carrying a non-string or empty element (the default drops it silently) / `requireValidJsonShape` refuses a container-shaped body that scans structurally incomplete — an unclosed bracket or string (the default falls through as raw text) / `rejectInvalidJson` refuses a body sent as `application/json` that fails JSON decoding / `requireJsonBodies` (JSON-only mode) refuses the raw-text path whole — raw command text and scalar JSON bodies alike. All four answer before your handler runs. |
 | 400 | `command_required` | With `BridgeConfig.acceptBinaryBodies` on: an `application/octet-stream` body that carries no `X-Command` name — absent, blank, or with an empty body: one rule, no size carve-out (the raw-text path refuses its empty body `empty_payload` the same way). The bridge delivers only named binary commands; with the option off, `octet-stream` never passes the media gate at all (`415`). |
-| 405 | `method_not_allowed` | Only `POST` (and `OPTIONS` preflight) are accepted. |
+| 405 | `method_not_allowed` | Only `POST` (and `OPTIONS` preflight) are accepted - every `GET` included, except on the registered local-page paths while `BridgeConfig.localPages` is armed (those answer the page). |
 | 403 | `origin_not_listed` / `origin_declined` / `origin_unknown` / `origin_blocked` / `origin_pending` | Origin policy rejection (not listed / consent declined / not confirmable / allow-all hardening / consent window open — retry after `Retry-After`). |
 | 403 | `token_required` | The origin qualified, but `OriginPolicy.requireOriginWithToken` is on and the request carried no valid token (the shared token, or a paired origin-bound signature) — the readable refusal a paired page retries from. |
 | 403 | `pair_code_invalid` / `pair_code_expired` | On `POST /pair` (pairing armed): an unknown or already-used one-time code / a code past its 120-second life. The reply always echoes CORS — the pairing door is readable by design (the code is the gate, not the origin). |
@@ -505,6 +505,61 @@ server.listen((request) async {
     await app.handle(request);
   }
 });
+```
+
+## The local pages (an optional page from memory)
+
+A host without a UI - a CLI tool, a service - has nowhere to show a
+pairing code or its settings. `BridgeConfig.localPages` arms the
+local pages: pass the pages from memory (a path, the content, the
+content type) and a `GET` on exactly those paths answers the page,
+carrying the page's security headers. Every other `GET` keeps its
+standing `405 method_not_allowed`, and `null` - the default - keeps
+the option off with the wire letter identical. Nothing is ever read
+from the filesystem: the pages live in the host's memory, and serving
+a folder from disk is not part of this package. The pages answer on
+the bridge's own listener only - on a mounted server the host serves
+its own routes, and a forwarded `GET` answers `405` like any
+non-POST.
+
+Every page reply carries a strict CSP - nothing loads from anywhere
+except the page's own inline script and style, and connections stay
+on the bridge's own origin (`connect-src 'self'`) - plus
+`X-Frame-Options: DENY`, `Referrer-Policy: no-referrer`, and
+`X-Content-Type-Options: nosniff`, and it echoes no CORS header, so a
+foreign page cannot read it cross-origin.
+
+The page's own origin - `http://127.0.0.1:<port>` and
+`http://localhost:<port>` of the bound listener - crosses the
+admission on its own explicit path
+(`IntakeAdmissionPath.bridgeOrigin`), never through the allow-all
+mode. The same gates bind it as a listed origin: the browser
+send-method checks, the listed per-origin quota, the host-authority
+gate, and the seat caps - and under `OriginPolicy.requireOriginWithToken`
+the page needs the shared token or a pairing proof exactly like any
+qualified origin (the pairing door accepts the served origin too).
+Any other loopback origin - another port included - stays refused
+exactly as before. A page path colliding with `/pair` or the
+WebSocket path, a duplicate path, or an empty list throw
+`ArgumentError` at server construction.
+
+```dart
+final bridge = LocalIntakeServer(
+  // ... your wiring ...
+  config: const BridgeConfig(
+    localPages: [
+      BridgeLocalPage(
+        path: '/pairing',
+        content: '<!doctype html><html><body>'
+            '<h1>Pairing code: 482913</h1>'
+            '<script>fetch("/commands", {method: "POST",'
+            ' headers: {"Content-Type": "application/json"},'
+            ' body: JSON.stringify(["STATUS"])});</script>'
+            '</body></html>',
+      ),
+    ],
+  ),
+);
 ```
 
 ## Page-side reference (JavaScript)

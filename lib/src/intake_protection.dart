@@ -192,11 +192,12 @@ class IntakeRejection {
 }
 
 /// The acceptance route one request took through the protection layers -
-/// the recorded value in [IntakeAdmission.acceptedPath]. Six routes exist
-/// and an accepted admission names exactly one: the host's list, a saved
-/// always-allow consent from discovery, a consumed one-time grant, the
-/// hardened allow-all path, a correct token alone, or a correct token over
-/// a listed origin.
+/// the recorded value in [IntakeAdmission.acceptedPath]. Eight routes
+/// exist and an accepted admission names exactly one: the host's list, a
+/// saved always-allow consent from discovery, a consumed one-time grant,
+/// the hardened allow-all path, a correct token alone, a correct token
+/// over a listed origin, a paired origin-bound signature, or the bridge's
+/// own served origin.
 enum IntakeAdmissionPath {
   /// The origin matches the host's allowlist (full origin, bare host, or
   /// `*.domain` pattern).
@@ -221,9 +222,16 @@ enum IntakeAdmissionPath {
 
   /// The pairing proof agreed: a valid origin-bound HMAC signature over a
   /// qualified origin - the page proves possession of its paired token
-  /// without ever sending it. Added at the enum's end; a host switch that
-  /// must know every route reads this value explicitly.
+  /// without ever sending it.
   originWithPairedToken,
+
+  /// The bridge's own served origin: the local-pages option armed the
+  /// origin this listener itself serves pages from, and the page's
+  /// requests cross on this explicit path - never on the allow-all path.
+  /// The same browser send-method gates and the listed quota bind it.
+  /// Added at the enum's end; a host switch that must know every route
+  /// reads this value explicitly.
+  bridgeOrigin,
 }
 
 /// The one admission record for one request - the single projection of the
@@ -1113,12 +1121,14 @@ class IntakeProtection {
 
   /// Does this origin qualify for pairing under the current policy? The
   /// same qualification the admission paths grant: the list (with its
-  /// remembered always-allow consents), or the hardened allow-all shape.
-  /// Discovery is deliberately absent: an origin whose question is still
-  /// open has not been vouched for yet.
+  /// remembered always-allow consents), the bridge's own served origin
+  /// while the local-pages option is armed, or the hardened allow-all
+  /// shape. Discovery is deliberately absent: an origin whose question is
+  /// still open has not been vouched for yet.
   bool _pairingQualified(String? origin) {
     if (origin == null || origin.isEmpty || origin == 'null') return false;
     if (_isListed(origin)) return true;
+    if (_isBridgeServed(origin)) return true;
     if (!_policy.allowAllHardened) return false;
     final uri = Uri.tryParse(origin);
     if (uri == null || uri.host.isEmpty) return false;
@@ -1809,6 +1819,34 @@ class IntakeProtection {
     return false;
   }
 
+  // ══ أصل الجسر المُخدم ذاته — باب الصفحة المحلية ══
+
+  /// The origins the bridge itself serves pages from (the local-pages
+  /// option), armed by the server at bind time from the port it actually
+  /// bound. Empty while the option is off - every read below stays
+  /// letter-identical to previous releases.
+  final Set<String> _bridgeServedOrigins = <String>{};
+
+  /// Arms (or re-arms) the origins the bridge itself serves pages from.
+  /// An exact, port-bound set: the values are normalized and compared
+  /// whole, so a different port is a different origin and never matches.
+  /// The server re-arms at every bind, so a restart on a new port replaces
+  /// the set; [disarmBridgeServedOrigins] restores the off state.
+  void armBridgeServedOrigins(Set<String> origins) {
+    _bridgeServedOrigins
+      ..clear()
+      ..addAll(origins.map(normalize));
+  }
+
+  /// Clears the served-origin set - the option's off state.
+  void disarmBridgeServedOrigins() => _bridgeServedOrigins.clear();
+
+  /// Is this origin the bridge's own served origin? An exact normalized
+  /// match against the armed set - another loopback port is a foreign
+  /// origin and stays exactly where the policy keeps it.
+  bool _isBridgeServed(String? origin) =>
+      origin != null && _bridgeServedOrigins.contains(normalize(origin));
+
   /// Lower-cases an Origin value and strips trailing slashes - the canonical
   /// key for every per-origin window in this object.
   /// Kept for hosts until the planned removal: the admission record carries
@@ -2196,8 +2234,12 @@ class IntakeProtection {
     // للمؤهل) قاعدة قراءة ردٍّ تطبقها بوابة القبول من حقول السجل نفسها
     final echoesCors = echoesCorsFor(origin);
     // نص الخطأ: توكن صحيح (على نافذة غير مقفولة — المقارنة أعلاه دليلها)
-    // أو أصل مدرج؛ يُقرأ من السجل فلا مقارنة ثانية على أي طلب
-    final verboseErrors = (tokenCompared && tokenMatched) || _isListed(origin);
+    // أو أصل مدرج أو أصل الجسر المُخدم؛ يُقرأ من السجل فلا مقارنة ثانية
+    // على أي طلب
+    final verboseErrors =
+        (tokenCompared && tokenMatched) ||
+        _isListed(origin) ||
+        _isBridgeServed(origin);
 
     return _AdmissionDecision(
       rejection: rejection,
@@ -2224,9 +2266,40 @@ class IntakeProtection {
     );
   }
 
+  /// The shared browser-shaped gates of the explicit origins - a listed
+  /// origin, and the bridge's own served origin: the fetch-metadata
+  /// mismatch check and the listed quota branch, recorded into [out].
+  /// Returns the rejection when one fires; a pass returns null.
+  IntakeRejection? _explicitOriginGates(
+    String? origin,
+    String? fetchMode,
+    String? fetchDest,
+    String method,
+    int now,
+    _BeyondOutcome out,
+  ) {
+    // ترويستا الإرسال الحاضرتان بقيمة مخالفة نموذج مخفي أو إرسال
+    // no-cors بلا شك — تُرفضان هنا كالمسارين المتصفحيين
+    final mismatched = _fetchMetadataMismatch(fetchMode, fetchDest, method);
+    if (mismatched != null) return mismatched;
+    final listedQuota = _policy.listedPerOriginPerMinute;
+    if (listedQuota > 0) {
+      final wouldReject = _quotaWouldReject(origin, listedQuota, now);
+      out.quotaLimit = listedQuota;
+      if (wouldReject != null) {
+        if (!_policy.reportOnly) return wouldReject;
+        out.reportOnlyLine =
+            'intake report-only: would reject — ${wouldReject.code}: '
+            '${wouldReject.message} (origin=${originForLog(origin) ?? 'none'})';
+      }
+    }
+    return null;
+  }
+
   /// The after-the-token-layer projection into [out] - the acceptance order
-  /// branch by branch (list, allow-all, discovery, explicit reject) with
-  /// every state effect recorded, none performed.
+  /// branch by branch (list, the bridge's own served origin, allow-all,
+  /// discovery, explicit reject) with every state effect recorded, none
+  /// performed.
   void _projectBeyondToken(
     String? origin,
     String key,
@@ -2242,30 +2315,42 @@ class IntakeProtection {
     if (_isListed(origin)) {
       final listedViaConsent =
           origin != null && _consents[key] == OriginConsent.allowAlways;
-      // ترويستا الإرسال الحاضرتان بقيمة مخالفة نموذج مخفي أو إرسال
-      // no-cors بلا شك — تُرفضان هنا كالمسارين المتصفحيين
-      final mismatched = _fetchMetadataMismatch(fetchMode, fetchDest, method);
-      if (mismatched != null) {
-        out.rejection = mismatched;
+      final rejected = _explicitOriginGates(
+        origin,
+        fetchMode,
+        fetchDest,
+        method,
+        now,
+        out,
+      );
+      if (rejected != null) {
+        out.rejection = rejected;
         return;
-      }
-      final listedQuota = _policy.listedPerOriginPerMinute;
-      if (listedQuota > 0) {
-        final wouldReject = _quotaWouldReject(origin, listedQuota, now);
-        out.quotaLimit = listedQuota;
-        if (wouldReject != null) {
-          if (!_policy.reportOnly) {
-            out.rejection = wouldReject;
-            return;
-          }
-          out.reportOnlyLine =
-              'intake report-only: would reject — ${wouldReject.code}: '
-              '${wouldReject.message} (origin=${originForLog(origin) ?? 'none'})';
-        }
       }
       out.accepted = listedViaConsent
           ? IntakeAdmissionPath.savedConsent
           : IntakeAdmissionPath.listed;
+      return;
+    }
+
+    // (1.5) أصل الجسر المُخدم ذاته — باب الصفحة المحلية: أصلٌ سلّحه
+    // الجسر عند الربط خياراً مسلحاً يُقبل بمساره الصريح حصراً ولا يمرّ
+    // بوضع «الكل» مهما كانت مسلحة، وبوابتا المتصفح والحصة المدرجة
+    // نفسُهما كما للمدرج
+    if (_isBridgeServed(origin)) {
+      final rejected = _explicitOriginGates(
+        origin,
+        fetchMode,
+        fetchDest,
+        method,
+        now,
+        out,
+      );
+      if (rejected != null) {
+        out.rejection = rejected;
+        return;
+      }
+      out.accepted = IntakeAdmissionPath.bridgeOrigin;
       return;
     }
 
@@ -3008,6 +3093,9 @@ class IntakeProtection {
   bool echoesCorsFor(String? origin) {
     if (origin == null || origin.isEmpty) return false;
     if (_isListed(origin)) return true;
+    // أصل الجسر المُخدم: الصفحة تحتاج قراءة ردودها فالصدى بابها نفسه،
+    // ومن سواها لا يرى شيء كالقائمة
+    if (_isBridgeServed(origin)) return true;
     // أصل الاكتشاف الصالح: الصدى ضروري له — بدونه يمنع المتصفح
     // الpreflight فلا يصل السؤال أبدا (ترويسات ما قبل الفحص كانت
     // تغلق مسار الموافقة نفسه) — والمرفوض لا يرى
@@ -3047,7 +3135,7 @@ class IntakeProtection {
         _fixedTimeEquals(bridgeToken, _token)) {
       return true;
     }
-    return _isListed(origin);
+    return _isListed(origin) || _isBridgeServed(origin);
   }
 
   /// A rejection from outside the protection patterns (host authorities) goes

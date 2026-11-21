@@ -24,6 +24,7 @@ class BridgeConfig {
     this.acceptBinaryBodies = false,
     this.allowStreamingReplies = false,
     this.wsPath,
+    this.localPages,
     this.requestTimeout = const Duration(seconds: 30),
     this.idleTimeout = const Duration(seconds: 60),
     this.handlerTimeout = defaultHandlerTimeout,
@@ -208,6 +209,26 @@ class BridgeConfig {
   /// live commands.
   final String? wsPath;
 
+  /// The local pages - when non-null, a `GET` on exactly one of the
+  /// registered paths is answered with the page the host passed (from
+  /// memory: the path, the content, the content type), carrying the
+  /// page's security headers (a strict CSP, `X-Frame-Options: DENY`,
+  /// `Referrer-Policy: no-referrer`, and `X-Content-Type-Options:
+  /// nosniff`) and no CORS echo. Every other `GET` keeps its standing
+  /// `405 method_not_allowed`. `null` - the default - keeps the option
+  /// off: the wire is letter identical, and nothing is ever read from
+  /// the filesystem (the pages live in the host's memory; serving a
+  /// folder from disk is not part of this package). A non-null value
+  /// must list at least one page with unique, well-formed paths that
+  /// stay off the pairing route and the WebSocket path - a violation
+  /// throws [ArgumentError] at server construction. The page's own
+  /// origin (the bound loopback origin in its `127.0.0.1` and
+  /// `localhost` spellings) crosses the admission on its own explicit
+  /// path - never through allow-all - and the pages answer on the
+  /// bridge's own listener only (a forwarded `GET` on a mounted door
+  /// answers `405` like any non-POST).
+  final List<BridgeLocalPage>? localPages;
+
   /// Per-request timeout (anchored at request arrival, not server start).
   final Duration requestTimeout;
 
@@ -257,4 +278,35 @@ class BridgeConfig {
   /// default is domain-neutral; a host with an existing wire contract sets
   /// its own code here and keeps its contract byte-for-byte.
   final String fallbackErrorCode;
+}
+
+/// One in-memory page the host serves through the local-pages option
+/// ([BridgeConfig.localPages]) - the headless host's display surface: a
+/// pairing code, a settings status, a pointer to the portal. The content
+/// lives in the host's memory: nothing here names a file, and the bridge
+/// never reads the filesystem, so there is no path to traverse and no
+/// folder to serve - the reply is a verbatim write of [content].
+class BridgeLocalPage {
+  /// Builds the page. [path] must be a non-empty path starting with `/`,
+  /// unique across the list, and different from the pairing route `/pair`
+  /// and the WebSocket path - a violation throws [ArgumentError] at
+  /// server construction. [content] is served verbatim on `GET` [path].
+  /// [contentType] is the `Content-Type` header the reply carries - it
+  /// defaults to an HTML document in UTF-8.
+  const BridgeLocalPage({
+    required this.path,
+    required this.content,
+    this.contentType = 'text/html; charset=utf-8',
+  });
+
+  /// The exact request path the page answers - matched against
+  /// `request.uri.path`, so a query string on the request is not part of
+  /// the match.
+  final String path;
+
+  /// The page body, served verbatim from the host's memory.
+  final String content;
+
+  /// The `Content-Type` header the reply carries, exactly as given.
+  final String contentType;
 }

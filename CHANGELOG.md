@@ -338,6 +338,29 @@
   listener and has no fact to read on the mount; the seat budget binds
   there, and a mounted request mid-flight holds its seat inside
   `stop`'s drain exactly as on the private server.
+- Added: `BridgeConfig.localPages` - the local pages, an optional
+  page from memory for the host without a UI (a CLI tool, a service
+  showing a pairing code or its settings): pass the pages (a path,
+  the content, the content type) and a `GET` on exactly those paths
+  answers the page, while every other `GET` keeps its standing
+  `405 method_not_allowed`. `null` - the default - keeps the option
+  off with the wire letter identical, and nothing is ever read from
+  the filesystem: the pages live in the host's memory, and serving a
+  folder from disk is not part of this package. The pages answer on
+  the bridge's own listener only.
+- Security: the page reply carries a strict CSP (nothing loads from
+  anywhere except the page's own inline script and style, and
+  connections stay on the bridge's own origin via
+  `connect-src 'self'`), `X-Frame-Options: DENY`,
+  `Referrer-Policy: no-referrer`, `X-Content-Type-Options: nosniff`,
+  and no CORS echo, so a foreign page cannot read it cross-origin.
+  The page's own origin (the bound loopback origin in its
+  `127.0.0.1` and `localhost` spellings) crosses the admission on
+  its own explicit path (`IntakeAdmissionPath.bridgeOrigin`) - never
+  through the allow-all mode - behind the same host-authority gate,
+  browser send-method checks, listed quota, and seat caps as a
+  listed origin, while any other loopback origin (another port
+  included) stays refused exactly as before.
 
 ## 0.1.3
 
