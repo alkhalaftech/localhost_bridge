@@ -144,13 +144,26 @@ void main() {
     second.settle();
     expect(second.rejection?.code, 'pair_signature_replay');
     expect(second.rejection!.status, 403);
-    // وتوقيع آخر بطابع آخر يعبر فورا — الإعادة تحكم الإثبات لا الطبقة
+    // وتوقيع آخر يعبر فورا — الإعادة تحكم الإثبات لا الطبقة. لتفريق
+    // التوقيعين حتما (لا بالملي ثانية: الاثنان الافتراضيان داخل تيك
+    // واحد ينتجان نصا واحدا فيُرفض الثاني بحق كإعادة)، يحمل الطازج
+    // معرّف ارتباطه الخاص به
     final fresh = await pr.admit(
       origin: 'https://portal.example',
-      pairingProof: _sign(token: token, pairingId: pairingId),
+      correlationId: 'after-replay',
+      pairingProof: _sign(
+        token: token,
+        pairingId: pairingId,
+        correlationId: 'after-replay',
+      ),
     );
     fresh.settle();
-    expect(fresh.rejection, isNull);
+    expect(
+      fresh.rejection,
+      isNull,
+      reason: 'a distinct proof is a distinct command, not a replay '
+          '(got ${fresh.rejection?.code})',
+    );
   });
 
   test('two different proofs stamped at the same millisecond both pass - '
