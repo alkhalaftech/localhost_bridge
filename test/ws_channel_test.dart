@@ -275,8 +275,8 @@ void main() {
   });
 
   test('a message over the internal channel cap closes with '
-      'ws_message_too_large - the transformer refuses the declared '
-      'length before the payload bytes', () async {
+      'ws_message_too_large - the refusal frame carries the literal '
+      'code at delivery', () async {
     final c = await start();
     try {
       final ws = await openChannel(c.srv.port);
@@ -285,6 +285,40 @@ void main() {
       expect(replies, hasLength(1));
       expect(replies.single, contains('"ws_message_too_large"'));
       expect(closeCode, isNotNull);
+    } finally {
+      c.protection.dispose();
+      await c.srv.stop();
+    }
+  });
+
+  test('a frame over the transport ceiling is a protocol-level kill '
+      'with no counted frame - the counted refusal lives at the '
+      'delivery cap under it', () async {
+    // فوق سقف النقل (2MiB) لا سقف التسليم (256KiB): محول dart:io
+    // نفسه يرفض الطول المعلن ويغلق النقل بخطأ بروتوكول (1002) قبل
+    // أي بايت حمولة وقبل أي إطار إفصاح — فالذاكرة محروسة والقناة
+    // ميتة، والرفض المعدود المقروء (الإطار الحرفي + العدّ الواحد)
+    // يعيش عند سقف التسليم تحته. هذا حد الطبقات موثقا بالسلوك
+    final c = await start();
+    try {
+      final ws = await openChannel(c.srv.port);
+      ws.add('x' * (3 * 1024 * 1024));
+      final (replies, closeCode) = await awaitClosed(ws);
+      expect(closeCode, 1002);
+      expect(
+        replies.where((r) => r.contains('ws_message_too_large')),
+        isEmpty,
+        reason:
+            'the transport kills the connection itself - no '
+            'disclosure frame rides a dead transport',
+      );
+      expect(
+        c.srv.counters.rejectionsByCode['ws_message_too_large'],
+        isNull,
+        reason:
+            'the delivery cap under the ceiling owns the counted, '
+            'readable refusal',
+      );
     } finally {
       c.protection.dispose();
       await c.srv.stop();
