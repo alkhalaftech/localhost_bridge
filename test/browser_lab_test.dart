@@ -13,6 +13,10 @@
 //   --dump-dom يطبع DOM الصفحة المتسلسل إلى stdout بعد تنفيذ سكربتاتها،
 //   و--virtual-time-budget يقدّم الزمن الافتراضي حتى ينفد كي تُلتقط الصفحة
 //   بعد عملها غير المتزامن، و--timeout سقف انتظار حقيقي قبل الالتقاط.
+// - كتب رموز كروميوم (chrome/common/chrome_switches.cc في شجرة
+//   source.chromium.org) — ‏--ignore-certificate-errors مفتاح الأتمتة
+//   الذي يجعل جلسة الاختبار العابرة تقبل شهادة الاختبار الذاتية لصفحة
+//   https: الجلسة بلا واجهة وبملف مستخدم عابر يزور صفحات المختبر حصراً
 // - github.com/actions/runner-images (Ubuntu2404-Readme.md) — صورة
 //   ubuntu-latest تحمل Google Chrome وChromium مثبتين، وعليها تشغّل
 //   وظيفة CI المختبرَ فعلياً.
@@ -370,6 +374,40 @@ Future<(LocalIntakeServer, int)> _startBridge({
 /// the rendered verdict lines (each ends with a newline) and never the
 /// literal marker text inside the page's own script source
 String _flat(String dom) => dom.replaceAll('\r\n', '\n');
+
+/// شهادة الاختبار الذاتية لخادم صفحة https — ولّدتا محلياً لهذا المختبر
+/// (منحنى P-256 وSAN لـ127.0.0.1 وlocalhost) وتحمي لا شيء: غرضها أن يكون
+/// أصل الصفحة أصل https حقيقياً لقصة Local Network Access لا أن يُبنى
+/// عليها ثقة، وجلسة المتصفح العابرة تقبلها بعلم الأتمتة الموثق في
+/// ترويسة الملف
+const String _labTlsCertPem = r'''
+-----BEGIN CERTIFICATE-----
+MIIBvzCCAWWgAwIBAgIUOyM1NSWvcU6oQ49nLN9wRQpDv+IwCgYIKoZIzj0EAwIw
+JzElMCMGA1UEAwwcbG9jYWxob3N0X2JyaWRnZS1icm93c2VyLWxhYjAeFw0yNjEx
+MjExNjQ3MDZaFw0zNjExMTgxNjQ3MDZaMCcxJTAjBgNVBAMMHGxvY2FsaG9zdF9i
+cmlkZ2UtYnJvd3Nlci1sYWIwWTATBgcqhkjOPQIBBggqhkjOPQMBBwNCAASJvQTP
+SUhnm6eT5kY8jPqr8xP8FAVc7PAO4yjG2blRS3kC0XGicPh5ycVpDb6LLcPDT2OX
+yDq1NVXrBH5Ef8Eeo28wbTAdBgNVHQ4EFgQUyrHrMY1F+e4mcJIiqMe5qIT3HkYw
+HwYDVR0jBBgwFoAUyrHrMY1F+e4mcJIiqMe5qIT3HkYwDwYDVR0TAQH/BAUwAwEB
+/zAaBgNVHREEEzARhwR/AAABgglsb2NhbGhvc3QwCgYIKoZIzj0EAwIDSAAwRQIg
+ZvIBbf2uTLL0PU2dyEblwGjUsWj3oHbg6lpIUbe73pYCIQDFB/sZcc5jgswG/DTS
+ez0vqobphpac8Cq35pWY0zDYlQ==
+-----END CERTIFICATE-----
+''';
+
+const String _labTlsKeyPem = r'''
+-----BEGIN PRIVATE KEY-----
+MIGHAgEAMBMGByqGSM49AgEGCCqGSM49AwEHBG0wawIBAQQgs1pUXrOinr++i5pu
+ms39DvXUA3h9za/ADPwAGdXvSFqhRANCAASJvQTPSUhnm6eT5kY8jPqr8xP8FAVc
+7PAO4yjG2blRS3kC0XGicPh5ycVpDb6LLcPDT2OXyDq1NVXrBH5Ef8Ee
+-----END PRIVATE KEY-----
+''';
+
+/// سياق TLS لخادم الصفحة الآمن من ملفَّي التثبيت أعلاه — خادم https
+/// حقيقي يدور على حلقي ويخدم صفحة المختبر
+SecurityContext _labTlsContext() => SecurityContext()
+  ..useCertificateChainBytes(utf8.encode(_labTlsCertPem))
+  ..usePrivateKeyBytes(utf8.encode(_labTlsKeyPem));
 
 /// Drives the real browser headlessly over the lab page and returns the
 /// dumped DOM: scripts run, virtual time advances the page's async work,
@@ -1009,10 +1047,19 @@ function wsScenario() {
 ''';
 
   Future<(HttpServer, LocalIntakeServer, IntakeProtection, int, int, String)>
-  channelLab() async {
+  channelLab({bool secure = false}) async {
     final token = generateBridgeToken();
-    final pageServer = await HttpServer.bind(InternetAddress.loopbackIPv4, 0);
-    final pageOrigin = 'http://127.0.0.1:${pageServer.port}';
+    // خادم الصفحة: http عادي أو https بشهادة الاختبار الذاتية — والأصل
+    // الكامل بمخططه هو ما يدخل قائمة الأصل المسموح فتُحكم المصافحة به
+    final pageServer = secure
+        ? await HttpServer.bindSecure(
+            InternetAddress.loopbackIPv4,
+            0,
+            _labTlsContext(),
+          )
+        : await HttpServer.bind(InternetAddress.loopbackIPv4, 0);
+    final pageOrigin =
+        '${secure ? 'https' : 'http'}://127.0.0.1:${pageServer.port}';
     final protection = IntakeProtection(telemetry: _RecordingTelemetry());
     protection.update(
       policy: OriginPolicy(allowed: [pageOrigin]),
@@ -1227,4 +1274,177 @@ function wsScenario() {
     await ws.close();
     expect(token, hasLength(64));
   }, skip: _skipReason);
+
+  test(
+    'ws://127.0.0.1 from an https page: without the Local Network Access '
+    'permission the browser blocks the channel, and with the permission '
+    'granted the handshake crosses the acceptance gates',
+    () async {
+      // قصة Local Network Access الحقيقية على قناة الويب سوكيت: صفحة https
+      // يخدمها خادم الاختبار (شهادة الاختبار الذاتية أعلاه بعلم الأتمتة
+      // الموثق في ترويسة الملف) تحاول ws://127.0.0.1 على جسر مسلح القناة.
+      // بعلم محاكاة الفضاء نفسه الذي في سيناريو Local Network Access
+      // أعلاه: بتعيين أصل الصفحة نقطةً عامة
+      // (‎--ip-address-space-overrides=127.0.0.1:<منفذ الصفحة>=public)
+      // يحتاج عبورها إلى القناة الحلقية إذن local-network-access الذي لا
+      // يمنحه headless فيحجب المتصفح القناة كلياً قبل أي ترقية — والجسر
+      // نفسه يبقى سليماً فيجيب الطرف المحلي المباشر، فيثبت الوجهان أن
+      // الحاجز فحص LNA في المتصفح لا علة في الجسر. وبتعيين نقطة الجسر
+      // نفسها عامة بالمفتاح ذاته (محاكاة الإذن الممنوح: الجلسة بلا واجهة
+      // لا تمنح الإذن أصلاً والفحص هو ما يسقط عن العبور) تعبر المصافحة
+      // بوابات القبول كاملة: الأصل المدرج https ثم الترقية ثم إطار الرفض
+      // الحرفي وإغلاقه كما تقرؤه صفحة قناة http المواطنة. واتجاه الصفحة
+      // إلى الخادم تحت الزمن الافتراضي متردداً على هذا المضيف فيملكه
+      // العميل المباشر داخل الشاهد نفسه بذات النمط
+      final (pageServer, bridge, protection, pagePort, bridgePort, token) =
+          await channelLab(secure: true);
+      addTearDown(pageServer.close);
+      addTearDown(bridge.stop);
+      addTearDown(protection.dispose);
+      // القصة السلبية: الصفحة عامة والقناة الحلقية تحتاج الإذن — المتصفح
+      // يحجب فلا فتحة قناة ولا إطار يعبر إلى الصفحة
+      final blocked = _flat(
+        await _dumpDom(
+          'https://127.0.0.1:$pagePort/',
+          'j14-lna-https-blocked-dom.txt',
+          extraArgs: [
+            '--ignore-certificate-errors',
+            '--ip-address-space-overrides=127.0.0.1:$pagePort=public',
+          ],
+          virtualTimeBudgetMs: 60000,
+        ),
+      );
+      expect(
+        blocked,
+        contains('LAB-CHANNEL-PAGE:https://127.0.0.1:$pagePort\n'),
+        reason:
+            'the page really served over https - the story is the https '
+            'origin reaching the loopback channel',
+      );
+      expect(
+        blocked,
+        isNot(contains('LAB-WS-OPEN\n')),
+        reason:
+            'no upgrade crossed: the public-mapped page needs the '
+            'local-network-access permission to open the loopback '
+            'channel and headless grants none',
+      );
+      // الحكم السلبي القارئ: المتصفح نفسه أوقف القناة — الخطأ ثم الإغلاق
+      // 1006 (رمز الاتصال الذي لم يُفتح أبداً) لا أي إطار من الجسر
+      expect(
+        blocked,
+        contains('LAB-WS-ERROR\n'),
+        reason:
+            'the browser itself stopped the channel: the connection '
+            'errored before any handshake crossed',
+      );
+      expect(
+        blocked,
+        contains('LAB-WS-CLOSE:1006:\n'),
+        reason:
+            'the close carries the never-opened code with an empty '
+            'reason - the block happened inside the browser',
+      );
+      expect(
+        blocked,
+        isNot(contains('\nLAB-WS-FRAME:')),
+        reason:
+            'no channel frame reached the page while the send was blocked '
+            '(the newline anchors the verdict line, not the page source)',
+      );
+      // الجسر نفسه سليم: الطرف المحلي المباشر يقرأ رده فيفسح الحكم أن
+      // الحاجز فحص المتصفح لا علة في الجسر (نمط التحكم في سيناريو
+      // Local Network Access أعلاه)
+      final (status, body, _) = await _send(
+        bridgePort,
+        origin: 'https://127.0.0.1:$pagePort',
+        headers: {'X-Bridge-Token': token},
+      );
+      expect(status, 200, reason: 'the bridge answers the local direct party');
+      expect(body, contains('"ok":true'));
+      // القصة الموجبة: الإذن مُحاكى بالمفتاح ذاته على نقطة الجسر — الفحص
+      // لم يعُد ينطبق فتعبر المصافحة بوابات القبول (الأصل المدرج https ثم
+      // الترقية) وتقرأ الصفحة إطار الرفض الحرفي وإغلاقه
+      final crossed = _flat(
+        await _dumpDom(
+          'https://127.0.0.1:$pagePort/',
+          'j14-lna-https-crossed-dom.txt',
+          extraArgs: [
+            '--ignore-certificate-errors',
+            '--ip-address-space-overrides=127.0.0.1:$bridgePort=public',
+          ],
+          virtualTimeBudgetMs: 60000,
+        ),
+      );
+      expect(
+        crossed,
+        contains('LAB-WS-OPEN\n'),
+        reason:
+            'the handshake crossed the origin gates from the https page '
+            'to the loopback channel',
+      );
+      expect(
+        crossed,
+        contains('LAB-WS-FRAME:{"ok":false,"error":"ws_auth_timeout"'),
+        reason:
+            'the channel refusal frame crossed to the page and was read '
+            'by its onmessage - the literal code rides the frame',
+      );
+      expect(
+        crossed,
+        contains('LAB-WS-CLOSE:1008:ws_auth_timeout\n'),
+        reason:
+            'the close carries the policy code and the literal code '
+            'as its reason',
+      );
+      expect(crossed, contains('LAB-WS-DONE\n'));
+      expect(
+        crossed,
+        isNot(contains('LAB-WS-ERROR\n')),
+        reason: 'the crossing run never errored',
+      );
+      // والقصة الكاملة من الطرف المباشر على الجسر نفسه: الاعتماد بأول
+      // رسالة ثم الأمر وردّه — كما في شاهد قناة http المواطن
+      final ws = await WebSocket.connect(
+        'ws://127.0.0.1:$bridgePort/ws',
+        headers: {'Origin': 'https://127.0.0.1:$pagePort'},
+      ).timeout(const Duration(seconds: 5));
+      final replies = <String>[];
+      final replied = Completer<void>();
+      late final StreamSubscription sub;
+      sub = ws.listen(
+        (m) {
+          replies.add(m as String);
+          if (!replied.isCompleted) replied.complete();
+        },
+        onDone: () {
+          if (!replied.isCompleted) replied.complete();
+        },
+        onError: (Object _) {
+          if (!replied.isCompleted) replied.complete();
+        },
+      );
+      ws.add(jsonEncode({'token': token, 'correlationId': 'lab-ws-lna-1'}));
+      ws.add(jsonEncode(['BROWSER-WS-HTTPS']));
+      await replied.future.timeout(const Duration(seconds: 5));
+      unawaited(sub.cancel());
+      expect(
+        replies.single,
+        contains('"ok":true'),
+        reason:
+            'the credential opened the channel and the command reply '
+            'crossed it',
+      );
+      expect(replies.single, contains('"echo":true'));
+      await ws.close();
+    },
+    skip:
+        _skipReason ??
+        (_browserMajor == null || _browserMajor! < 146
+            ? 'the https Local Network Access story needs the '
+                  '--ip-address-space-overrides era (born after M146): no '
+                  'usable browser, or one too old to simulate the address '
+                  'space the story rides on'
+            : null),
+  );
 }
