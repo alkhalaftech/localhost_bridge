@@ -226,7 +226,7 @@ async function signProof(tokenHex, pairingId, method, path, correlationId) {
   } catch (browserError) {
     mark('LAB-UNPAIRED:BLOCKED-NO-VERDICT');
   }
-  // Scenario 5 (ج3): الصفحة المقترنة كاملة الدورة — الاقتران بالرمز
+  // Scenario 5 (pairing): الصفحة المقترنة كاملة الدورة — الاقتران بالرمز
   // المعروض، ثم التوقيع، ثم الأمر الموقَّع، ثم إعادة التوقيع نفسه، ثم
   // الصفحة بلا إثبات. يشتغل حين يحمل الجسر رمز عرض فقط
   if (PAIRING_CODE !== '') {
@@ -457,7 +457,7 @@ void main() {
     // الجسر المقبول يُبنى على أصل الصفحة قبل أن تُخدم الصفحة: المنفذ
     // المعمى في HTML يحتاج منافذ الجسور جاهزة أولاً. ووضع [pairedAdmitted]
     // يسلّح الشرط المشترك والاقتران معاً ويولّد رمز العرض — الشاهد
-    // المتصفحي لج3 كله على الجسر الواحد
+    // المتصفحي لدورة الاقتران كلها على الجسر الواحد
     final pageServer = await HttpServer.bind(InternetAddress.loopbackIPv4, 0);
     final (admitted, admittedPort) = await _startBridge(
       allowedOrigin: tokenOnlyAdmitted
@@ -587,8 +587,8 @@ void main() {
     );
     // التوكيد الموجب: سطر البادئة الوحيد في كل الـDOM هو سطر الحجب —
     // أي سطر مقروء آخر (LAB-UNPAIRED:READ:...) حكمٌ قابل للقراءة
-    // فيكون قناة استطلاع الحماية قد فُتحت. والسالب المشدد (ملاحظة
-    // المراجع في الدور 1): أي سطر مقروء بنمط الحالة الرقمية يفشل الجولة
+    // فيكون قناة استطلاع الحماية قد فُتحت. والسالب المشدد: أي سطر مقروء
+    // بنمط الحالة الرقمية يفشل الجولة
     expect(
       dom,
       isNot(contains(RegExp('LAB-UNPAIRED:READ:[0-9]'))),
@@ -759,7 +759,7 @@ void main() {
     'the paired page pairs with the displayed code, signs its command, '
     'and reads the reply; the replay and the proofless page are refused',
     () async {
-      // شاهد ج3 الرابع (سطح المكتب): الصفحة المقترنة كاملة الدورة على
+      // شاهد الاقتران على سطح المكتب: الصفحة المقترنة كاملة الدورة على
       // متصفح حقيقي — الاقتران بالرمز المعروض، ثم التوقيع بـWebCrypto
       // (HMAC-SHA-256 فوق الcanonical بنص التصميم)، ثم الأمر الموقَّع 200،
       // ثم إعادة التوقيع نفسه 403 pair_signature_replay، ثم الصفحة بلا

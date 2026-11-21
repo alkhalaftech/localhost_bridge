@@ -482,7 +482,7 @@ List<_Scenario> _scenarios() {
     preBody: true,
     run: () async {
       // الشرط المشترك: الأصل المؤهل بلا توكن يُرد بالرمز الجديد فوق
-      // جسم غير مقروء، والقائمة مفعلة بخيار ج3
+      // جسم غير مقروء، والقائمة مفعلة بخيار اشتراط الأصل مع التوكن
       final pr = IntakeProtection()
         ..update(
           policy: const OriginPolicy(
@@ -607,7 +607,7 @@ List<_Scenario> _scenarios() {
       final srv = await _listen(_server(pr: pr));
       final offer = pr.startPairing();
       final out = pr.pair(origin: 'https://portal.example', code: offer.code);
-      // الإثبات الصالح يبنى بدوال ج1 نفسها كما يبنيه كود الصفحة: الطابع
+      // الإثبات الصالح يبنى بدوال الهضم نفسها كما يبنيه كود الصفحة: الطابع
       // من ساعة الجدار، والcanonical بنص التصميم، والمفتاح بايتات
       // التوكن الخام مفكوكة من الhex (النثر الحاكم للتصميم)
       final stamp = DateTime.now().millisecondsSinceEpoch;

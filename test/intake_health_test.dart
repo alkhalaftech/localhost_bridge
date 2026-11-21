@@ -61,7 +61,7 @@ class _Rec extends BridgeTelemetry {
 LocalIntakeServer _server({
   required BridgeTelemetry telemetry,
   Future<CommandOutcome> Function()? handler,
-  // الافتراض null يعني ميزانية config الافتراضية منذ ج5 — ومن يحتاج
+  // الافتراض null يعني ميزانية config الافتراضية — ومن يحتاج
   // «بلا مهلة» يمرر الثابت المسماة صراحة
   Duration? handlerTimeout,
 }) => LocalIntakeServer(
@@ -661,7 +661,7 @@ void main() {
           await release.future;
           return const CommandOutcome(ok: true);
         },
-        // الثابت المسماة هي «بلا مهلة» منذ ج5 — null صار طلب الافتراضية
+        // الثابت المسماة هي «بلا مهلة» — null صار طلب الافتراضية
         handlerTimeout: LocalIntakeServer.noHandlerTimeout,
       );
       final p = await srv.start(preferredPort: 0);

@@ -24,8 +24,8 @@ import 'package:localhost_bridge/src/digest.dart';
 
 void main() {
   // الأنصبة الرسمية أدناه تثبت sha256 وhmacSha256 حرفا؛ وما يلي شاهود
-  // المقارنة الزمن-الثابتة التي يتحقق بها توقيع الاقتران (عقد ج3: تُضاف
-  // هنا باختبارها) — صواب المنطق في كل مواضع الاختلاف وأطوال الأطراف،
+  // المقارنة الزمن-الثابتة التي يتحقق بها توقيع الاقتران (اختبارها
+  // هنا) — صواب المنطق في كل مواضع الاختلاف وأطوال الأطراف،
   // وزمن التنفيذ ثابت بالبناء فلا يتسرب موضع أول اختلاف ولا طول أي طرف
   group('fixedTimeEquals (the proof-verification comparison)', () {
     test('equal byte lists match at every length the wire can carry', () {

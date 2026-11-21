@@ -347,7 +347,7 @@ void main() {
         throwsArgumentError,
         reason: 'a zero timeout override must fail loudly',
       );
-      // الصفر صار الثابت المسماة noHandlerTimeout (بلا مهلة) بعقد ج5 —
+      // الصفر صار الثابت المسماة noHandlerTimeout (بلا مهلة) —
       // والسالب يبقى خطأ إعداد يُرفض صاخباً وقت البناء
       expect(
         () => buildWith(handlerTimeout: Duration(milliseconds: -1)),
