@@ -2,15 +2,13 @@
 # This file lives inside the package tree; the package root is the
 # repository root. All paths below are therefore repository-root relative.
 # Public repositories get free macOS and Windows minutes, so the full
-# matrix runs on every push to main and on every pull request here, and
-# push to the v0.2.0-dev branch (the 0.2.0 release-candidate staging
-# branch) runs the same pipeline. Tag pushes trigger nothing: a tag
-# usually points at old code, and the release gates below already run on
-# the main branch.
-# The weekly schedule entry loads everywhere this file does, but every
-# job bails out unless the repository variable SCHEDULED_CI is set to
-# "true". A repository that wants the weekly run sets that one variable;
-# this file never names any repository.
+# matrix runs on every push to main and on every pull request here.
+# Tag pushes trigger nothing: a tag usually points at old code, and the
+# release gates below already run on the main branch.
+# The pana job below only spends its minutes where the repository
+# variable SCHEDULED_CI is set to "true"; a repository that wants the
+# score check sets that one variable. This file never names any
+# repository, and it carries no self-starting triggers.
 # Actions are pinned to full commit SHAs instead of mutable major tags -
 # a supply-chain measure, so a moved tag cannot change what runs here.
 # The workflow token is dropped to read-only: nothing here writes back.
@@ -20,13 +18,7 @@ on:
   push:
     branches:
       - main
-      # 0.2.0 release-candidate staging: same pipeline, nothing special
-      - v0.2.0-dev
   pull_request:
-  workflow_dispatch:
-  schedule:
-    # Weekly, at an off-peak minute. Each job checks SCHEDULED_CI.
-    - cron: '17 3 * * 1'
 
 # One run per ref: a new push or PR update cancels the older run.
 concurrency:
@@ -38,7 +30,6 @@ permissions:
 
 jobs:
   test:
-    if: github.event_name != 'schedule' || vars.SCHEDULED_CI == 'true'
     strategy:
       fail-fast: false
       matrix:
@@ -123,7 +114,6 @@ jobs:
     # expected to ship a browser (the ubuntu-latest runner image lists
     # Google Chrome and Chromium), so a missing engine fails the job
     # instead of earning a green with nothing proved.
-    if: github.event_name != 'schedule' || vars.SCHEDULED_CI == 'true'
     runs-on: ubuntu-latest
     timeout-minutes: 15
     steps:
@@ -162,7 +152,6 @@ jobs:
         run: dart test test/browser_lab_test.dart
 
   release-doc-gate:
-    if: github.event_name != 'schedule' || vars.SCHEDULED_CI == 'true'
     runs-on: ubuntu-latest
     timeout-minutes: 15
     steps:
@@ -208,7 +197,6 @@ jobs:
     # then stand alone in an empty directory - resolve, analyze, test,
     # and stay CR-free. The working tree may contain more than the
     # archive does; this job judges the archive exactly.
-    if: github.event_name != 'schedule' || vars.SCHEDULED_CI == 'true'
     runs-on: ubuntu-latest
     timeout-minutes: 15
     steps:
@@ -315,8 +303,8 @@ jobs:
   pana:
     # The pub.dev score as pana computes it. It only runs where the
     # SCHEDULED_CI variable is "true", so repositories that did not opt
-    # in to the weekly run do not spend minutes on it, and it fails the
-    # build below 160 points.
+    # in do not spend minutes on it, and it fails the build below 160
+    # points.
     if: vars.SCHEDULED_CI == 'true'
     runs-on: ubuntu-latest
     timeout-minutes: 15
