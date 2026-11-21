@@ -298,27 +298,42 @@ void main() {
     // نفسه يرفض الطول المعلن ويغلق النقل بخطأ بروتوكول (1002) قبل
     // أي بايت حمولة وقبل أي إطار إفصاح — فالذاكرة محروسة والقناة
     // ميتة، والرفض المعدود المقروء (الإطار الحرفي + العدّ الواحد)
-    // يعيش عند سقف التسليم تحته. هذا حد الطبقات موثقا بالسلوك
+    // يعيش عند سقف التسليم تحته. وعلى SDK لا يعرف معلمة سقف الطول
+    // (أرضية 3.8) تُشتق الترقية بلا سقف نقل، فيبلغ فحصُ التسليم
+    // الرسالةَ بعد تجميعها ويرفضها بالإطار المعدود نفسه — والعلم
+    // العام يفصح حقيقة الـSDK الجارية فيتفرع الشاهد بصدق
     final c = await start();
     try {
       final ws = await openChannel(c.srv.port);
       ws.add('x' * (3 * 1024 * 1024));
       final (replies, closeCode) = await awaitClosed(ws);
-      expect(closeCode, 1002);
-      expect(
-        replies.where((r) => r.contains('ws_message_too_large')),
-        isEmpty,
-        reason:
-            'the transport kills the connection itself - no '
-            'disclosure frame rides a dead transport',
-      );
-      expect(
-        c.srv.counters.rejectionsByCode['ws_message_too_large'],
-        isNull,
-        reason:
-            'the delivery cap under the ceiling owns the counted, '
-            'readable refusal',
-      );
+      if (LocalIntakeServer.wsTransportCeilingActive) {
+        expect(closeCode, 1002);
+        expect(
+          replies.where((r) => r.contains('ws_message_too_large')),
+          isEmpty,
+          reason:
+              'the transport kills the connection itself - no '
+              'disclosure frame rides a dead transport',
+        );
+        expect(
+          c.srv.counters.rejectionsByCode['ws_message_too_large'],
+          isNull,
+          reason:
+              'the delivery cap under the ceiling owns the counted, '
+              'readable refusal',
+        );
+      } else {
+        expect(
+          replies.where((r) => r.contains('ws_message_too_large')),
+          isNotEmpty,
+          reason:
+              'without the transport hook the delivery cap refuses '
+              'the buffered message with the counted frame',
+        );
+        expect(c.srv.counters.rejectionsByCode['ws_message_too_large'], 1);
+        expect(closeCode, isNotNull);
+      }
     } finally {
       c.protection.dispose();
       await c.srv.stop();

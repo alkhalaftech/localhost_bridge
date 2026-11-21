@@ -1377,6 +1377,47 @@ class LocalIntakeServer {
   /// الضيق هو العقد الذي يحمل إطاره الإفصاحي على السلك.
   static const int _wsTransportFrameCeiling = 2 * 1024 * 1024;
 
+  /// هل سقف النقل فعّال على هذا الـSDK؟ معلمة الطول المعلن للترقية
+  /// (`maxPayloadLength`) ليست في dart:io ‏3.8 (أرضية الحزمة المعلنة)
+  /// فاستُعمل استدعاء ديناميكي: حيث وُجدت المعلمة يمرَّر السقف ويحرس
+  /// الذاكرة قبل تخزين أي بايت، وحيث غابت تُشتق الترقية بلا سقف
+  /// نقل وفحص التسليم (256KiB) يظل يرفض الرسالة الفعلية بعد تجميعها.
+  /// الشهود يقرؤون هذا العلم فيتفرعون على حقيقة الـSDK الجارية.
+  static bool get wsTransportCeilingActive => _wsCeilingSeen;
+
+  static bool _wsCeilingSeen = false;
+
+  /// ترقية القناة: `Function.apply` لا معلمة مسماة ثابتة في النص،
+  /// فيقبلها المحول البرمجي على كل الأصدارات — والـSDK الذي لا يعرف
+  /// الاسم يرمي وقت الاستدعاء فنسقط إلى ترقية بلا سقف نقل (فحص
+  /// التسليم يظل الحارس المرئي).
+  static Future<WebSocket> _upgradeChannel(HttpRequest request) async {
+    try {
+      final ws =
+          await Function.apply(
+                WebSocketTransformer.upgrade,
+                [request],
+                const <Symbol, Object>{
+                  #compression: CompressionOptions.compressionOff,
+                  #maxPayloadLength: _wsTransportFrameCeiling,
+                },
+              )
+              as WebSocket;
+      _wsCeilingSeen = true;
+      return ws;
+    } on ArgumentError {
+      return WebSocketTransformer.upgrade(
+        request,
+        compression: CompressionOptions.compressionOff,
+      );
+    } on NoSuchMethodError {
+      return WebSocketTransformer.upgrade(
+        request,
+        compression: CompressionOptions.compressionOff,
+      );
+    }
+  }
+
   /// مهلة انتظار أول رسالة اعتماد على القناة — ثابت داخلي لا خيار:
   /// اتصال بلا اعتماد يمسك مقعده كي لا يجوع غيره، والمهلة القصيرة
   /// تحصّر نافذة ذلك المسك. فوقها يُغلق الاتصال برمز القناة المسجل.
@@ -2730,11 +2771,7 @@ class LocalIntakeServer {
     }
     final WebSocket ws;
     try {
-      ws = await WebSocketTransformer.upgrade(
-        request,
-        compression: CompressionOptions.compressionOff,
-        maxPayloadLength: _wsTransportFrameCeiling,
-      );
+      ws = await _upgradeChannel(request);
     } on Object {
       // ترقية رفضها المحول (ترويسة ناقصة أو شكل مخالف): رفض شكل
       // سلكي يُرد قبل أي شيء آخر

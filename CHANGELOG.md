@@ -276,7 +276,10 @@
   (256 KiB) and transport ceiling (2 MiB) are fixed named constants:
   a message between them reads `ws_message_too_large` in a refusal
   frame, a frame over the ceiling is refused by `dart:io`'s own
-  transformer before any payload byte buffers; silence past
+  transformer before any payload byte buffers (where the SDK's
+  transformer takes the length parameter - on the 3.8 floor the
+  delivery cap refuses the buffered message with the same frame);
+  silence past
   `BridgeConfig.idleTimeout` closes `ws_idle_timeout`; a heartbeat
   keeps NAT paths alive and cuts dead peers. One open connection
   holds one concurrency seat - the seat caps bound the live
