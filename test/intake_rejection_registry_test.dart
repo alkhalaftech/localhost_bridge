@@ -664,6 +664,38 @@ List<_Scenario> _scenarios() {
     },
   ));
   cases.add((
+    code: 'origin_parent_rate_limited',
+    preBody: true,
+    run: () async {
+      // ميزانية الأب مسلحة بسؤال واحد: سؤال الأب الأول يُفتح ويعلق على
+      // جواب المضيف، وشقيق النطاق تحت الأب نفسه يُكبح برمز الأب هو لا
+      // برمز السقف العام
+      final srv = await _listen(
+        _server(
+          pr: IntakeProtection()
+            ..update(
+              policy: OriginPolicy(
+                askFiresPerParentPerWindow: 1,
+                requireFetchMetadata: false,
+                onUnknownOrigin: (o) => Completer<OriginConsent>().future,
+              ),
+            ),
+        ),
+      );
+      final (st, body) = await _post(
+        srv.port,
+        origin: 'https://a.parent.example',
+      );
+      assert(st == 403);
+      assert(body.contains('"origin_pending"'));
+      final link = await _Link.open(
+        srv.port,
+        _head(srv.port, origin: 'https://b.parent.example'),
+      );
+      return _Walk(srv, link, () async {}, preBody: true);
+    },
+  ));
+  cases.add((
     code: 'token_locked',
     preBody: true,
     run: () async {

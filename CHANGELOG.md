@@ -176,6 +176,14 @@
   before any always-allow decision, so a session full of denied origins
   no longer washes out the pages the user approved (a cap with no deny
   still evicts the oldest entry).
+- Changed: the parent-budget-suppressed question reads its own code now
+  - `429 origin_parent_rate_limited` with the honest `Retry-After`
+  (the remainder of the parent's window) - instead of the generic
+  `origin_pending`, so a page can tell "your site asked too much" from
+  "a consent window is open"; the global ceiling still answers
+  `origin_pending`, and with the option off (the default) the wire is
+  unchanged. The new code sits in `intakeRejectionRegistry` and the
+  README wire tables, walked on the live wire like every other code.
 - Added: `IntakeProtection.onQuestionClosed` - fired exactly once when a
   consent question window ends (the answer arrived, the host future
   threw, or the ask timeout closed it) with the normalized origin, so

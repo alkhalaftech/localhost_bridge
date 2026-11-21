@@ -92,6 +92,7 @@ const Map<String, IntakeRejectSpec> intakeRejectionRegistry =
       'reply_data_too_large': IntakeRejectSpec(413),
       'unsupported_media_type': IntakeRejectSpec(415),
       // 429
+      'origin_parent_rate_limited': IntakeRejectSpec(429),
       'origin_rate_limited': IntakeRejectSpec(429),
       'pair_budget_exceeded': IntakeRejectSpec(429),
       'token_locked': IntakeRejectSpec(429),

@@ -114,10 +114,11 @@ class OriginPolicy {
   /// IP literal is its own parent. `0` - the default - keeps the
   /// global-only ceiling, so the default wire is unchanged; a negative
   /// value is a configuration mistake and throws at `update()` time. A
-  /// question past this parent's budget still answers `403 origin_pending`
-  /// with the honest `Retry-After`, but it fires nothing and spends
-  /// nothing from the global budget - one site rotating subdomains of a
-  /// single parent can no longer starve another origin's question.
+  /// question past this parent's budget still answers `429
+  /// origin_parent_rate_limited` with the honest `Retry-After`, but it
+  /// fires nothing and spends nothing from the global budget - one site
+  /// rotating subdomains of a single parent can no longer starve another
+  /// origin's question. The global ceiling keeps its own `origin_pending`.
   final int askFiresPerParentPerWindow;
 }
 
@@ -134,15 +135,16 @@ class IntakeRejection {
     this.retryAfterMs,
   });
 
-  /// 403 for denial, 429 for the origin quota.
+  /// 403 for denial, 429 for the origin budgets (the rate quota and the
+  /// parent ask budget).
   final int status;
 
   /// The stable developer contract for the rejection - one of the codes
   /// this class produces (`origin_not_listed`, `origin_pending`,
   /// `origin_declined`, `origin_unknown`, `origin_rate_limited`,
-  /// `token_locked`, `cross_site_blocked`, `origin_blocked`,
-  /// `protection_disposed`). The message text may change; the code does
-  /// not.
+  /// `origin_parent_rate_limited`, `token_locked`, `cross_site_blocked`,
+  /// `origin_blocked`, `protection_disposed`). The message text may
+  /// change; the code does not.
   final String code;
 
   /// The package's constant neutral English sentence for the rejection -
@@ -2268,9 +2270,12 @@ class IntakeProtection {
         if (parentFires.length >= _policy.askFiresPerParentPerWindow) {
           final parentWaitMs =
               _askBudgetWindowMs - (now - parentFires.first) + 500;
+          // رمز الأب الخاص يوازي رمز حصة المعدل العام: كبحٌ زمني يحمل
+          // بقايا نافذته الصادقة، فلا يُلبس مع «نافذة موافقة مفتوحة»
+          // ولا مع امتلاء السقف العام — والسقفان الأخيران يبقيان رمزيهما
           out.rejection = IntakeRejection(
-            403,
-            'origin_pending',
+            429,
+            'origin_parent_rate_limited',
             'Too many consent questions from this site — retry after a '
                 'short wait',
             retryAfterMs: parentWaitMs < 1000 ? 1000 : parentWaitMs,

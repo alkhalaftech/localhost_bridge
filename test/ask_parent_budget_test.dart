@@ -23,10 +23,14 @@ void main() {
           ),
         );
       // عشرة نطاقات فرعية متدوّرة لأب واحد: ميزانية الأب تحد أسئلته هو
-      // وحده فثلاثة أسئلة تُفتح والتسعة الباقية تُجاب بلا سؤال جديد
+      // وحده فثلاثة أسئلة تُفتح (origin_pending) والسبع الباقية تُجاب
+      // برمز ميزانية الأب الخاص بلا سؤال جديد
       for (var i = 0; i < 10; i++) {
         final a = await p.admit(origin: 'https://s$i.rotate.example');
-        expect(a.rejection?.code, 'origin_pending');
+        expect(
+          a.rejection?.code,
+          i < 3 ? 'origin_pending' : 'origin_parent_rate_limited',
+        );
         a.settle();
         await pumpEventQueue();
       }
@@ -102,11 +106,15 @@ void main() {
               },
             ),
           );
-        // سؤال الأب الأول يُفتح وتسعُ أسئلة تالية لنطاقاته تُكبَح بلا طابع
-        // على السقف العام — الكبح حصر على الأب لا استهلاك للسقف
+        // سؤال الأب الأول يُفتح بـorigin_pending وتسعُ أسئلة تالية لنطاقاته
+        // تُكبح برمز ميزانية الأب الخاص بلا طابع على السقف العام — الكبح
+        // حصر على الأب لا استهلاك للسقف
         for (var i = 0; i < 10; i++) {
           final a = await p.admit(origin: 'https://h$i.one.example');
-          expect(a.rejection?.code, 'origin_pending');
+          expect(
+            a.rejection?.code,
+            i == 0 ? 'origin_pending' : 'origin_parent_rate_limited',
+          );
           a.settle();
           await pumpEventQueue();
         }
@@ -153,10 +161,11 @@ void main() {
       a1.settle();
       await pumpEventQueue();
       expect(a1.rejection?.code, 'origin_pending');
-      // شقيقٌ تحت الأب نفسه: ميزانية الأب تُكبحه
+      // شقيقٌ تحت الأب نفسه: ميزانية الأب تُكبحه برمزها الخاص
       final a2 = await p.admit(origin: 'https://api.shop.example.com');
       a2.settle();
       await pumpEventQueue();
+      expect(a2.rejection?.code, 'origin_parent_rate_limited');
       expect(
         asked,
         1,
@@ -229,6 +238,63 @@ void main() {
           10,
           reason: 'with the budget off the global ceiling alone decides',
         );
+        p.dispose();
+      },
+    );
+
+    test(
+      'the suppressed question reads its own code with the honest '
+      'parent-window wait - the global ceiling keeps origin_pending',
+      () async {
+        var asked = 0;
+        final p = IntakeProtection(nowMs: () => 0)
+          ..update(
+            policy: OriginPolicy(
+              askFiresPerParentPerWindow: 1,
+              requireFetchMetadata: false,
+              onUnknownOrigin: (origin) {
+                asked++;
+                return Future<OriginConsent>.value(OriginConsent.dismissed);
+              },
+            ),
+          );
+        // سؤال الأب الأول يُفتح بالرمز العام، وشقيقه تحت الميزانية نفسها
+        // يقرأ رمز الأب الخاص بحالته وبقايا نافذة الأب الصادقة
+        final first = await p.admit(origin: 'https://a.gate.example');
+        expect(first.rejection?.code, 'origin_pending');
+        expect(first.rejection?.status, 403);
+        first.settle();
+        await pumpEventQueue();
+        final suppressed = await p.admit(origin: 'https://b.gate.example');
+        expect(suppressed.rejection?.code, 'origin_parent_rate_limited');
+        expect(
+          suppressed.rejection?.status,
+          429,
+          reason: 'the parent budget is a rate budget, so its code answers '
+              'with the quota family status',
+        );
+        expect(
+          suppressed.rejection?.retryAfterMs,
+          isNotNull,
+          reason: 'the suppression carries the honest parent-window remainder',
+        );
+        expect(
+          suppressed.rejection!.retryAfterMs!,
+          greaterThanOrEqualTo(1000),
+        );
+        suppressed.settle();
+        await pumpEventQueue();
+        // سقف العام لا يتغير حرفاً: الأصل البريء يفتح سؤاله بالرمز العام
+        final fresh = await p.admit(origin: 'https://fresh.org');
+        expect(
+          fresh.rejection?.code,
+          'origin_pending',
+          reason: 'the global ceiling keeps its own standing code',
+        );
+        fresh.settle();
+        await pumpEventQueue();
+        expect(asked, 2, reason: 'two fires: the parent head and the fresh '
+            'origin - the suppression fired nothing');
         p.dispose();
       },
     );
