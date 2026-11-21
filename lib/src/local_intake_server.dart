@@ -199,6 +199,47 @@ class IntakeBindException implements Exception {
   String toString() => 'IntakeBindException: $message';
 }
 
+/// The verdict of one host-fed channel message: an accepted
+/// [TrustedCommand] or the rejection with the standing wire codes.
+/// Exactly one of [command] and [rejection] is non-null; [admission]
+/// carries the admission record (its [IntakeAdmission.originTrust]
+/// included) for every verdict that passed the wire-shape gates, and is
+/// null only for the shape-gate rejects that run before admission - the
+/// same split the HTTP wire keeps.
+///
+/// The grade the origin carried lives in the record only: nothing on
+/// this result, and nothing the host may put on its channel, is shaped
+/// by it beyond the decision itself.
+class HostFeedResult {
+  const HostFeedResult._({
+    required this.command,
+    required this.rejection,
+    required this.admission,
+  });
+
+  /// The accepted command - non-null exactly when the message passed
+  /// every check. Executing it is the host's job: the feed holds no
+  /// seat for it, and the command carries a live cancel signal the host
+  /// owns (the server's stop cannot fire it).
+  final TrustedCommand? command;
+
+  /// The refusal - the same [IntakeRejection] contract the HTTP wire
+  /// answers with: the status the same fact would carry on HTTP, the
+  /// registered code, the neutral message, and the honest wait when one
+  /// applies. The host forwards it over its own channel in its own
+  /// shape; the package writes nothing anywhere.
+  final IntakeRejection? rejection;
+
+  /// The admission record behind the verdict - null only when a
+  /// wire-shape gate refused before admission ran (the origin and token
+  /// gates), mirroring the HTTP order where those rejects carry no
+  /// record.
+  final IntakeAdmission? admission;
+
+  /// Whether the message was accepted ([command] non-null).
+  bool get accepted => command != null;
+}
+
 /// Internal reusable warning throttle: the first message of each time
 /// window is admitted and everything else arriving inside the window is
 /// muted, and the next admitted message carries the muted count so the
@@ -625,6 +666,318 @@ class LocalIntakeServer {
     protocolShapeRejections: _protocolShapeRejections,
     pairingRejections: _pairingRejections,
   );
+
+  /// Feeds one message from a non-HTTP channel through the same single
+  /// admission step and the same payload checks the HTTP wire runs, and
+  /// hands back an accepted [TrustedCommand] or the rejection with the
+  /// standing wire codes - the channels the host feeds directly (an
+  /// Android `WebMessageListener` message, an iOS
+  /// `WKScriptMessage`, a native client, a browser extension's native
+  /// messaging pipe) never grow a second copy of the protection logic.
+  ///
+  /// The order is the HTTP order, minus the HTTP-only facts: the
+  /// wire-shape gates first (origin length and form, token and pairing
+  /// lengths - counted as protocol-shape rejections, no admission record
+  /// behind them, exactly like the pre-admission gates), then
+  /// [IntakeProtection.admit] with the origin and its
+  /// [OriginTrustLevel], the token if the channel carried one, and the
+  /// correlation id; then the record settles at the acceptance gate
+  /// (quota stamps, token-miss stamps, consent questions, and the
+  /// counted, throttled security line land exactly as they do for POST);
+  /// then the message body passes the standing body limit, the JSON
+  /// complexity and shape options, and the payload extraction - the same
+  /// codes the HTTP body answers; finally the live-work budget answers
+  /// `server_busy` like every other channel. There is no Host header and
+  /// no content type on a host-fed channel, so the host-authority gate
+  /// and the media gate have no fact to read and do not run.
+  ///
+  /// [originTrust] is required whenever an origin is passed: the grade is
+  /// how much the platform vouches for the value
+  /// ([OriginTrustLevel.platformVerified] for a WebView/WebKit callback,
+  /// [OriginTrustLevel.browserHeader] for a value read from a
+  /// browser-controlled header). An origin with the
+  /// [OriginTrustLevel.none] grade throws [ArgumentError] - an origin no
+  /// one vouches for is never admitted wearing a browser trust it does
+  /// not hold - and an origin-less client passes `origin: null` with
+  /// [OriginTrustLevel.none] and crosses by its token alone, or is
+  /// refused by the origin paths like any headerless request.
+  ///
+  /// [body] is the raw message text exactly as the channel delivered it -
+  /// JSON or raw command text, judged by the same extraction contract as
+  /// the wire. [correlationId] empty (the default) generates one, like an
+  /// HTTP request without the header; a value passes the same
+  /// sanitization an inbound header gets. The result's rejection carries
+  /// the same status, code, message, and honest wait the HTTP wire would
+  /// answer this fact with; every rejection is counted by the single
+  /// rejection counter, and the verdict's trust grade lives only in
+  /// [HostFeedResult.admission] - never on anything this call produces
+  /// for a reply.
+  ///
+  /// The method never touches the network and writes nothing anywhere:
+  /// delivering the verdict, and executing an accepted command, are the
+  /// host's job over its own channel.
+  Future<HostFeedResult> acceptHostFeed({
+    required String body,
+    required String? origin,
+    required OriginTrustLevel originTrust,
+    String? token,
+    String? pairingProof,
+    String correlationId = '',
+  }) async {
+    // تناقض النداء عيب برمجي لا رفض مرسل: أصل بلا درجة موثقة لا يلبس
+    // درجة ترويسة متصفح أبدا، وبلا أصل فلا درجة ترويسة ولا درجة منصة
+    if (origin != null && originTrust == OriginTrustLevel.none) {
+      throw ArgumentError.value(
+        origin,
+        'originTrust',
+        'is OriginTrustLevel.none while an origin value is present - an '
+            'origin no one vouches for is never admitted as a browser '
+            'header; pass platformVerified (or browserHeader) or omit the '
+            'origin and cross by the token alone',
+      );
+    }
+    if (origin == null && originTrust != OriginTrustLevel.none) {
+      throw ArgumentError.value(
+        originTrust,
+        'originTrust',
+        'names a trust grade while origin is null - an absent origin has '
+            'no grade but OriginTrustLevel.none',
+      );
+    }
+    // بوابات الشكل البروتوكولي بترتيب السلك نفسه: قبل أي سجل قبول،
+    // وبالعدّ من العدّاد الواحد وبحالتها من سجل الرموز لا من الموضع
+    if (origin != null && origin.length > _maxOriginChars) {
+      final spec = _noteRejection('origin_too_long');
+      return HostFeedResult._(
+        command: null,
+        rejection: IntakeRejection(
+          spec.status,
+          'origin_too_long',
+          'The origin exceeds the allowed length '
+              '($_maxOriginChars characters)',
+        ),
+        admission: null,
+      );
+    }
+    if (origin != null &&
+        origin.isNotEmpty &&
+        origin != 'null' &&
+        !IntakeProtection.isWellFormedOrigin(origin)) {
+      final spec = _noteRejection('origin_malformed');
+      return HostFeedResult._(
+        command: null,
+        rejection: IntakeRejection(
+          spec.status,
+          'origin_malformed',
+          'The origin must be scheme://host[:port]',
+        ),
+        admission: null,
+      );
+    }
+    if (token != null && utf8.encode(token).length > _maxTokenHeaderBytes) {
+      final spec = _noteRejection('token_too_long');
+      return HostFeedResult._(
+        command: null,
+        rejection: IntakeRejection(
+          spec.status,
+          'token_too_long',
+          'The token exceeds the allowed length '
+              '($_maxTokenHeaderBytes bytes)',
+        ),
+        admission: null,
+      );
+    }
+    if (protection.pairingEnabled &&
+        pairingProof != null &&
+        utf8.encode(pairingProof).length > _maxPairingHeaderBytes) {
+      final spec = _noteRejection('pairing_too_long');
+      return HostFeedResult._(
+        command: null,
+        rejection: IntakeRejection(
+          spec.status,
+          'pairing_too_long',
+          'The pairing proof exceeds the allowed length '
+              '($_maxPairingHeaderBytes bytes)',
+        ),
+        admission: null,
+      );
+    }
+    // خطوة القبول الواحدة نفسها: الأصل بدرجته والتوكن والاقتران
+    // ومعرف الارتباط، ثم التسوية عند بوابة القبول تهبط أثرها كما
+    // يهبط لأي طلب HTTP (طوابع الحصص والإخفاق والسؤال وعدّ الرفض
+    // وسطره الأمني) — لا نسخة حماية ثانية
+    final cid = _sanitizeCorrelationId(
+      correlationId.isEmpty ? null : correlationId,
+    );
+    final admission = await protection.admit(
+      origin: origin,
+      bridgeToken: token,
+      path: '/',
+      pairingProof: pairingProof,
+      method: 'POST',
+      correlationId: cid,
+      originTrust: originTrust,
+    );
+    admission.settle();
+    final rejection = admission.rejection;
+    if (rejection != null) {
+      // عدّ الخادم من العدّاد الواحد لا بيده — سجل القبول عدّ أثره
+      // وحده (عدّاد الحماية والسطر الأمني)
+      _noteRejection(rejection.code);
+      return HostFeedResult._(
+        command: null,
+        rejection: rejection,
+        admission: admission,
+      );
+    }
+    // فحوص الحمولة نفسها بترتيب القناة النصية: سقف الجسم ثم تعقيد
+    // JSON ثم خيار الشكل ثم الاستخراج ثم الفراغ — كل رفض بالرمز
+    // المسجل وبحالته من السجل
+    if (utf8.encode(body).length > config.maxBodyBytes) {
+      final spec = _noteRejection('payload_too_large');
+      return HostFeedResult._(
+        command: null,
+        rejection: IntakeRejection(
+          spec.status,
+          'payload_too_large',
+          'The message body exceeds the allowed limit ($_mbLabel)',
+        ),
+        admission: admission,
+      );
+    }
+    if (!_jsonShapeWithinLimits(
+      body,
+      config.maxJsonElements,
+      config.maxJsonDepth,
+    )) {
+      final spec = _noteRejection('payload_too_complex');
+      return HostFeedResult._(
+        command: null,
+        rejection: IntakeRejection(
+          spec.status,
+          'payload_too_complex',
+          'Message has too many JSON elements or is nested too deeply '
+              '(over ${config.maxJsonElements} elements or '
+              '${config.maxJsonDepth} deep) — send fewer, shallower '
+              'elements',
+        ),
+        admission: admission,
+      );
+    }
+    if (config.requireValidJsonShape && !_jsonShapeComplete(body)) {
+      final spec = _noteRejection('malformed_json_shape');
+      return HostFeedResult._(
+        command: null,
+        rejection: IntakeRejection(
+          spec.status,
+          'malformed_json_shape',
+          'Message claims a JSON container shape but is not structurally '
+              'complete — send the whole JSON document',
+        ),
+        admission: admission,
+      );
+    }
+    final List<String> payloads;
+    try {
+      payloads = _extractPayloads(body, declaredJson: false);
+    } on _UnsupportedPayloadShapeException {
+      final spec = _noteRejection('unsupported_payload_shape');
+      return HostFeedResult._(
+        command: null,
+        rejection: IntakeRejection(
+          spec.status,
+          'unsupported_payload_shape',
+          'JSON message has a known-but-unsupported shape (object without '
+              'known command keys)',
+        ),
+        admission: admission,
+      );
+    } on _StrictPayloadItemException {
+      final spec = _noteRejection('invalid_payload_item');
+      return HostFeedResult._(
+        command: null,
+        rejection: IntakeRejection(
+          spec.status,
+          'invalid_payload_item',
+          'Command list carries a non-string or empty element (strict '
+              'item checking is on)',
+        ),
+        admission: admission,
+      );
+    } on _InvalidJsonException {
+      final spec = _noteRejection('invalid_json');
+      return HostFeedResult._(
+        command: null,
+        rejection: IntakeRejection(
+          spec.status,
+          'invalid_json',
+          'The message is not valid JSON',
+        ),
+        admission: admission,
+      );
+    } on _NonJsonBodyException {
+      final spec = _noteRejection('non_json_body');
+      return HostFeedResult._(
+        command: null,
+        rejection: IntakeRejection(
+          spec.status,
+          'non_json_body',
+          'This channel accepts JSON messages only — send the command as '
+              'JSON',
+        ),
+        admission: admission,
+      );
+    }
+    if (payloads.isEmpty) {
+      final spec = _noteRejection('empty_payload');
+      return HostFeedResult._(
+        command: null,
+        rejection: IntakeRejection(
+          spec.status,
+          'empty_payload',
+          'No valid command payload found in the message',
+        ),
+        admission: admission,
+      );
+    }
+    // سقف العمل الحي: بوابته نفسها في الرد الواحد والقناة النصية —
+    // اليتامى والمقاعد ميزانية واحدة فوق كل القنوات
+    if (_activeRequests + _activeOrphans > config.maxConcurrentRequests) {
+      // العدّ من العدّاد الواحد حصراً ثم الكبح بنمط بقية أسطر السعة
+      final spec = _noteRejection('server_busy');
+      final line = _orphanBusyWarnThrottle.admit(
+        'intake busy: $_activeOrphans orphan handler(s) still running — '
+        'rejecting before invoking another',
+      );
+      if (line != null) {
+        telemetry.warn(line, category: BridgeCategory.network);
+      }
+      return HostFeedResult._(
+        command: null,
+        rejection: IntakeRejection(
+          spec.status,
+          'server_busy',
+          'The server is busy right now — please retry shortly',
+        ),
+        admission: admission,
+      );
+    }
+    final command = TrustedCommand(
+      source: origin ?? 'unknown-origin',
+      payloads: payloads,
+      headers: {'x-correlation-id': cid},
+      correlationId: cid,
+      admission: admission,
+      // إشارة حية يملكها المضيف: لم تُسجَّل في سلسلة الخادم فلا stop
+      // يشعلها — تنفيذ الأمر وشغلانه خارج عقد التغذية
+      cancellation: CommandCancelSignal(),
+    );
+    return HostFeedResult._(
+      command: command,
+      rejection: null,
+      admission: admission,
+    );
+  }
 
   /// Starts listening - tries the preferred port, then the fallbacks.
   ///
@@ -1291,6 +1644,12 @@ class LocalIntakeServer {
         method: request.method,
         correlationId: _firstHeader(request, 'X-Correlation-Id') ?? '',
         deferCredential: wsHandshake,
+        // على هذا السلك الترويسة هي المنصة الموثقة: الأصل هنا من
+        // ترويسة متصفح أو غائب كليا — الدرجة تُدوَّن في سجل القبول
+        // ولا تظهر على أي رد
+        originTrust: earlyOrigin == null
+            ? OriginTrustLevel.none
+            : OriginTrustLevel.browserHeader,
       );
       // الترويسات أحادية الدلالة: تعدد قيمها طلب ملغوب صريح
       // 400 وقطع، بدل استثناء valueغير الملتقط الذي يعلق المقبس بلا

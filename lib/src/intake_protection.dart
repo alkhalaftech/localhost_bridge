@@ -14,6 +14,39 @@ import 'digest.dart';
 /// window expired, or the session ended before the user answered).
 enum OriginConsent { allowAlways, allowOnce, reject, dismissed }
 
+/// How much the platform vouches for an admission's origin fact - the
+/// origin and its trust grade travel together, and the grade is recorded
+/// on the admission record ([IntakeAdmission.originTrust]), never on any
+/// wire reply. The grade decides one thing only: whether the browser-only
+/// Fetch Metadata gates may punish their absence. A channel where the
+/// platform itself verified the origin has no such headers at all, so the
+/// absence is honest there; a channel claiming the browser-header grade
+/// without producing the headers stays closed exactly like the HTTP wire.
+/// An origin whose sender cannot vouch for it is not passed at all - the
+/// native client then crosses by its token alone with the [none] grade.
+enum OriginTrustLevel {
+  /// The value rode a browser-controlled `Origin` header (the HTTP wire).
+  /// The browser is the vouching platform, and the Fetch Metadata gates
+  /// keep reading it exactly as they always have.
+  browserHeader,
+
+  /// The platform verified the origin itself - Android's
+  /// `WebMessageListener` against its allowed-origin rules, or iOS's
+  /// `WKScriptMessage.frameInfo.securityOrigin`. As binding as a browser
+  /// header, with none of its headers on the channel: the Fetch Metadata
+  /// absence gates do not fire for this grade, and every other gate (the
+  /// origin form, the policy, the quotas, the token layer) applies
+  /// unchanged.
+  platformVerified,
+
+  /// No origin fact at all - a native client that crosses by its token
+  /// alone (or is refused by the origin paths like any headerless
+  /// request). An origin value must never ride this grade: the entry
+  /// points refuse that combination loudly instead of silently ignoring
+  /// the value.
+  none,
+}
+
 /// Origin policy - the single concept left after the open mode was merged in:
 /// the list rules; allow-all is its widest value with the hardening attached; discovery grows it. Closed by default (an empty list denies all).
 class OriginPolicy {
@@ -212,6 +245,7 @@ class IntakeAdmission {
     required this.origin,
     required this.normalizedOrigin,
     required this.path,
+    required this.originTrust,
     _AdmissionDecision? decision,
     IntakeProtection? owner,
   }) : _decision = decision,
@@ -228,6 +262,7 @@ class IntakeAdmission {
     origin: null,
     normalizedOrigin: null,
     path: null,
+    originTrust: null,
   );
 
   /// The policy rejection when the request was refused - null when it was
@@ -260,6 +295,12 @@ class IntakeAdmission {
 
   /// The request path fact this admission was built from.
   final String? path;
+
+  /// The trust grade the origin fact carried - how much the platform
+  /// vouches for it. Recorded here and nowhere else: no wire reply, HTTP
+  /// or channel, ever carries the grade. Null only on the hand-built
+  /// [unrecorded] placeholder.
+  final OriginTrustLevel? originTrust;
 
   final _AdmissionDecision? _decision;
   final IntakeProtection? _owner;
@@ -1830,6 +1871,15 @@ class IntakeProtection {
   /// bind the proof to the request it signs (the canonical string carries
   /// both), so a captured proof cannot be transplanted to another verb,
   /// path, or story.
+  ///
+  /// [originTrust] is the grade the origin fact carries
+  /// ([OriginTrustLevel]). The default keeps the HTTP contract byte-for-byte
+  /// (every value this step has ever seen rode a browser header); the
+  /// non-HTTP channels pass their own grade explicitly. A null origin
+  /// always records [OriginTrustLevel.none] whatever was passed, and an
+  /// origin value with the [OriginTrustLevel.none] grade throws
+  /// [ArgumentError] - an origin no one vouches for is never slipped in
+  /// wearing a trust grade it does not hold.
   Future<IntakeAdmission> admit({
     String? origin,
     String? bridgeToken,
@@ -1841,7 +1891,21 @@ class IntakeProtection {
     String correlationId = '',
     bool demandCredential = false,
     bool deferCredential = false,
+    OriginTrustLevel originTrust = OriginTrustLevel.browserHeader,
   }) async {
+    if (origin != null && originTrust == OriginTrustLevel.none) {
+      throw ArgumentError.value(
+        origin,
+        'originTrust',
+        'is OriginTrustLevel.none while an origin value is present - an '
+            'origin no one vouches for is never admitted as a browser '
+            'header; pass platformVerified (or browserHeader) or omit the '
+            'origin and cross by the token alone',
+      );
+    }
+    // بلا أصل فلا درجة ترويسة مهما ادّعى النداء — الدرجة تُدوَّن من
+    // الحقيقة لا من الادعاء
+    final effectiveTrust = origin == null ? OriginTrustLevel.none : originTrust;
     final decision = _project(
       origin,
       bridgeToken,
@@ -1853,6 +1917,7 @@ class IntakeProtection {
       correlationId: correlationId,
       demandCredential: demandCredential,
       deferCredential: deferCredential,
+      originTrust: effectiveTrust,
     );
     return IntakeAdmission._(
       rejection: decision.rejection,
@@ -1862,6 +1927,7 @@ class IntakeProtection {
       origin: origin,
       normalizedOrigin: origin == null ? null : normalize(origin),
       path: path,
+      originTrust: effectiveTrust,
       decision: decision,
       owner: this,
     );
@@ -1882,9 +1948,15 @@ class IntakeProtection {
     String correlationId = '',
     bool demandCredential = false,
     bool deferCredential = false,
+    OriginTrustLevel originTrust = OriginTrustLevel.browserHeader,
   }) {
     final now = _now;
     final key = origin == null ? '' : normalize(origin);
+    // درجة المنصة الموثقة: القناة لا تحمل ترويسات Sec-Fetch أصلا —
+    // فالغياب فيها صادق وليس تخريا، وبوابات غياب الترويسات لا تنفعل
+    // عنها. كل بوابات الأصل والشكل والحصص باقية كما هي على الدرجتين
+    final platformVerifiedOrigin =
+        originTrust == OriginTrustLevel.platformVerified && origin != null;
 
     // الخمول التام قرارا نهائيا على كل المسارات (لا نصف حي): المدرج
     // والتوكن والحصص كلها تتوقف — برمز مستقل لا يوهم المطور بأن
@@ -1966,6 +2038,7 @@ class IntakeProtection {
           mayAskConsent: !budgetSpent,
           out: beyond,
           method: method,
+          platformVerifiedOrigin: platformVerifiedOrigin,
         );
         if (!tokenMatched &&
             budgetSpent &&
@@ -2056,6 +2129,7 @@ class IntakeProtection {
         mayAskConsent: true,
         out: beyond,
         method: method,
+        platformVerifiedOrigin: platformVerifiedOrigin,
       );
       if ((demandCredential || (requireBoth && !deferCredential)) &&
           beyond.accepted != null &&
@@ -2162,6 +2236,7 @@ class IntakeProtection {
     required bool mayAskConsent,
     required _BeyondOutcome out,
     String method = 'POST',
+    bool platformVerifiedOrigin = false,
   }) {
     // (1) القائمة — المخزّن دائماً (موافقة الاكتشاف المحفوظة) قبل الأنماط
     if (_isListed(origin)) {
@@ -2202,6 +2277,7 @@ class IntakeProtection {
         fetchMode,
         fetchDest,
         method: method,
+        platformVerified: platformVerifiedOrigin,
       );
       if (blocked != null) {
         out.rejection = blocked;
@@ -2235,6 +2311,7 @@ class IntakeProtection {
         fetchMode,
         fetchDest,
         method: method,
+        platformVerified: platformVerifiedOrigin,
       );
       if (preBlocked != null) {
         out.rejection = preBlocked;
@@ -2741,6 +2818,7 @@ class IntakeProtection {
     String? fetchMode,
     String? fetchDest, {
     String method = 'POST',
+    bool platformVerified = false,
   }) {
     // أصل صالح — الطلب غير المتصفحي يستعمل طبقة التوكن
     if (origin == null || origin.isEmpty || origin == 'null') {
@@ -2773,8 +2851,12 @@ class IntakeProtection {
     // (متصفح قديم أو عميل غير متصفح — هؤلاء على التوكن أصلا)،
     // إلا حين يطلب المضيف الترويسات صراحة فيغلق باب المتصفحات
     // القديمة على المسارين المتصفحيين. ومصافحة القناة الحقيقية
-    // (websocket/websocket على GET) باب متصفحي صادق بذاته
-    if (_policy.requireFetchMetadata) {
+    // (websocket/websocket على GET) باب متصفحي صادق بذاته.
+    // والدرجة الموثقة من المنصة بلا ترويسات أصلا — تحقق المنصة
+    // نفسه هو البديل الصادق عنها فيُعفى غيابها من هذه البوابة
+    // حصرا، ومن يدّعي درجة الترويسة على قناة بلا ترويسات يبقى
+    // مغلقا كأي متصفح قديم
+    if (_policy.requireFetchMetadata && !platformVerified) {
       if (!_isBrowserWsHandshake(fetchMode, fetchDest, method) &&
           (fetchMode == null || fetchMode.isEmpty || fetchMode != 'cors')) {
         return const IntakeRejection(

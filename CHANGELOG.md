@@ -286,6 +286,23 @@
   `ws_idle_timeout`) and `progress_data_too_large` sit in
   `intakeRejectionRegistry` and both README wire tables, walked on
   their own wire like every other code.
+- Added: the host feed - `LocalIntakeServer.acceptHostFeed(...)` hands
+  a message from a non-HTTP channel (an Android `WebMessageListener`
+  callback, an iOS `WKScriptMessage`, a native client) to the same
+  single admission step and the same payload checks, and returns an
+  accepted `TrustedCommand` or the rejection with the standing wire
+  codes. The origin travels with a required trust grade
+  (`OriginTrustLevel`: `browserHeader`, `platformVerified` - the
+  platform verified the origin itself - or `none`, an originless native
+  client crossing by its token); the grade is recorded on the admission
+  record (`IntakeAdmission.originTrust`) and never appears on any
+  reply, and an origin with the `none` grade is refused loudly instead
+  of posing as a browser header. A platform-verified origin carries no
+  Fetch Metadata headers, so only the absence gates do not fire for
+  that grade; every other check - origin form, policy, quotas, token
+  layer, body limit, payload checks, the live-work budget - applies
+  unchanged, and every rejection counts through the same rejection
+  counter. The HTTP wire is letter identical to previous releases.
 
 ## 0.1.3
 
