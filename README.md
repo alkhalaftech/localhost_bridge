@@ -382,6 +382,25 @@ Stable error codes:
 | 504 | `handler_timeout` | Your handler exceeded `handlerTimeout`; the seat is freed and the late result ignored. **The command may still have run** — treat 504 as "outcome unknown", not "not executed": a blind retry can double-execute. Deduplicate on `X-Correlation-Id` before retrying — the page sends its own id and the bridge echoes it back unchanged on a retry; a server-generated id is not one you can settle on when a reply is lost. |
 | 500 | `internal` / your code / `command_failed` | Handler failure; `command_failed` is the fallback code when your handler fails without one (set `BridgeConfig.fallbackErrorCode` to keep an existing wire contract). A failed outcome carrying `CommandOutcome.refusalStatus` (400..499) answers with that client-error status instead, only while `BridgeConfig.acceptHandlerRefusal` is on — the default stays `500`, and a marker outside 400..499 is ignored. Host error *text* is echoed only to trusted origins; everyone gets the code; `BridgeConfig.maxErrorMessageLength` (0 = off) caps that text on the wire to at most that many UTF-8 bytes, cut at a whole-character boundary (a multi-byte character is dropped whole, never split) when set. |
 
+The channel codes answer over their own wire, not as HTTP replies: a
+WebSocket channel (below, `BridgeConfig.wsPath`) reads them as the final
+JSON frame before the close (the close reason carries the literal code
+too), and the streaming reply (below, `BridgeConfig.allowStreamingReplies`)
+reads `progress_data_too_large` as the final `event: result` frame. The
+`HTTP` column on these rows names the same-failure HTTP family the fact
+would answer with on the HTTP wire - it is the registry status, not a
+status line the code actually writes. A refusal that happens BEFORE the
+WebSocket upgrade (origin policy, host authority, seat caps) is a plain
+HTTP reply with the standing codes above - no channel-specific rows exist
+for it.
+
+| HTTP | `error` code | Meaning |
+|---|---|---|
+| 403 | `ws_auth_timeout` / `ws_auth_invalid` | The channel's credential step: an admitted origin whose first message carried no credential within the auth deadline (10 seconds) is closed / the first message was not a JSON object carrying exactly one credential - `"token"` or `"pairing"`, never both. Browsers cannot add headers to a WebSocket handshake, so the credential travels in the first message and the handshake itself defers it. |
+| 408 | `ws_idle_timeout` | No message arrived within `BridgeConfig.idleTimeout` on the open channel - the connection is closed and its seat freed. |
+| 413 | `ws_message_too_large` | An inbound message over the internal channel cap (256 KiB, a fixed named constant). Two layers enforce it: a message between the cap and the transport ceiling (2 MiB) carries this refusal frame before the close; a frame over the transport ceiling itself is refused by `dart:io`'s own transformer at the declared length (before any payload byte buffers) and the close reads the transport-level 1002 - the code is still counted at the single tally and said in the throttled log line either way. |
+| 413 | `progress_data_too_large` | Streaming replies: a progress report over the internal 64 KiB event cap ends the stream with this refusal frame, fires the command's cancel signal, and turns the progress sink inert - the reply channel is gone, so wrapping up is the honest ask. |
+
 Bodies arrive as an array of strings, a bare string, or
 `{"data": [...]}` / `{"payload": ...}` / `{"commands": [...]}` wrappers
 (`BridgeConfig.payloadWrapperKeys` — add your domain's key there if your
@@ -392,6 +411,59 @@ through as raw command text by default — `BridgeConfig.rejectInvalidJson`
 (scoped to `application/json` senders) and `BridgeConfig.requireJsonBodies`
 (JSON-only mode) refuse those paths instead. Compressed payloads are
 delivered as-is — decompression is the host's responsibility, by design.
+
+## The host-to-page channels (streaming replies and the WebSocket)
+
+Both channels are off by default; the default wire is byte-identical to
+previous releases.
+
+**Streaming replies** - `BridgeConfig.allowStreamingReplies: true` lets a
+page opt one command in with the request header `X-Bridge-Stream: events`
+(a CORS preflight header, allowed only while the option is on). The reply
+is `text/event-stream`: the handler reports progress through
+`TrustedCommand.progress` (one call = one `event: progress` frame, in
+call order), and the handler's outcome travels as the final
+`event: result` frame with the standing reply contract (`{"ok":...}` -
+same codes, same data cap, same message rules as the JSON reply). The
+page reads it with `fetch` and a streamed-body reader:
+
+```javascript
+const res = await fetch(ENDPOINT, {method: 'POST', headers: {
+  'Content-Type': 'application/json', 'X-Bridge-Stream': 'events',
+}, body: '["LONG-JOB"]'});
+const reader = res.body.getReader();  // frames: event: progress / result
+```
+
+A progress value over the internal 64 KiB event cap ends the stream with
+`progress_data_too_large` and fires the command's cancel signal; the
+page closing mid-stream fires that same cancel signal and leaves no seat
+nor socket behind.
+
+**The WebSocket channel** - `BridgeConfig.wsPath: '/ws'` (any path but
+`/pair`) upgrades a browser handshake through the same admission step as
+every request: origin, fetch metadata, host authority, and the seat caps
+answer their standing codes BEFORE the upgrade. The browser cannot add
+headers to a handshake, so the credential - the token or a pairing
+signature - travels in the first message (a JSON object
+`{"token": "..."} ` or `{"pairing": "id.stamp.sig"}`, within the 10
+second auth deadline; the pairing signature signs `WS`, the channel
+path, and a correlation id you choose). Every inbound message is a
+command under the same payload checks; every reply is an event shaped by
+the standing reply contract. The connection holds one concurrency seat
+for its lifetime, so `maxConcurrentRequests` and `maxSeatsPerOrigin`
+bound the live connections per origin exactly like live commands; a
+heartbeat keeps the path alive, silence past `idleTimeout` closes it,
+and messages over the internal 256 KiB cap close it
+(`ws_message_too_large`).
+
+```javascript
+const ws = new WebSocket('ws://127.0.0.1:' + BRIDGE_PORT + '/ws');
+ws.onopen = () => {
+  ws.send(JSON.stringify({token: TOKEN, correlationId: 'ws-1'}));
+  ws.send(JSON.stringify(['PRINT', 'label-zpl']));
+};
+ws.onmessage = (e) => console.log(JSON.parse(e.data));  // the reply event
+```
 
 ## Page-side reference (JavaScript)
 

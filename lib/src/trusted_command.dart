@@ -6,6 +6,22 @@ import 'dart:typed_data' show Uint8List;
 
 import 'intake_protection.dart';
 
+/// The progress-report seam of a streaming command: the host handler calls
+/// it with one JSON-encodable value per progress step while the command
+/// works, and each call travels the reply channel as one frame the page
+/// reads from the streamed body in the call order. The sink is non-null
+/// only when the command arrived over a request that opted into the
+/// streaming reply (and the streaming option is on); for every other
+/// command it is null and progress reporting has no channel. Keep the
+/// values plain JSON types (null, bool, num, String, List, Map): a value
+/// `jsonEncode` cannot serialize throws at the call site - the handler's
+/// own contract violation, visible where it happens. A value over the
+/// package's internal per-event page cap does not throw: the stream ends
+/// with the `progress_data_too_large` refusal, the command's cancel signal
+/// fires, and the sink turns inert (later calls do nothing) - the reply
+/// channel is gone, so wrapping up is the honest ask.
+typedef BridgeProgressSink = void Function(Object? data);
+
 /// The cooperative cancellation signal a handler may read: the intake
 /// fires it when the command leaves its seat (the handler budget expired
 /// and the `504 handler_timeout` is on its way) and when the server stops,
@@ -72,6 +88,7 @@ class TrustedCommand {
     this.admission = IntakeAdmission.unrecorded,
     this.cancellation = const CommandCancelSignal.never(),
     this.binaryPayload,
+    this.progress,
   });
 
   /// The sender's origin as protection read it ('unknown-origin' when absent).
@@ -116,6 +133,13 @@ class TrustedCommand {
   /// [headers]`['x-command']`. The bytes sit under the server's internal
   /// binary ceiling - a body over it is refused before the handler runs.
   final Uint8List? binaryPayload;
+
+  /// The progress-report sink of a streaming command - see
+  /// [BridgeProgressSink] for the full contract. Null unless the request
+  /// opted into the streaming reply and the streaming option is on; the
+  /// intake wires the sink to the reply channel it detached for this
+  /// command, and a command built outside the intake carries null.
+  final BridgeProgressSink? progress;
 }
 
 /// The host-side command execution result.

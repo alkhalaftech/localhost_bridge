@@ -243,6 +243,49 @@
   handler-chosen outcomes and stay outside the registry by its contract,
   and `command_required` (the unnamed binary body) joins the same
   registry and tables with its own walk.
+- Added: the streaming reply - `BridgeConfig.allowStreamingReplies`
+  (off by default) plus the request header `X-Bridge-Stream: events`
+  turn one command into a `text/event-stream` reply: every handler
+  progress report travels as one `event: progress` frame the page
+  reads from the streamed body in call order (the sink is
+  `TrustedCommand.progress`, non-null only for opted-in commands),
+  and the handler's outcome travels as the final `event: result`
+  frame carrying the standing reply contract - the same error codes,
+  the same host-text verbosity and byte cap, and the same 64 KiB
+  reply-data cap (`reply_data_too_large` refuses whole, never
+  truncated). A progress report over the internal 64 KiB event cap
+  ends the stream with `progress_data_too_large`, fires the command's
+  cancel signal, and turns the sink inert. The page closing mid-stream
+  reaches the handler as cancellation and leaves no seat nor socket.
+  The header joins the CORS allowed-header list only while the option
+  is on; the disarmed wire is letter identical to previous releases.
+- Added: the WebSocket channel - `BridgeConfig.wsPath` (null, off by
+  default) opens a `dart:io` WebSocket on the host-chosen path. The
+  handshake passes the same single admission step every request
+  passes: origin, fetch metadata (the browser's own
+  `Sec-Fetch-Mode: websocket` handshake shape is a real send method),
+  host authority, and the seat caps - every refusal answers its
+  standing wire code BEFORE the upgrade. The connection opens only
+  after its first message carries a verified credential - the shared
+  token or a paired origin-bound signature (`token_required` /
+  `token_locked` / `pair_signature_replay` close with their literal
+  codes) - within the auth deadline (10 seconds); an admitted origin
+  without a credential in time is closed (`ws_auth_timeout`). Inbound
+  messages are commands passing the same payload checks; replies are
+  events shaped by the standing reply contract. The message cap
+  (256 KiB) and transport ceiling (2 MiB) are fixed named constants:
+  a message between them reads `ws_message_too_large` in a refusal
+  frame, a frame over the ceiling is refused by `dart:io`'s own
+  transformer before any payload byte buffers; silence past
+  `BridgeConfig.idleTimeout` closes `ws_idle_timeout`; a heartbeat
+  keeps NAT paths alive and cuts dead peers. One open connection
+  holds one concurrency seat - the seat caps bound the live
+  connections per origin exactly like the live commands; a stop
+  closes the live channels inside its drain. The four channel codes
+  (`ws_auth_timeout`, `ws_auth_invalid`, `ws_message_too_large`,
+  `ws_idle_timeout`) and `progress_data_too_large` sit in
+  `intakeRejectionRegistry` and both README wire tables, walked on
+  their own wire like every other code.
 
 ## 0.1.3
 

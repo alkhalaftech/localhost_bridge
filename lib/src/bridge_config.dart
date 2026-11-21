@@ -22,6 +22,8 @@ class BridgeConfig {
     this.acceptHandlerRefusal = false,
     this.maxErrorMessageLength = 0,
     this.acceptBinaryBodies = false,
+    this.allowStreamingReplies = false,
+    this.wsPath,
     this.requestTimeout = const Duration(seconds: 30),
     this.idleTimeout = const Duration(seconds: 60),
     this.handlerTimeout = defaultHandlerTimeout,
@@ -170,6 +172,41 @@ class BridgeConfig {
   /// unsupported_media_type` and the allowed-header list never offers
   /// `X-Command`.
   final bool acceptBinaryBodies;
+
+  /// Streaming replies - when true, a command whose request carries the
+  /// `X-Bridge-Stream: events` header answers `text/event-stream` instead
+  /// of a single JSON body: every handler progress report travels as one
+  /// `event: progress` frame the page reads from the streamed body, and the
+  /// handler's final outcome travels as the last `event: result` frame
+  /// carrying the standing reply contract (`{"ok": ...}` with the same
+  /// error codes and the same reply-data cap). The header joins the CORS
+  /// allowed-header list only while the option is on, so the disarmed wire
+  /// is letter identical to previous releases. `false` (the default) keeps
+  /// the header unknown: a page sending it anyway reads the ordinary JSON
+  /// reply. The per-event data cap is the same internal page cap the
+  /// result answers to - a progress report over it ends the stream with
+  /// `progress_data_too_large` and fires the command's cancel signal, so
+  /// a flooding handler wraps up instead of writing into a closed reply.
+  final bool allowStreamingReplies;
+
+  /// The WebSocket channel's path - when non-null, a `GET` upgrade
+  /// handshake on exactly this path is answered with a WebSocket upgrade
+  /// (after the same single admission step every request passes: origin,
+  /// fetch metadata, host authority, and the seat caps answer their
+  /// standing wire codes BEFORE the upgrade). The connection opens only
+  /// after its first message carries a verified credential - the shared
+  /// token or a paired origin-bound signature - within the auth deadline;
+  /// every inbound message is a command passing the same payload checks,
+  /// and every reply is an event the host shaped. `null` (the default)
+  /// keeps the channel off: the path answers like any non-POST path
+  /// (`405 method_not_allowed`), and the wire never upgrades. The value
+  /// must be non-empty, start with `/`, and differ from the pairing route
+  /// `/pair` - a violation throws [ArgumentError] at server construction.
+  /// An open connection holds one concurrency seat - the same seat budget
+  /// the HTTP commands hold - for its whole lifetime, so the seat caps
+  /// bound the live connections per origin exactly like they bound the
+  /// live commands.
+  final String? wsPath;
 
   /// Per-request timeout (anchored at request arrival, not server start).
   final Duration requestTimeout;

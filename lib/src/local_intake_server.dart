@@ -80,6 +80,10 @@ class _HandlerBudgetExceeded implements Exception {
   const _HandlerBudgetExceeded();
 }
 
+/// قيما المرسلة من انتظار أول رسالة على القناة — قيمُ حدٍّ لا رسالة:
+/// المهلة انقضت أو النظير رحل قبل أي رسالة
+enum _WsAuthMarker { timeout, gone }
+
 /// One working orphan: the budget-expired command future holds a ticket
 /// from creation to settlement, so a stop can retire the whole still-
 /// working generation at its return with per-ticket routing (a retired
@@ -257,6 +261,7 @@ class LocalIntakeServer {
     this.config = const BridgeConfig(),
     this.requestTimeout,
     this.handlerTimeout,
+    this.wsAuthTimeout,
     this.onOrphanSettled,
   }) : _nowMs = nowMs,
        protection = protection ?? IntakeProtection(telemetry: telemetry) {
@@ -349,6 +354,33 @@ class LocalIntakeServer {
             'is the budget itself',
       );
     }
+    if (wsAuthTimeout != null && wsAuthTimeout! <= Duration.zero) {
+      throw ArgumentError.value(
+        wsAuthTimeout,
+        'wsAuthTimeout',
+        'must be positive - omit it to use the package internal '
+            'WebSocket auth deadline',
+      );
+    }
+    final wsPath = config.wsPath;
+    if (wsPath != null) {
+      if (wsPath.isEmpty || !wsPath.startsWith('/')) {
+        throw ArgumentError.value(
+          wsPath,
+          'config.wsPath',
+          'must be a non-empty path starting with "/" (the WebSocket '
+              'channel stays off entirely while wsPath is null)',
+        );
+      }
+      if (wsPath == _pairingPath) {
+        throw ArgumentError.value(
+          wsPath,
+          'config.wsPath',
+          'collides with the pairing route "/pair" - choose another path '
+              'so both registered routes stay unambiguous',
+        );
+      }
+    }
   }
 
   /// Called with every trusted command the package hands to the registered host.
@@ -367,6 +399,17 @@ class LocalIntakeServer {
   /// log (allow-all warnings, rejection lines) is not muted; a passed one
   /// carrying no telemetry warns once at [start] with directions to wire it.
   final IntakeProtection protection;
+
+  /// The WebSocket auth-deadline override (tests inject it) - the deadline
+  /// the first message of a connection must arrive within. Null selects the
+  /// package internal constant; a non-positive value throws [ArgumentError]
+  /// at construction.
+  final Duration? wsAuthTimeout;
+
+  /// The effective first-message deadline of the WebSocket channel: the
+  /// explicit parameter when given, else the internal constant.
+  late final Duration effectiveWsAuthDeadline =
+      wsAuthTimeout ?? _wsAuthDeadlineDefault;
 
   /// The total pre-handler deadline and the full-body receive timeout -
   /// injected directly for tests; the default comes from
@@ -793,6 +836,18 @@ class LocalIntakeServer {
       } else {
         await server?.close();
       }
+      // قناة الويب سوكيت الحية: كل مقبس مفتوح يمسك مقعداً كطلب حي —
+      // الإغلاق الرشيق بحالتها الخاصة (going away) يحسم مستقبل مسار
+      // الاتصال فيفرغ مقعده داخل نافذة الفراغ نفسها، ولا يبقى مقبس
+      // قناة بعد العودة. الفشل هنا محتوى: الدمّر عند الإغلاق مسار
+      // dart:io نفسه ولا يترك مقعداً معلقاً وحده
+      for (final ws in _liveWsSockets.toList()) {
+        try {
+          await ws.close(WebSocketStatus.goingAway, 'server stopping');
+        } on Object {
+          // مقبس مات قبل الإغلاق — مساره حسم نفسه وحده
+        }
+      }
       while (_activeRequests > 0) {
         // أعد استخدام المسلح: نداءان متداخلان لstop
         // يطحن الثاني _drain فيبقى الأول معلقا على مستقبل لا يكتمل
@@ -950,6 +1005,43 @@ class LocalIntakeServer {
   /// لا مكتوب بيده، فلا يكذب الرد لو تغيّر الثابت يوماً.
   static final String _binaryCapLabel = '${_maxBinaryBodyBytes ~/ 1024} KiB';
 
+  /// السقف الداخلي لرسالة قناة الويب سوكيت بالبايتات - ثابت مسمّى عمداً
+  /// لا خيار، بنمط سقف الجسم الثنائي: رسالة القناة أمرٌ وحمولتها
+  /// النصية عادة، وما فوقه شكل هجومي لا استعمال معروف له. السقف يفحص
+  /// عند التسليم فيحمل ردُّ الإغلاق إطاره الإفصاحي برمز القناة المسجل
+  /// (المحول نفسه أعمى الإفصاح: إطار فوق سقفه يغلق بالنقل الميت 1002
+  /// بلا إطار يُقرأ).
+  static const int _maxWsMessageBytes = 256 * 1024;
+
+  /// اسم سقف رسالة القناة كما يظهر في رد الإغلاق — مشتق من الثابت.
+  static final String _wsMessageCapLabel = '${_maxWsMessageBytes ~/ 1024} KiB';
+
+  /// سقف إطارات النقل عند المحول — ثابت داخلي أوسع من سقف الرسالة:
+  /// ذاكرته هي حاجز الضخم الوحيد قبل التسليم (dart:io يخزن الإطار
+  /// كاملاً قبل تسليمه) فيحتصر التخزين الأعظمي على هذا الرقم، وما
+  /// فوقه يرميه المحول عند الطول المعلن قبل بايتات الحمولة فلا
+  /// تخزين إطلاقاً. السقفان معاً: السقف الواسع يحمي الذاكرة، والسقف
+  /// الضيق هو العقد الذي يحمل إطاره الإفصاحي على السلك.
+  static const int _wsTransportFrameCeiling = 2 * 1024 * 1024;
+
+  /// مهلة انتظار أول رسالة اعتماد على القناة — ثابت داخلي لا خيار:
+  /// اتصال بلا اعتماد يمسك مقعده كي لا يجوع غيره، والمهلة القصيرة
+  /// تحصّر نافذة ذلك المسك. فوقها يُغلق الاتصال برمز القناة المسجل.
+  /// الاختبارات تحقن قيمة أقصر عبر [wsAuthTimeout].
+  static const Duration _wsAuthDeadlineDefault = Duration(seconds: 10);
+
+  /// النبض الداخلي للقناة: dart:io يرسل pings على هذه الوترة ويقطع
+  /// النظير الميت الذي لا يجيب — يبقي مقابس الـNAT والمسارات الخاملة
+  /// حية ويميت المقبض الميت قبل أن يمسك مقعده طويلاً. ثابت داخلي لا
+  /// خيار، ومهلة الخمول القابلة للضبط (config.idleTimeout) هي التي
+  /// تحسم رسالةً صامتة فوق اتصال حي.
+  static const Duration _wsHeartbeat = Duration(seconds: 30);
+
+  /// مقابس القناة الحية: كل واحد يمسك مقعداً (السقوف قائمة فوقها —
+  /// لا سقف قناة ثانٍ بجوارها)، وstop يغلقها رشيقياً كي يحسم مستقبل
+  /// مساراتها داخل نافذة الفراغ ولا يبقى مقعد ولا مقبس بعد العودة.
+  final Set<WebSocket> _liveWsSockets = <WebSocket>{};
+
   /// The pairing route - the one path the intake answers specially while
   /// the pairing layer is armed. Disarmed, it is no path at all: it rides
   /// the ordinary non-root behavior (a warning and the handler), wire
@@ -1033,6 +1125,14 @@ class LocalIntakeServer {
   /// تُتجاهل والسلوك الافتراضي يبقى، والسطر يُقال مرة في الثانية على
   /// الأكثر كي لا يغرق سجل المضيف معالجٌ معطوب.
   late final _WarnThrottle _refusalStatusWarnThrottle = _WarnThrottle(
+    nowMs: () => _now,
+    windowMs: _warnThrottleWindowMs,
+  );
+
+  /// كبح أسطر إغلاق القناة: فيض إغلاقات الاعتماد والسقوف سطر واحد في
+  /// الثانية على الأكثر بالساعة المحقونة، والسطر التالي بعد النافذة
+  /// يحمل عدد المكتوم كي يبقى حجم المحاولة مرئياً.
+  late final _WarnThrottle _wsCloseWarnThrottle = _WarnThrottle(
     nowMs: () => _now,
     windowMs: _warnThrottleWindowMs,
   );
@@ -1173,7 +1273,11 @@ class LocalIntakeServer {
       // (OPTIONS) والطريقة المخالفة والمنشغل والمرفوض بالمضيف يمرّون
       // بلا طوابع ولا أسئلة ولا سطور كما اليوم، ومن يقرأ قراراً
       // متعلقاً بالحماية بعد هنا يقرأ السجل وحده (صدى CORS ونص الخطأ
-      // ومسار القبول والرفض) ولا يلمس كائن الحماية ثانية
+      // ومسار القبول والرفض) ولا يلمس كائن الحماية ثانية. ومصافحة
+      // القناة وحدها تؤجل اعتمادها (لا ترويسة توكن في مصافحة متصفح —
+      // لهذا وُلدت القناة) فالأصل المؤهل يعبر الترقية والاعتماد باب
+      // أول رسالتها
+      final wsHandshake = _isWsHandshake(request);
       final admission = await protection.admit(
         origin: earlyOrigin,
         bridgeToken: earlyToken,
@@ -1186,6 +1290,7 @@ class LocalIntakeServer {
         pairingProof: earlyPairing,
         method: request.method,
         correlationId: _firstHeader(request, 'X-Correlation-Id') ?? '',
+        deferCredential: wsHandshake,
       );
       // الترويسات أحادية الدلالة: تعدد قيمها طلب ملغوب صريح
       // 400 وقطع، بدل استثناء valueغير الملتقط الذي يعلق المقبس بلا
@@ -1373,7 +1478,7 @@ class LocalIntakeServer {
       _activeRequests++;
       _seatsByOrigin[seatOriginKey] = (_seatsByOrigin[seatOriginKey] ?? 0) + 1;
       try {
-        await _handleRequest(request, response, admission);
+        await _handleRequest(request, response, admission, wsHandshake);
       } finally {
         _activeRequests--;
         final originLeft = (_seatsByOrigin[seatOriginKey] ?? 1) - 1;
@@ -1419,6 +1524,7 @@ class LocalIntakeServer {
     HttpRequest request,
     HttpResponse response,
     IntakeAdmission admission,
+    bool wsHandshake,
   ) async {
     // نكرّم ترويسة البوابة إن أرسلت X-Correlation-Id،
     // وإلا نولّد UUID v4 هنا عند الاستقبال — من هذه النقطة يخيط
@@ -1451,6 +1557,15 @@ class LocalIntakeServer {
               json: null,
               bodyFullyRead: false,
             );
+            return;
+          }
+          // قناة الويب سوكيت: مسار المضيف وترقية مصافحة حاضرتان والخيار
+          // مسلّح حصرا — غير ذلك يمر من تحت الفرع لسلوك اليوم حرفاً
+          // (405 كأي طلب غير POST). والمهلة الكلية تُلغى هنا: عمر
+          // الاتصال عقد مهلته الخاصة (الاعتماد والخمول) لا مهلة الطلب
+          if (wsHandshake) {
+            totalDeadlineLive = false;
+            await _handleWebSocket(request, response, admission, origin);
             return;
           }
           if (request.method != 'POST') {
@@ -1805,6 +1920,29 @@ class LocalIntakeServer {
           // فلا تسرب ولا إشعال لميت
           final cancelSignal = CommandCancelSignal();
           _liveSignals.add(cancelSignal);
+          // الرد المتدفق: خيار للأمر يطلبه مرسل الطلب بترويسته، والمطفأ
+          // يترك السلك حرفاً كما هو (الترويسة مجهولة لا تقرأ). المطلوب
+          // يفصل المقبس للإطارات قبل استدعاء المعالج كي يجد sinksه
+          // جاهزاً من أول نداء
+          final streamRequested =
+              config.allowStreamingReplies &&
+              (_firstHeader(request, 'X-Bridge-Stream') ?? '')
+                      .trim()
+                      .toLowerCase() ==
+                  'events';
+          if (streamRequested) {
+            await _runStreamingReply(
+              request: request,
+              response: response,
+              cancelSignal: cancelSignal,
+              payloads: payloads,
+              binaryBytes: binaryBytes,
+              source: source,
+              verboseErrors: verboseErrors,
+              correlationId: correlationId,
+            );
+            return;
+          }
           final commandFuture = onCommand(
             TrustedCommand(
               source: source,
@@ -1830,42 +1968,11 @@ class LocalIntakeServer {
                   _liveSignals.remove(cancelSignal),
             ),
           );
-          final CommandOutcome result;
-          final handlerBudget = effectiveHandlerTimeout;
-          try {
-            result = handlerBudget == null
-                ? await commandFuture
-                : await commandFuture.timeout(
-                    handlerBudget,
-                    // ميزانية الجسر بعلامة خاصة: كل TimeoutException
-                    // أخرى (رمى المعالجُ نفسه) تعود لمسار 500 العام
-                    onTimeout: () => throw const _HandlerBudgetExceeded(),
-                  );
-          } on _HandlerBudgetExceeded {
-            // احترقت الميزانية: الإشارة تُشعل كي يغلف المعالج عمله إن
-            // شاء — الرد 504 فوصل وحده ولن يقرأ أحد نتيجته المتأخرة
-            cancelSignal.cancel();
-            commandFuture.ignore();
-            // اليتيم ما زال يعمل فعلا: يُعدّ ضمن ميزانية العمل الحي
-            // بتذكرة حية، وفراغه يدق جرس تفريغ stop — then بمعالج خطأ
-            // فارغ كي لا يُحيى خطأه المتأخر (تجاهلُ ignore للمستقبل
-            // الأصلي وحده)
-            final ticket = _OrphanTicket(cancelSignal);
-            _pendingOrphans.add(ticket);
-            _activeOrphans++;
-            commandFuture.then<void>(
-              (_) => _settleOrphan(ticket),
-              onError: (_) => _settleOrphan(ticket),
-            );
-            // كبح السطر نفسه: موجة معالجات بطيئة تكتب تحذيرا واحدا في
-            // الثانية على الأكثر، والسطر التالي بعد النافذة يحمل عدد
-            // المكتوم، ورد 504 نفسه لكل طلب.
-            final line = _handlerTimeoutWarnThrottle.admit(
-              'intake handler timeout — seat released, late result ignored',
-            );
-            if (line != null) {
-              telemetry.warn(line, category: BridgeCategory.network);
-            }
+          final (awaited, budgetExpired) = await _awaitCommandFuture(
+            commandFuture,
+            cancelSignal,
+          );
+          if (budgetExpired || awaited == null) {
             await _replyRejection(
               response,
               code: 'handler_timeout',
@@ -1874,6 +1981,7 @@ class LocalIntakeServer {
             );
             return;
           }
+          final result = awaited;
 
           // بيانات الرد المرتجعة: النجاح حصرا (فشل الأمر عقد الخطأ لا
           // بيانات)، والقياس بالترميز الفعلي UTF-8 بعد jsonEncode، وفوق
@@ -2181,6 +2289,545 @@ class LocalIntakeServer {
     );
   }
 
+  /// Whether this request is a WebSocket handshake on the channel's path:
+  /// the option armed, a GET on exactly the configured path, and the
+  /// upgrade head (the upgrade token plus a client key) present. Anything
+  /// else on the path rides the standing behavior (a plain GET reads 405
+  /// like every non-POST).
+  bool _isWsHandshake(HttpRequest request) {
+    final path = config.wsPath;
+    if (path == null) return false;
+    if (request.method != 'GET' || request.uri.path != path) return false;
+    final upgrade = _firstHeader(request, HttpHeaders.upgradeHeader);
+    if (upgrade == null || upgrade.trim().toLowerCase() != 'websocket') {
+      return false;
+    }
+    final key = _firstHeader(request, 'Sec-WebSocket-Key');
+    return key != null && key.trim().isNotEmpty;
+  }
+
+  /// إغلاق قناة برمزها المسجل: الإطار الأخير بعقد الرفض ثم الإغلاق
+  /// برمز الإطار الشبكي المناسب — والعدّ من العداد الواحد، والرمز
+  /// بلا سجل انحراف بنيوي يُرفع صوتاً فلا إغلاق صامت بترميز مغلوط.
+  Future<void> _wsCloseWithCode(
+    WebSocket ws,
+    String code,
+    String message, {
+    int wireCloseCode = WebSocketStatus.policyViolation,
+  }) async {
+    _noteRejection(code);
+    final line = _wsCloseWarnThrottle.admit(
+      'intake channel close: $code — the connection closed with the '
+      'literal code',
+    );
+    if (line != null) {
+      telemetry.warn(line, category: BridgeCategory.security);
+    }
+    try {
+      // الإطار نصي حصراً: رسالة القناة String تصل طرف dart:io إطار
+      // نصٍّ لا ثنائي، فتقرأها الصفحة كنص
+      ws.add(
+        jsonEncode(<String, Object?>{
+          'ok': false,
+          'error': code,
+          'message': message,
+        }),
+      );
+      await ws.close(wireCloseCode, code);
+    } on Object {
+      // القناة ماتت قبل الإطار أو أثناءه — لا إغلاق ثانٍ ممكن
+    }
+  }
+
+  /// مسار القناة كله داخل مقعد واحد: المصافحة عبر خطوة القبول الواحدة
+  /// (الرفض قبل الترقية برمز السلك الحرفي)، والترقية بسقف الرسالة
+  /// مرّ للمحول نفسه وبلا ضغط (قناة أوامر لا تخدم ضغطاً لمختلط
+  /// أسرارها)، ثم الاعتماد بأول رسالة في مهلتها — التوكن أو إثبات
+  /// الاقتران، وقدحه خطوة القبول نفسها بنداء ثانٍ عليها لا منطق
+  /// حماية ثانٍ — ثم حلقة الرسائل: الواردة أوامر بفحوص الحمولة نفسها
+  /// والصادرة أحداث يرسلها المضيف. سقف الاتصالات هو المقاعد القائمة
+  /// نفسها: الاتصال الحي مقعد واحد من السقف العام ومن حصة أصله.
+  Future<void> _handleWebSocket(
+    HttpRequest request,
+    HttpResponse response,
+    IntakeAdmission admission,
+    String? origin,
+  ) async {
+    // بوابة القبول: التسوية عند موضعها نفسه كما في الرد الواحد —
+    // الرفض قبل الترقية برمز السلك الحرفي ولا ترقية لأصل غير مقبول.
+    // والاعتماد مؤجَّل هنا لا مطلوب: المتصفح لا يرسل ترويسة توكن في
+    // المصافحة أصلاً — لهذا وُلدت القناة — فالأصل المؤهل يعبر الترقية
+    // والاعتماد نفسه هو باب أول رسالتها (demandCredential هناك)
+    admission.settle();
+    final rejection = admission.rejection;
+    if (rejection != null) {
+      await _replyRejection(
+        response,
+        code: rejection.code,
+        message: rejection.message,
+        bodyFullyRead: false,
+      );
+      return;
+    }
+    final WebSocket ws;
+    try {
+      ws = await WebSocketTransformer.upgrade(
+        request,
+        compression: CompressionOptions.compressionOff,
+        maxPayloadLength: _wsTransportFrameCeiling,
+      );
+    } on Object {
+      // ترقية رفضها المحول (ترويسة ناقصة أو شكل مخالف): رفض شكل
+      // سلكي يُرد قبل أي شيء آخر
+      await _replyRejection(
+        response,
+        code: 'bad_request',
+        message:
+            'The WebSocket upgrade was refused — send a valid '
+            'handshake (Upgrade: websocket with a client key)',
+        bodyFullyRead: false,
+        protocolShape: true,
+      );
+      return;
+    }
+    ws.pingInterval = _wsHeartbeat;
+    _liveWsSockets.add(ws);
+    try {
+      await _wsSession(ws, origin);
+    } finally {
+      _liveWsSockets.remove(ws);
+    }
+  }
+
+  /// جلست القناة على مشتركٍ واحد — dart:io WebSocket دفق اشتراكٍ
+  /// وحيد فلا استماع ثانٍ: أول رسالة هي الاعتماد (توكن أو إثبات
+  /// اقتران في مهلتها — وإلا الإغلاق بالرمز المسجل)، وما بعدها
+  /// أوامر بفحوص الحمولة نفسها تُسلسل بترتيب وصولها، والاتصال كله
+  /// حي تحت مهلة الخمول القابلة للضبط ونبض المحول الداخلي.
+  Future<void> _wsSession(WebSocket ws, String? origin) async {
+    final firstMessage = Completer<Object?>();
+    var firstArrived = false;
+    var authAccepted = false;
+    IntakeAdmission? auth;
+    var gone = false;
+    Timer? authTimer;
+    Timer? idle;
+    Future<void> chain = Future<void>.value();
+    final sessionDone = Completer<void>();
+
+    void armIdle() {
+      idle?.cancel();
+      idle = Timer(config.idleTimeout, () {
+        unawaited(
+          _wsCloseWithCode(
+            ws,
+            'ws_idle_timeout',
+            'No message arrived within the idle timeout '
+                '(${config.idleTimeout.inSeconds}s)',
+          ),
+        );
+      });
+    }
+
+    void endSession() {
+      gone = true;
+      authTimer?.cancel();
+      idle?.cancel();
+      chain.whenComplete(() {
+        if (!sessionDone.isCompleted) sessionDone.complete();
+      });
+    }
+
+    late final StreamSubscription sub;
+    final preOpen = <Object?>[];
+    sub = ws.listen(
+      (message) {
+        if (gone) return;
+        if (!firstArrived) {
+          // أول رسالة = الاعتماد: حلقة الأوامر لا تلمس قبل حسمها
+          firstArrived = true;
+          authTimer?.cancel();
+          if (!firstMessage.isCompleted) firstMessage.complete(message);
+          return;
+        }
+        if (!authAccepted) {
+          // وصلت أثناء حسم الاعتماد: تُخزن بالترتيب ولا تُسقط —
+          // العميل أرسل اعتماده وأمره متتاليين على القناة نفسها
+          preOpen.add(message);
+          return;
+        }
+        armIdle();
+        chain = chain.then<void>((_) async {
+          if (gone || auth == null) return;
+          try {
+            await _wsHandleMessage(ws, message, auth);
+          } on Object {
+            // عطل كتابة الرد: القناة ماتت — onDone/onError يجيبان موتها
+          }
+        });
+      },
+      onError: (Object e) {
+        if (!firstArrived) {
+          firstArrived = true;
+          authTimer?.cancel();
+          if (e is WebSocketException) {
+            // إطار فوق سقف النقل قبل أي رسالة: المحول رمى على الطول
+            // المعلن وأغلق النقل بنفسه — الرفض المسجل يعدّ هنا والسطر
+            // المكبوط يسمّيه، ولا إطار إفصاح فوق نقلٍ ميت
+            _noteRejection('ws_message_too_large');
+            final line = _wsCloseWarnThrottle.admit(
+              'intake channel close: ws_message_too_large — the transport '
+              'refused the declared frame length',
+            );
+            if (line != null) {
+              telemetry.warn(line, category: BridgeCategory.security);
+            }
+          }
+          if (!firstMessage.isCompleted) {
+            firstMessage.complete(_WsAuthMarker.gone);
+          }
+          endSession();
+          return;
+        }
+        endSession();
+      },
+      onDone: () {
+        if (!firstArrived) {
+          firstArrived = true;
+          authTimer?.cancel();
+          if (!firstMessage.isCompleted) {
+            firstMessage.complete(_WsAuthMarker.gone);
+          }
+        }
+        endSession();
+      },
+    );
+
+    authTimer = Timer(effectiveWsAuthDeadline, () {
+      if (!firstArrived) {
+        firstArrived = true;
+        if (!firstMessage.isCompleted) {
+          firstMessage.complete(_WsAuthMarker.timeout);
+        }
+      }
+    });
+
+    final first = await firstMessage.future;
+    if (first == _WsAuthMarker.gone) {
+      // رحل قبل أي رسالة: لا إغلاق مطلوب ولا أثر يُعدّ
+      unawaited(sub.cancel());
+      return;
+    }
+    if (first == _WsAuthMarker.timeout) {
+      await _wsCloseWithCode(
+        ws,
+        'ws_auth_timeout',
+        'No credential arrived within the auth deadline '
+            '(${effectiveWsAuthDeadline.inSeconds}s) — the first message '
+            'must carry the token or the pairing signature',
+      );
+      unawaited(sub.cancel());
+      return;
+    }
+    // رسالة الاعتماد: كائن JSON بحقل توكن أو إثبات لا الاثنين —
+    // وغير ذلك إغلاقُ اعتمادٍ فاسد بالرمز المسجل
+    String? authToken;
+    String? authProof;
+    var authCid = '';
+    var authShapeValid = false;
+    if (first is String && utf8.encode(first).length > _maxWsMessageBytes) {
+      await _wsCloseWithCode(
+        ws,
+        'ws_message_too_large',
+        'The message is over the internal channel cap '
+            '($_wsMessageCapLabel)',
+        wireCloseCode: WebSocketStatus.messageTooBig,
+      );
+      unawaited(sub.cancel());
+      return;
+    }
+    if (first is String) {
+      try {
+        final decoded = jsonDecode(first);
+        if (decoded is Map) {
+          final tokenValue = decoded['token'];
+          final proofValue = decoded['pairing'];
+          final cidValue = decoded['correlationId'];
+          final tokenOk = tokenValue is String && tokenValue.isNotEmpty;
+          final proofOk = proofValue is String && proofValue.isNotEmpty;
+          if (tokenOk != proofOk) {
+            // واحدٌ لا اثنان ولا صفر
+            authShapeValid = true;
+            if (tokenOk) {
+              authToken = tokenValue;
+            } else {
+              authProof = proofValue;
+            }
+            if (cidValue is String) {
+              authCid = _sanitizeCorrelationId(cidValue);
+            }
+          }
+        }
+      } on FormatException {
+        // ليس JSON: اعتماد فاسد شكلاً
+      }
+    }
+    if (!authShapeValid) {
+      await _wsCloseWithCode(
+        ws,
+        'ws_auth_invalid',
+        'The first message must be a JSON object carrying exactly one '
+            'credential: "token" or "pairing"',
+      );
+      unawaited(sub.cancel());
+      return;
+    }
+    // الاعتماد بنفس خطوة القبول: نداء admit ثانٍ على الأصل نفسه
+    // بالاعتماد الذي حملته الرسالة، وتسويته يهبط أثره كأي طلب
+    // (طوابع الإخفاق والقفل والحصص وأسطر الأمن) — لا منطق حماية
+    // ثانٍ. وطلب الاعتماد إلزامياً هنا: الأصل المؤهل وحده لا يفتح
+    // قناة (demandCredential يجعل الإثبات باباً مفحوصاً حتماً)
+    final authAdmission = await protection.admit(
+      origin: origin,
+      bridgeToken: authToken,
+      pairingProof: authProof,
+      path: config.wsPath ?? '/',
+      method: 'WS',
+      correlationId: authCid,
+      demandCredential: true,
+    );
+    authAdmission.settle();
+    if (authAdmission.acceptedPath == null) {
+      // رفض الاعتماد برمزه الحقيقي من السجل: token_required
+      // وtoken_locked وpair_signature_replay وأخواتها
+      await _wsCloseWithCode(
+        ws,
+        authAdmission.rejection!.code,
+        authAdmission.rejection!.message,
+      );
+      unawaited(sub.cancel());
+      return;
+    }
+    // اعتمدت: القناة مفتوحة — المخزون من ما قبل الفتح يجري أولاً
+    // بترتيب وصوله ثم الأوامر الحية على المشترك نفسه حتى موتها
+    final sessionAuth = authAdmission;
+    auth = sessionAuth;
+    authAccepted = true;
+    armIdle();
+    for (final queued in preOpen) {
+      chain = chain.then<void>((_) async {
+        if (gone) return;
+        try {
+          await _wsHandleMessage(ws, queued, sessionAuth);
+        } on Object {
+          // عطل كتابة الرد: القناة ماتت — onDone/onError يجيبان موتها
+        }
+      });
+    }
+    preOpen.clear();
+    await sessionDone.future;
+    unawaited(sub.cancel());
+    idle?.cancel();
+  }
+
+  /// رسالة واحدة من القناة: فحوص الحمولة نفسها ثم تسليم الأمر ثم رد
+  /// بعقد الرد القائم. الإطار الثنائي ليس نصاً فلا أمر فيه — رفض
+  /// المحتوى الصادق يبقى على القناة ويبقيها مفتوحة، والرسائل فوق
+  /// سقف المحول لا تصل هنا أصلاً (يرمي المحول عند الطول المعلن).
+  /// سجل قبول الاعتماد هو من يخيط الأمر: أصل المصدر ونصُّ الأخطاء
+  /// المسموح به يقرآن منه لا من إسقاط ثانٍ.
+  Future<void> _wsHandleMessage(
+    WebSocket ws,
+    Object? message,
+    IntakeAdmission auth,
+  ) async {
+    final verbose = auth.verboseErrors;
+    if (message is! String) {
+      // إطار ثنائي: القناة تحمل أوامر JSON نصية حصراً
+      _noteRejection('non_json_body');
+      try {
+        ws.add(
+          jsonEncode(<String, Object?>{
+            'ok': false,
+            'error': 'non_json_body',
+            'message': 'This channel accepts JSON text messages only',
+          }),
+        );
+      } on Object {
+        // القناة ماتت وسط الرد — الحلقة تجيب موتها
+      }
+      return;
+    }
+    // سقف الرسالة عند التسليم: بايتات UTF-8 فوق السقف تُغلق برمزها
+    // المسجل بإطاره الإفصاحي (سقف النقل الواسع أضيق من هذا أن يمرّ
+    // ضخمُ حقيقةً — والفحص هنا هو العقد الذي يقرأه السلك)
+    final body = message;
+    if (utf8.encode(body).length > _maxWsMessageBytes) {
+      await _wsCloseWithCode(
+        ws,
+        'ws_message_too_large',
+        'The message is over the internal channel cap '
+            '($_wsMessageCapLabel)',
+        wireCloseCode: WebSocketStatus.messageTooBig,
+      );
+      return;
+    }
+    if (!_jsonShapeWithinLimits(
+      body,
+      config.maxJsonElements,
+      config.maxJsonDepth,
+    )) {
+      _noteRejection('payload_too_complex');
+      try {
+        ws.add(
+          jsonEncode(<String, Object?>{
+            'ok': false,
+            'error': 'payload_too_complex',
+            'message':
+                'Message has too many JSON elements or is nested too '
+                'deeply (over ${config.maxJsonElements} elements or '
+                '${config.maxJsonDepth} deep) — send fewer, shallower '
+                'elements',
+          }),
+        );
+      } on Object {
+        // القناة ماتت وسط الرد
+      }
+      return;
+    }
+    if (config.requireValidJsonShape && !_jsonShapeComplete(body)) {
+      _noteRejection('malformed_json_shape');
+      try {
+        ws.add(
+          jsonEncode(<String, Object?>{
+            'ok': false,
+            'error': 'malformed_json_shape',
+            'message':
+                'Message claims a JSON container shape but is not '
+                'structurally complete — send the whole JSON document',
+          }),
+        );
+      } on Object {
+        // القناة ماتت وسط الرد
+      }
+      return;
+    }
+    final List<String> payloads;
+    try {
+      payloads = _extractPayloads(body, declaredJson: false);
+    } on _UnsupportedPayloadShapeException {
+      _noteRejection('unsupported_payload_shape');
+      return _wsReplyOnce(
+        ws,
+        'unsupported_payload_shape',
+        'JSON message has a known-but-unsupported shape (object without '
+            'known command keys)',
+      );
+    } on _StrictPayloadItemException {
+      _noteRejection('invalid_payload_item');
+      return _wsReplyOnce(
+        ws,
+        'invalid_payload_item',
+        'Command list carries a non-string or empty element (strict item '
+            'checking is on)',
+      );
+    } on _InvalidJsonException {
+      // بلا نوع معلن المسار الخام هو أصلاً حكم الرسالة — غير قابل
+      // للوصول هنا، والتصيد البنيوي باقٍ
+      _noteRejection('invalid_json');
+      return _wsReplyOnce(ws, 'invalid_json', 'The message is not valid JSON');
+    } on _NonJsonBodyException {
+      _noteRejection('non_json_body');
+      return _wsReplyOnce(
+        ws,
+        'non_json_body',
+        'This channel accepts JSON messages only — send the command as JSON',
+      );
+    }
+    if (payloads.isEmpty) {
+      // والعدّ من _wsReplyOnce وحده — لا عدّ مزدوج هنا
+      return _wsReplyOnce(
+        ws,
+        'empty_payload',
+        'No valid command payload found in the message',
+      );
+    }
+    // سقف العمل الحي: نفس بوابته في الرد الواحد — اليتامى والمقاعد
+    // ميزانية واحدة، وفوقها الرفض برمزه والقناة تبقى حية لأمرٍ تالٍ
+    if (_activeRequests + _activeOrphans > config.maxConcurrentRequests) {
+      _noteRejection('server_busy');
+      final line = _orphanBusyWarnThrottle.admit(
+        'intake busy: $_activeOrphans orphan handler(s) still running — '
+        'rejecting before invoking another',
+      );
+      if (line != null) {
+        telemetry.warn(line, category: BridgeCategory.network);
+      }
+      return _wsReplyOnce(
+        ws,
+        'server_busy',
+        'The server is busy right now — please retry shortly',
+      );
+    }
+    // تسليم الأمر: إشارة إلغاء حية، وسلسلة الإشارات الحية نفسها،
+    // وميزانية المعالج نفسها — اليتم بعدها حساب الرد الواحد حرفاً
+    final cancelSignal = CommandCancelSignal();
+    _liveSignals.add(cancelSignal);
+    final correlationId = correlationIdGenerator();
+    final commandFuture = onCommand(
+      TrustedCommand(
+        source: auth.origin ?? 'unknown-origin',
+        payloads: payloads,
+        headers: {'x-correlation-id': correlationId},
+        correlationId: correlationId,
+        admission: auth,
+        cancellation: cancelSignal,
+      ),
+    );
+    unawaited(
+      commandFuture.then<void>(
+        (_) => _liveSignals.remove(cancelSignal),
+        onError: (Object _, StackTrace _) => _liveSignals.remove(cancelSignal),
+      ),
+    );
+    final (awaited, budgetExpired) = await _awaitCommandFuture(
+      commandFuture,
+      cancelSignal,
+    );
+    Map<String, Object?> reply;
+    if (budgetExpired || awaited == null) {
+      reply = <String, Object?>{
+        'ok': false,
+        'error': 'handler_timeout',
+        'message': 'The command handler exceeded its time budget',
+      };
+    } else {
+      reply = _contractFrame(awaited, verbose);
+    }
+    try {
+      ws.add(jsonEncode(reply));
+    } on Object {
+      // القناة ماتت وسط الرد — الحلقة تجيب موتها
+    }
+  }
+
+  /// رد رفضٍ واحد على القناة — العدّ من العداد الواحد والكتابة محصورة
+  void _wsReplyOnce(WebSocket ws, String code, String message) {
+    _noteRejection(code);
+    try {
+      ws.add(
+        // الإطار نصي حصراً — String على dart:io يسير إطار نصٍّ
+        jsonEncode(<String, Object?>{
+          'ok': false,
+          'error': code,
+          'message': message,
+        }),
+      );
+    } on Object {
+      // القناة ماتت وسط الرد
+    }
+  }
+
   /// Reads the body with a cumulative byte counter: hitting the cap or the
   /// deadline stops reading at once (never a silent truncation); total silence
   /// is cut by the stream timeout while slow dripping is cut by the absolute
@@ -2319,6 +2966,7 @@ class LocalIntakeServer {
   /// after the reply, and none of them leaves a socket behind. The fallback
   /// covers any emergency code that ever reaches this path.
   static const _terminateReasons = <int, String>{
+    HttpStatus.ok: 'OK',
     HttpStatus.requestEntityTooLarge: 'Payload Too Large',
     HttpStatus.methodNotAllowed: 'Method Not Allowed',
     HttpStatus.badRequest: 'Bad Request',
@@ -2418,21 +3066,18 @@ class LocalIntakeServer {
     }
   }
 
-  /// مخرج الرفض: يقرأ سطر رمزه من سجل الرموز الواحد — الحالة والقطع
-  /// الفوري من السجل حصراً لا من الموضع — ثم يُنعطي مخرج الرد به، وطريقة
-  /// الإغلاق تبقى من حقيقة قراءة الجسم فيه. رمزٌ بلا سجل انحراف بنيوي:
-  /// يُرفع صوتاً فلا رد صامت بترميز مغلوط. والعدّ هنا حصراً: عدّاد
-  /// بالرمز، وعداد شكل بروتوكولي، وعداد اقتران — الاثنان الأخيران
-  /// منظران متداخلان فوق الأول لا قسمة حصرية.
-  Future<void> _replyRejection(
-    HttpResponse response, {
-    required String code,
-    required String message,
-    required bool bodyFullyRead,
-    bool headOnly = false,
+  /// عدّاد الرفض الواحد: يقرأ سطر الرمز من سجل الرموز الواحد — رمزٌ بلا
+  /// سجل انحراف بنيوي يُرفع صوتاً فلا رفض صامت بترميز مغلوط — ثم يعدّه
+  /// في عدّادات الخادم الثلاثة (بالرمز، وشكل بروتوكولي، واقتران؛
+  /// الأخيران منظران متداخلان فوق الأول لا قسمة حصرية). كل رفض يعدّ
+  /// من هنا حصراً: ردود HTTP من مخرج الرفض، ورفض القنوات غير الـHTTP
+  /// (إطار إغلاق القناة أو إطار التدفق الأخير) من ندائه المباشر —
+  /// عدّاد واحد لا مسار يعدّ بيده.
+  IntakeRejectSpec _noteRejection(
+    String code, {
     bool protocolShape = false,
     bool pairingRoute = false,
-  }) async {
+  }) {
     final spec = intakeRejectionRegistry[code];
     if (spec == null) {
       throw StateError('unregistered intake rejection code: $code');
@@ -2444,6 +3089,27 @@ class LocalIntakeServer {
     if (pairingRoute || _pairingRejectionCodes.contains(code)) {
       _pairingRejections++;
     }
+    return spec;
+  }
+
+  /// مخرج الرفض: يقرأ سطر رمزه من سجل الرموز الواحد — الحالة والقطع
+  /// الفوري من السجل حصراً لا من الموضع — ثم يُنعطي مخرج الرد به، وطريقة
+  /// الإغلاق تبقى من حقيقة قراءة الجسم فيه. والعدّ من عدّاد الرفض
+  /// الواحد لا بيده.
+  Future<void> _replyRejection(
+    HttpResponse response, {
+    required String code,
+    required String message,
+    required bool bodyFullyRead,
+    bool headOnly = false,
+    bool protocolShape = false,
+    bool pairingRoute = false,
+  }) async {
+    final spec = _noteRejection(
+      code,
+      protocolShape: protocolShape,
+      pairingRoute: pairingRoute,
+    );
     await _reply(
       response,
       status: spec.status,
@@ -2455,6 +3121,278 @@ class LocalIntakeServer {
     );
   }
 
+  /// انتظار مستقبل الأمر بميزانية المعالج — الماكينة واحدة لكل مسار
+  /// تسليم (الرد الواحد والتدفق معاً) فلا يتشعب حساب اليتامى: انتهاء
+  /// الميزانية يشعل إشارة الإلغاء كي يغلف المعالج عمله إن شاء، ويجعل
+  /// المستقبل مستهلكاً (لا خطأ يتيم يهرب للـzone)، ويُعدّ اليتيم ضمن
+  /// ميزانية العمل الحي بتذكرة حية يدق فراغها جرس تفريغ stop، ويكبح
+  /// سطر التحذير بنمط بقية الأسطر. أما الرد (504 أو إطار التدفق
+  /// الأخير) فقرار المسار لا هذا الانتظار.
+  ///
+  /// العائد: النتيجة عند اكتمالها والرقم false، أو زوج فارغ مع true
+  /// عند احتراق الميزانية — وكل TimeoutException أخرى (رمى المعالج
+  /// نفسه) تمر من المسار العام (مسار 500) كي لا تلبس بميزانية الجسر.
+  Future<(CommandOutcome?, bool)> _awaitCommandFuture(
+    Future<CommandOutcome> commandFuture,
+    CommandCancelSignal cancelSignal,
+  ) async {
+    final handlerBudget = effectiveHandlerTimeout;
+    try {
+      final result = handlerBudget == null
+          ? await commandFuture
+          : await commandFuture.timeout(
+              handlerBudget,
+              onTimeout: () => throw const _HandlerBudgetExceeded(),
+            );
+      return (result, false);
+    } on _HandlerBudgetExceeded {
+      cancelSignal.cancel();
+      // تجاهلُ ignore للمستقبل الأصلي وحده — then بمعالج خطأ فارغ كي
+      // لا يُحيى خطأه المتأخر بعد ما صار يتماً
+      commandFuture.ignore();
+      final ticket = _OrphanTicket(cancelSignal);
+      _pendingOrphans.add(ticket);
+      _activeOrphans++;
+      commandFuture.then<void>(
+        (_) => _settleOrphan(ticket),
+        onError: (_) => _settleOrphan(ticket),
+      );
+      final line = _handlerTimeoutWarnThrottle.admit(
+        'intake handler timeout — seat released, late result ignored',
+      );
+      if (line != null) {
+        telemetry.warn(line, category: BridgeCategory.network);
+      }
+      return (null, true);
+    }
+  }
+
+  /// مسار الرد المتدفق: المقبس ينفصل مرة واحدة برأس text/event-stream
+  /// من بدأة الرد الواحد، ثم إطارات التقدم تُكتب فوقه بنداءات sink
+  /// المعالج، والإطار الأخير (result) يحمل عقد الرد القائم كله — نفس
+  /// سقف بيانات الرد ونفس القص ونفس الرموز، فلا عقد ثانٍ للتدفق.
+  /// إغلاق الصفحة للاتصال يبلغ المعالج إشارة الإلغاء ولا يبقى مقعد
+  /// ولا مقبس: المشاهد على المقبس يشعل الإشارة ويدمر ما بقي، والمقعد
+  /// يتحرر بحسم مستقبل المعالج كما في الرد الواحد.
+  Future<void> _runStreamingReply({
+    required HttpRequest request,
+    required HttpResponse response,
+    required CommandCancelSignal cancelSignal,
+    required List<String> payloads,
+    required Uint8List? binaryBytes,
+    required String source,
+    required bool verboseErrors,
+    required String correlationId,
+  }) async {
+    final Socket socket;
+    try {
+      socket = await _detachAndReply(
+        response,
+        HttpStatus.ok,
+        null,
+        streamBody: true,
+      );
+    } on Object {
+      // العميل رحل قبل الرأس: لا قناة تُفتح ولا أثر يُعدّ
+      return;
+    }
+    // حي القناة وجهةُ موتها وجهان: [alive] يعني قبول sink للإطارات
+    // (يخمد عند الرفض أو الرحيل)، و[gone] يعني المقبس نفسه مات
+    // (دمار أو عطل أو انتهاء جهة قراءة العميل) — التمييز يحفظ إطار
+    // الرفض فوق مقبس حي رغم خمود الsink. انتهاء جهة القراءة في هذا
+    // الاتجاه رحيلٌ لا نصفُ إغلاقٍ: جسم الطلب قُرئ كاملاً قبل التدفق
+    // فلا شيء ينتظره العميل من جهة إرساله، وفينُه وسط التدفق توديعُ
+    // صفحة رحلت — الإشعال يبلغ المعالج فيغلف، والدمّر يمنع بقايا
+    // (والمقاس: HttpClient لا يغلق إرساله بعد الجسم — الشاهد حي
+    // يقيس الإطارات كاملة فوق نفس المقبس بعد الفين الوهمي المزعوم)
+    var alive = true;
+    var gone = false;
+    StreamSubscription<List<int>>? watch;
+    void markGone() {
+      if (gone) return;
+      gone = true;
+      alive = false;
+      cancelSignal.cancel();
+      unawaited(watch?.cancel());
+      socket.destroy();
+    }
+
+    watch = socket.listen(
+      (_) {},
+      onDone: markGone,
+      onError: (Object _) => markGone(),
+    );
+    // سلسلة الكتابة الواحدة: إطار يُكتب ويُغسل ثم الإطار الذي يليه —
+    // dart:io يربط الSink بالغسل الجاري (flush يُبقيه مقيّداً حتى
+    // يكتمل) فيرفض أي إضافة أو غسل فوق غسلٍ حي، والسلسلة تحفظ الغسل
+    // التدريجي (الصفحة تقرأ كل إطار لحظته) مع حفظ الترتيب نفسه
+    Future<void> writes = Future<void>.value();
+    void send(String frame) {
+      writes = writes.then<void>((_) async {
+        // الحارس على [gone] لا [alive]: الإطار المقبول قبل خمود الsink
+        // يكتب ولو جاء خموده في نفس الموجة — المقبس الميت وحده يلغي
+        if (gone) return;
+        try {
+          socket.add(utf8.encode(frame));
+          await socket.flush();
+        } on Object {
+          // الطرف رحل وسط الإطار: قناة ميتة يبلغ عنها عطل الكتابة
+          markGone();
+        }
+      });
+    }
+
+    // حسم القناة بعد آخر إطار: إغلاق جهة الكتابة (الفين) ثم التفريغ
+    // المحدود الباقي بلا مقعد — نمط حسم الرد الواحد نفسه. انقطاع
+    // الطرف قبل الإطار يجعل الدمّر وحده الباقي؛ فلا مقبس يبقى بعد
+    // الإطار في الحالين
+    Future<void> finishFrame(Map<String, Object?> json) async {
+      await writes;
+      if (gone) {
+        // المقبس مات قبل النتيجة: لا إطار يُكتب ولا تفريغ لمقبس ميت
+        return;
+      }
+      // الsink يخمد من هنا: آخر إطار للقناة يمر الآن
+      alive = false;
+      try {
+        await watch?.cancel();
+      } on Object {
+        // المشاهد رحل سابقاً — الكتابة تحكم بعدها
+      }
+      try {
+        socket.add(utf8.encode('event: result\ndata: ${jsonEncode(json)}\n\n'));
+        await socket.flush();
+        await socket.close();
+      } on Object {
+        // الطرف رحل قبل الإطار أو أثناءه: الدمّر تم من الداخل أو تم هنا
+        socket.destroy();
+        return;
+      }
+      // جسم الطلب قُرئ كاملاً قبل التدفق — لا بقايا مرسل، والتفريغ هنا
+      // انتظار الطرف أن يفض قراءته ثم الدمّر تحت الحدود القائمة
+      _discardDetached(socket);
+    }
+
+    // sink التقدم: كل نداء إطار واحد في سلسلة الكتابة، وترتيب
+    // النداءات هو ترتيب الإطارات على السلك. القيمة غير القابلة للفك
+    // ترمي عند النداء — عقدُ المعالج هو المخل ولا يبتلع هنا؛ وفوق
+    // سقف الحدث تنتهي القناة بالرفض المسجل وتُشعل الإشارة ويخمد
+    // الsink — القناة ماتت فالتغليف هو الطلب الصادق
+    void sink(Object? data) {
+      if (!alive) return;
+      final encoded = jsonEncode(data);
+      if (utf8.encode(encoded).length > _maxReplyDataBytes) {
+        _noteRejection('progress_data_too_large');
+        final wasAlive = alive;
+        alive = false;
+        cancelSignal.cancel();
+        if (wasAlive) {
+          unawaited(
+            finishFrame(<String, Object?>{
+              'ok': false,
+              'error': 'progress_data_too_large',
+              'message':
+                  'A progress report is over the $_maxReplyDataBytes-byte '
+                  'event cap - the stream ends here and the command is '
+                  'asked to wrap up',
+            }),
+          );
+        }
+        return;
+      }
+      send('event: progress\ndata: $encoded\n\n');
+    }
+
+    final commandFuture = onCommand(
+      TrustedCommand(
+        source: source,
+        payloads: payloads,
+        headers: {
+          ..._stringHeaders(request),
+          'x-correlation-id': correlationId,
+        },
+        correlationId: correlationId,
+        cancellation: cancelSignal,
+        binaryPayload: binaryBytes,
+        progress: sink,
+      ),
+    );
+    unawaited(
+      // سلسلة تمتص خطأ المستقبل نفس ما يفعلها الرد الواحد — الخطأ
+      // الأصلي يبلغ مسار الإطار الأخير من await الأصلي عادة
+      commandFuture.then<void>(
+        (_) => _liveSignals.remove(cancelSignal),
+        onError: (Object _, StackTrace _) => _liveSignals.remove(cancelSignal),
+      ),
+    );
+    final (awaited, budgetExpired) = await _awaitCommandFuture(
+      commandFuture,
+      cancelSignal,
+    );
+    // الإطار الأخير بعقد الرد القائم: مهلة الميزانية تقرأ رمزها
+    // المسجل، والنجاح يحمل بياناته بسقف الرد نفسه — فوقه الرفض كله
+    // بإطار الرفض لا قصّ صامت، والفشل يحمل رمز المعالج ونصه للمعتمدين
+    // مع القص البايتي نفسه. حالة الرفض المعلَّمة لا معنى لها على
+    // التدفق (رأسه 200 حتمي) فتظل خاملة بإطار الفشل القائم
+    Map<String, Object?> frame;
+    if (budgetExpired || awaited == null) {
+      _noteRejection('handler_timeout');
+      frame = <String, Object?>{
+        'ok': false,
+        'error': 'handler_timeout',
+        'message': 'The command handler exceeded its time budget',
+      };
+    } else {
+      frame = _contractFrame(awaited, verboseErrors);
+    }
+    await finishFrame(frame);
+  }
+
+  /// إطار عقد الرد من نتيجة المعالج — واحد للتدفق وللقناة معاً: سقف بيانات الرد يرفض النتيجة
+  /// كلها بالرمز المسجل (وعدّه من العداد الواحد)، ونص المضيف يُقص
+  /// بالحد البايتي نفسه عند محرف كامل، والبيانات تحمل كما في الرد
+  /// الواحد حرفاً.
+  Map<String, Object?> _contractFrame(
+    CommandOutcome result,
+    bool verboseErrors,
+  ) {
+    if (result.ok) {
+      final pageData = result.data;
+      if (pageData != null &&
+          utf8.encode(jsonEncode(pageData)).length > _maxReplyDataBytes) {
+        _noteRejection('reply_data_too_large');
+        return <String, Object?>{
+          'ok': false,
+          'error': 'reply_data_too_large',
+          'message':
+              'The command succeeded, but its reply data is over the '
+              '$_maxReplyDataBytes-byte page cap - the result is refused '
+              'whole, never truncated',
+        };
+      }
+      return <String, Object?>{'ok': true, 'data': ?pageData};
+    }
+    var hostMessage = result.errorMessage ?? 'Command execution failed';
+    final messageCap = config.maxErrorMessageLength;
+    if (messageCap > 0) {
+      final encoded = utf8.encode(hostMessage);
+      if (encoded.length > messageCap) {
+        var cut = messageCap;
+        // الرجوع من حدّ البايتات إلى بداية المحرف — المحرف كله أو
+        // يسقط كله، نفس قاعدة الرد الواحد
+        while (cut > 0 && (encoded[cut] & 0xC0) == 0x80) {
+          cut--;
+        }
+        hostMessage = utf8.decode(encoded.sublist(0, cut));
+      }
+    }
+    return <String, Object?>{
+      'ok': false,
+      'error': result.errorCode ?? config.fallbackErrorCode,
+      if (verboseErrors) 'message': hostMessage,
+    };
+  }
+
   /// The shared raw-socket reply: detaches the socket, builds the head from
   /// the current response headers - framing headers are rebuilt here (for a
   /// JSON body from the exact body length; for the empty 204 as
@@ -2462,11 +3400,21 @@ class LocalIntakeServer {
   /// writes the head and the body, flushes, and closes the write side.
   /// Throws after destroying when the sender was gone mid-reply: the caller
   /// has nothing left to drain in that case.
+  ///
+  /// [streamBody] hands the socket back with the head only and the write
+  /// side still open - the streaming reply writes its frames over the same
+  /// socket and closes it when the last frame is out. The head carries the
+  /// given content type in place of the response's own (a stream is not
+  /// JSON) and no length at all: the body ends when the write side closes,
+  /// which the `Connection: close` the head always carries already
+  /// announces to the reader.
   Future<Socket> _detachAndReply(
     HttpResponse response,
     int status,
     List<int>? body, {
     bool headOnly = false,
+    bool streamBody = false,
+    String streamContentType = 'text/event-stream',
   }) async {
     final socket = await response.detachSocket(writeHeaders: false);
     try {
@@ -2481,7 +3429,8 @@ class LocalIntakeServer {
         final lower = name.toLowerCase();
         if (lower == HttpHeaders.contentLengthHeader ||
             lower == HttpHeaders.transferEncodingHeader ||
-            (body != null && lower == HttpHeaders.contentTypeHeader)) {
+            ((body != null || streamBody) &&
+                lower == HttpHeaders.contentTypeHeader)) {
           return;
         }
         for (final value in values) {
@@ -2495,6 +3444,11 @@ class LocalIntakeServer {
             'application/json; charset=utf-8\r\n',
           )
           ..write('${HttpHeaders.contentLengthHeader}: ${body.length}\r\n');
+      } else if (streamBody) {
+        // التدفق: النوع المعلن هو نوع القناة، وبلا طول إطلاقاً — الجسم
+        // ينتهي بإغلاق جهة الكتابة الذي يعلنه سطر Connection: close،
+        // والإطارات تُكتب فوق المقبس نفسه بعد عودته
+        head.write('${HttpHeaders.contentTypeHeader}: $streamContentType\r\n');
       } else {
         // الـ204 بلا جسم ويحمل Content-Length: 0 — نفس التأطير الذي
         // يكتبه الرد المُدار، فلا يتغير شكل الـpreflight على السلك
@@ -2504,13 +3458,15 @@ class LocalIntakeServer {
 
       // الرد أولاً ثم إغلاق جهة الكتابة: الفين يصل قبل أي شيء آخر، وجهة
       // القراءة باقية كما قيس (التفريغ بعده يرى الجسم كاملاً حتى onDone).
+      // والتدفق وحده يعيد المقبس بجهة الكتابة مفتوحة — إطاراته تُكتب
+      // بعد العودة والإغلاق قرار نهايته لا ولادة أنه.
       socket.add(utf8.encode(head.toString()));
       // رد HEAD بلا جسم على السلك حصراً (المشرّع: لا محتوى في رد HEAD
       // أبداً) — التأطيرية Content-Length تبقى طول الجسم الذي كان سيُكتب
       // لعلم القارئ، والبايتات لا تُكتب والاتصال يُغلق بعدها
       if (body != null && !headOnly) socket.add(body);
       await socket.flush();
-      await socket.close();
+      if (!streamBody) await socket.close();
       return socket;
     } on Object {
       // العميل انقطع قبل الرد أو أثناءه: لا ما يوصَل ولا جسم يُفرَّغ —
@@ -2793,6 +3749,10 @@ class LocalIntakeServer {
       // يبقي خريطة الترويسات حرفاً كما هي بلا مفتاح جديد
       if (config.acceptBinaryBodies)
         'x-command': _firstHeader(request, 'X-Command') ?? '',
+      // طلب التدفق يمر للمعالج بنفس النمط: مع خياره حصرا وإلا فالترويسة
+      // مجهولة لا تقرأ والخريطة حرفاً كما هي
+      if (config.allowStreamingReplies)
+        'x-bridge-stream': _firstHeader(request, 'X-Bridge-Stream') ?? '',
     };
   }
 
@@ -2878,6 +3838,7 @@ class LocalIntakeServer {
       'X-Correlation-Id',
       if (protection.pairingEnabled) 'X-Bridge-Pairing',
       if (config.acceptBinaryBodies) 'X-Command',
+      if (config.allowStreamingReplies) 'X-Bridge-Stream',
     ];
     response.headers.set(
       'Access-Control-Allow-Headers',

@@ -1839,6 +1839,8 @@ class IntakeProtection {
     String? pairingProof,
     String method = 'POST',
     String correlationId = '',
+    bool demandCredential = false,
+    bool deferCredential = false,
   }) async {
     final decision = _project(
       origin,
@@ -1849,6 +1851,8 @@ class IntakeProtection {
       method: method,
       path: path,
       correlationId: correlationId,
+      demandCredential: demandCredential,
+      deferCredential: deferCredential,
     );
     return IntakeAdmission._(
       rejection: decision.rejection,
@@ -1876,6 +1880,8 @@ class IntakeProtection {
     String method = 'POST',
     String path = '/',
     String correlationId = '',
+    bool demandCredential = false,
+    bool deferCredential = false,
   }) {
     final now = _now;
     final key = origin == null ? '' : normalize(origin);
@@ -1959,6 +1965,7 @@ class IntakeProtection {
           now: now,
           mayAskConsent: !budgetSpent,
           out: beyond,
+          method: method,
         );
         if (!tokenMatched &&
             budgetSpent &&
@@ -1976,7 +1983,8 @@ class IntakeProtection {
             'Too many failed token attempts — retry after a short wait',
             retryAfterMs: budgetWaitMs < 1000 ? 1000 : budgetWaitMs,
           );
-        } else if (requireBoth && beyond.accepted != null) {
+        } else if ((demandCredential || (requireBoth && !deferCredential)) &&
+            beyond.accepted != null) {
           if (tokenMatched) {
             // المؤهل والإثبات المشترك معاً — مسار الطبقتين كما كان
             accepted = IntakeAdmissionPath.originWithToken;
@@ -2047,8 +2055,11 @@ class IntakeProtection {
         now: now,
         mayAskConsent: true,
         out: beyond,
+        method: method,
       );
-      if (requireBoth && beyond.accepted != null && _pairingArmed) {
+      if ((demandCredential || (requireBoth && !deferCredential)) &&
+          beyond.accepted != null &&
+          _pairingArmed) {
         // المؤهل بلا ترويسة توكن مشترك: إثبات الاقتران هو الباب —
         // بنفس الأحكام الثلاثة للفرع أعلاه حرفا
         final proof = resolveProof();
@@ -2082,9 +2093,12 @@ class IntakeProtection {
             ..fireAsk = false
             ..reportOnlyLine = null;
         }
-      } else if (requireBoth && beyond.accepted != null) {
+      } else if ((demandCredential || (requireBoth && !deferCredential)) &&
+          beyond.accepted != null) {
         // المؤهل بلا إثبات أصلاً والاقتران غير مسلح: نفس الرمز وبنفس
-        // صفاء القراءة — لا أثر استحقاق يسجل لطلب بلا إثبات
+        // صفاء القراءة — لا أثر استحقاق يسجل لطلب بلا إثبات. ودليل
+        // المسار الجديد (demandCredential) حكمُه نفسه: قناة تطلب
+        // اعتماداً موثقاً لا تقبل أصلاً مؤهلاً بلا اعتماد
         rejection = const IntakeRejection(
           403,
           'token_required',
@@ -2147,6 +2161,7 @@ class IntakeProtection {
     required int now,
     required bool mayAskConsent,
     required _BeyondOutcome out,
+    String method = 'POST',
   }) {
     // (1) القائمة — المخزّن دائماً (موافقة الاكتشاف المحفوظة) قبل الأنماط
     if (_isListed(origin)) {
@@ -2154,7 +2169,7 @@ class IntakeProtection {
           origin != null && _consents[key] == OriginConsent.allowAlways;
       // ترويستا الإرسال الحاضرتان بقيمة مخالفة نموذج مخفي أو إرسال
       // no-cors بلا شك — تُرفضان هنا كالمسارين المتصفحيين
-      final mismatched = _fetchMetadataMismatch(fetchMode, fetchDest);
+      final mismatched = _fetchMetadataMismatch(fetchMode, fetchDest, method);
       if (mismatched != null) {
         out.rejection = mismatched;
         return;
@@ -2182,7 +2197,12 @@ class IntakeProtection {
     // (2) مسار «الكل» — تحصيناته ملازمة له، والوضع المراقب يُعفّي الحصة
     // وحدها
     if (_policy.allowAllHardened) {
-      final blocked = _browserRequestBlocked(origin, fetchMode, fetchDest);
+      final blocked = _browserRequestBlocked(
+        origin,
+        fetchMode,
+        fetchDest,
+        method: method,
+      );
       if (blocked != null) {
         out.rejection = blocked;
         return;
@@ -2210,7 +2230,12 @@ class IntakeProtection {
         origin != null &&
         origin.isNotEmpty &&
         _validBrowserOrigin(origin)) {
-      final preBlocked = _browserRequestBlocked(origin, fetchMode, fetchDest);
+      final preBlocked = _browserRequestBlocked(
+        origin,
+        fetchMode,
+        fetchDest,
+        method: method,
+      );
       if (preBlocked != null) {
         out.rejection = preBlocked;
         return;
@@ -2696,12 +2721,27 @@ class IntakeProtection {
     }
   }
 
+  /// التوقيع الحقيقي لمتصفح على مصافحة ترقية قناة الويب سوكيت: GET
+  /// وmode/dest بقيمة websocket — قيم ترويسات يضعها المتصفح لا
+  /// الصفحة. الطريقة هي التي تمنع انتحال الشكل: طلب POST يدّعي
+  /// websocket يظل رفضاً كأي نموذج مخفي
+  static bool _isBrowserWsHandshake(
+    String? fetchMode,
+    String? fetchDest,
+    String method,
+  ) {
+    return method.toUpperCase() == 'GET' &&
+        fetchMode == 'websocket' &&
+        fetchDest == 'websocket';
+  }
+
   /// The fixed origin and send-method checks - the discovery path shares them before asking the user.
   IntakeRejection? _browserRequestBlocked(
     String? origin,
     String? fetchMode,
-    String? fetchDest,
-  ) {
+    String? fetchDest, {
+    String method = 'POST',
+  }) {
     // أصل صالح — الطلب غير المتصفحي يستعمل طبقة التوكن
     if (origin == null || origin.isEmpty || origin == 'null') {
       return const IntakeRejection(
@@ -2732,16 +2772,19 @@ class IntakeProtection {
     // المتصفحات عن القراءة لكن إرسالها يصل؛ غياب الترويسة يمر
     // (متصفح قديم أو عميل غير متصفح — هؤلاء على التوكن أصلا)،
     // إلا حين يطلب المضيف الترويسات صراحة فيغلق باب المتصفحات
-    // القديمة على المسارين المتصفحيين
+    // القديمة على المسارين المتصفحيين. ومصافحة القناة الحقيقية
+    // (websocket/websocket على GET) باب متصفحي صادق بذاته
     if (_policy.requireFetchMetadata) {
-      if (fetchMode == null || fetchMode.isEmpty || fetchMode != 'cors') {
+      if (!_isBrowserWsHandshake(fetchMode, fetchDest, method) &&
+          (fetchMode == null || fetchMode.isEmpty || fetchMode != 'cors')) {
         return const IntakeRejection(
           403,
           'cross_site_blocked',
           'Cross-site request blocked: Sec-Fetch-Mode must be "cors"',
         );
       }
-      if (fetchDest == null || fetchDest.isEmpty || fetchDest != 'empty') {
+      if (!_isBrowserWsHandshake(fetchMode, fetchDest, method) &&
+          (fetchDest == null || fetchDest.isEmpty || fetchDest != 'empty')) {
         return const IntakeRejection(
           403,
           'cross_site_blocked',
@@ -2750,7 +2793,7 @@ class IntakeProtection {
       }
       return null;
     }
-    return _fetchMetadataMismatch(fetchMode, fetchDest);
+    return _fetchMetadataMismatch(fetchMode, fetchDest, method);
   }
 
   /// The send-method mismatch alone: a present `Sec-Fetch-Mode` other than
@@ -2759,24 +2802,30 @@ class IntakeProtection {
   /// the check stands on its own. Absence is the caller's business: the
   /// browser paths reject it behind [OriginPolicy.requireFetchMetadata],
   /// and the listed path keeps accepting it (headerless non-browser
-  /// clients listed by the host).
+  /// clients listed by the host). The honest browser WebSocket handshake
+  /// (websocket/websocket over GET) is its own real send method and
+  /// passes as such; a claim of websocket on any other method stays a
+  /// refusal.
   IntakeRejection? _fetchMetadataMismatch(
     String? fetchMode,
-    String? fetchDest,
-  ) {
-    if (fetchMode != null && fetchMode.isNotEmpty && fetchMode != 'cors') {
-      return const IntakeRejection(
-        403,
-        'cross_site_blocked',
-        'Cross-site request blocked: Sec-Fetch-Mode must be "cors"',
-      );
-    }
-    if (fetchDest != null && fetchDest.isNotEmpty && fetchDest != 'empty') {
-      return const IntakeRejection(
-        403,
-        'cross_site_blocked',
-        'Cross-site request blocked: Sec-Fetch-Dest must be "empty"',
-      );
+    String? fetchDest, [
+    String method = 'POST',
+  ]) {
+    if (!_isBrowserWsHandshake(fetchMode, fetchDest, method)) {
+      if (fetchMode != null && fetchMode.isNotEmpty && fetchMode != 'cors') {
+        return const IntakeRejection(
+          403,
+          'cross_site_blocked',
+          'Cross-site request blocked: Sec-Fetch-Mode must be "cors"',
+        );
+      }
+      if (fetchDest != null && fetchDest.isNotEmpty && fetchDest != 'empty') {
+        return const IntakeRejection(
+          403,
+          'cross_site_blocked',
+          'Cross-site request blocked: Sec-Fetch-Dest must be "empty"',
+        );
+      }
     }
     return null;
   }

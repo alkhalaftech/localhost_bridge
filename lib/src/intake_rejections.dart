@@ -8,10 +8,16 @@
 /// `{"ok": false, "error": <code>, ...}` the server itself answers a
 /// request with. The server-generated handler-phase codes ride it too
 /// (`handler_timeout`, and `reply_data_too_large` for reply data over
-/// the internal page cap); the handler's own outcome codes (`internal`,
-/// the handler's chosen codes, the `command_failed` fallback) are the
-/// handler contract, pinned by their own guards, and stay outside this
-/// table.
+/// the internal page cap, and `progress_data_too_large` for a streaming
+/// progress report over the same cap); the handler's own outcome codes
+/// (`internal`, the handler's chosen codes, the `command_failed`
+/// fallback) are the handler contract, pinned by their own guards, and
+/// stay outside this table. The channel codes ride it as well: they
+/// answer over the WebSocket channel - the final JSON frame the server
+/// writes before it closes the connection - and the [IntakeRejectSpec]
+/// status of those rows names the same-failure HTTP family (the status
+/// the same fact would answer with on the HTTP wire), never an HTTP
+/// reply the channel codes actually write.
 library;
 
 /// One registry row: the wire status of one rejection code and how the
@@ -72,7 +78,8 @@ const Map<String, IntakeRejectSpec> intakeRejectionRegistry =
       'pairing_too_long': IntakeRejectSpec(400),
       'token_too_long': IntakeRejectSpec(400),
       'unsupported_payload_shape': IntakeRejectSpec(400),
-      // 403 - policy and authority denials
+      // 403 - policy and authority denials, then the channel's auth
+      // closes (the last two rows answer over the WebSocket channel)
       'blocked_by_protection': IntakeRejectSpec(403, immediateCut: true),
       'cross_site_blocked': IntakeRejectSpec(403),
       'origin_blocked': IntakeRejectSpec(403),
@@ -84,14 +91,19 @@ const Map<String, IntakeRejectSpec> intakeRejectionRegistry =
       'pair_code_invalid': IntakeRejectSpec(403),
       'pair_signature_replay': IntakeRejectSpec(403),
       'token_required': IntakeRejectSpec(403),
+      'ws_auth_invalid': IntakeRejectSpec(403),
+      'ws_auth_timeout': IntakeRejectSpec(403),
       // 405 / 408
       'method_not_allowed': IntakeRejectSpec(405),
       'request_timeout': IntakeRejectSpec(408),
+      'ws_idle_timeout': IntakeRejectSpec(408),
       // 413 / 415
       'payload_too_complex': IntakeRejectSpec(413),
       'payload_too_large': IntakeRejectSpec(413),
+      'progress_data_too_large': IntakeRejectSpec(413),
       'reply_data_too_large': IntakeRejectSpec(413),
       'unsupported_media_type': IntakeRejectSpec(415),
+      'ws_message_too_large': IntakeRejectSpec(413),
       // 429
       'origin_parent_rate_limited': IntakeRejectSpec(429),
       'origin_rate_limited': IntakeRejectSpec(429),

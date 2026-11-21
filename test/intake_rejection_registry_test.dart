@@ -1086,6 +1086,11 @@ void main() {
       isNotEmpty,
       reason: 'the registry is the walk subject - empty is a structural loss',
     );
+    // رموز القنوات غير الـHTTP تمشي في مشيها الخاص أدناه: ردها إطار
+    // قناة لا رد HTTP فلا سطر حالة يقرأه هذا المشي
+    for (final code in _channelWalkCodes) {
+      pending.remove(code);
+    }
     final scenarios = _scenarios();
     for (final c in scenarios) {
       final spec = pending.remove(c.code);
@@ -1315,4 +1320,245 @@ void main() {
       );
     });
   });
+
+  test('walks the channel codes on their own wire: the literal code rides '
+      'the final frame the peer reads and the channel dies with the close '
+      '- no HTTP status line exists on this wire', () async {
+    final pending = Map<String, IntakeRejectSpec>.of(intakeRejectionRegistry);
+    expect(
+      pending.keys.toSet().containsAll(_channelWalkCodes),
+      isTrue,
+      reason: 'the channel walk subject sits in the registry',
+    );
+    for (final c in _channelScenarios()) {
+      final spec = pending.remove(c.code);
+      expect(
+        spec,
+        isNotNull,
+        reason: '[${c.code}] every walked channel code sits in the registry',
+      );
+      final w = await c.run();
+      try {
+        expect(
+          w.frames,
+          isNotEmpty,
+          reason: '[${c.code}] the channel carried at least its final frame',
+        );
+        expect(
+          w.frames.last,
+          contains('"${c.code}"'),
+          reason:
+              '[${c.code}] the literal code rides the final frame the peer '
+              'reads before the close',
+        );
+        expect(
+          w.dead,
+          isTrue,
+          reason: '[${c.code}] the channel closed after the refusal frame',
+        );
+      } finally {
+        await w.release();
+      }
+    }
+    expect(
+      pending.keys.toSet().intersection(_channelWalkCodes.toSet()),
+      isEmpty,
+      reason:
+          'every channel code was walked - a registry row with no '
+          'channel scenario is a dead row (the HTTP walk above covers the '
+          'rest, and between the two walks the registry is fully walked)',
+    );
+  }, timeout: const Timeout(Duration(seconds: 60)));
+}
+
+/// رموز القنوات غير الـHTTP الخمسة: ترد بإطار قناة لا رد HTTP — مشيها
+/// الخاص أدناه يقرأ الإطار الأخير وحياة القناة، وسطر الحالة المسجل
+/// يبقى مرجع عائلة الفشل في السجل والجدولين لا سطراً على هذا السلك
+const _channelWalkCodes = <String>{
+  'progress_data_too_large',
+  'ws_auth_timeout',
+  'ws_auth_invalid',
+  'ws_idle_timeout',
+  'ws_message_too_large',
+};
+
+/// حصيلة مشي قناة واحدة: الإطارات التي قرأها النظير، وهل ماتت القناة،
+/// وما يُفرَّج عنه بعد القراءة
+class _ChannelWalk {
+  _ChannelWalk(this.frames, this.dead, this.release);
+
+  final List<String> frames;
+  final bool dead;
+  final Future<void> Function() release;
+}
+
+typedef _ChannelScenario = ({String code, Future<_ChannelWalk> Function() run});
+
+List<_ChannelScenario> _channelScenarios() {
+  final cases = <_ChannelScenario>[];
+
+  // التدفق: حدث تقدم فوق السقف ينهي القناة بالرفض المسجل
+  cases.add((
+    code: 'progress_data_too_large',
+    run: () async {
+      final protection = IntakeProtection(telemetry: _Rec())
+        ..update(
+          policy: const OriginPolicy(allowed: ['https://portal.example']),
+        );
+      final srv = LocalIntakeServer(
+        telemetry: _Rec(),
+        correlationIdGenerator: _cid,
+        protection: protection,
+        onCommand: (cmd) async {
+          cmd.progress?.call('p' * (70 * 1024));
+          return const CommandOutcome(ok: true);
+        },
+        config: const BridgeConfig(allowStreamingReplies: true),
+      );
+      await srv.start(preferredPort: 0);
+      final client = HttpClient();
+      final req = await client.open('POST', '127.0.0.1', srv.port, '/');
+      req.headers.set('Content-Type', 'application/json');
+      req.headers.set('Origin', 'https://portal.example');
+      req.headers.set('X-Bridge-Stream', 'events');
+      req.add(utf8.encode('["WALK"]'));
+      final res = await req.close().timeout(const Duration(seconds: 8));
+      final text = await res.transform(utf8.decoder).join();
+      client.close(force: true);
+      final frames = text
+          .trim()
+          .split('\n\n')
+          .map((b) => b.split('\n').where((l) => l.startsWith('data: ')).join())
+          .toList();
+      return _ChannelWalk(frames, true, () async {
+        protection.dispose();
+        await srv.stop().timeout(const Duration(seconds: 5));
+      });
+    },
+  ));
+
+  LocalIntakeServer wsServer({
+    BridgeConfig config = const BridgeConfig(wsPath: '/ws'),
+    Duration? wsAuthTimeout = const Duration(milliseconds: 250),
+  }) {
+    final protection = IntakeProtection(telemetry: _Rec())
+      ..update(
+        policy: const OriginPolicy(allowed: ['https://portal.example']),
+        token: _t64,
+      );
+    final srv = LocalIntakeServer(
+      telemetry: _Rec(),
+      correlationIdGenerator: _cid,
+      protection: protection,
+      onCommand: (cmd) async => const CommandOutcome(ok: true),
+      config: config,
+      wsAuthTimeout: wsAuthTimeout,
+    );
+    return srv;
+  }
+
+  Future<_ChannelWalk> walkWs(
+    LocalIntakeServer srv, {
+    required Future<(List<String>, int?)> Function(LocalIntakeServer srv) drive,
+  }) async {
+    await srv.start(preferredPort: 0);
+    final (frames, closeCode) = await drive(srv);
+    return _ChannelWalk(frames, closeCode != null, () async {
+      srv.protection.dispose();
+      await srv.stop().timeout(const Duration(seconds: 5));
+    });
+  }
+
+  // مهلة الاعتماد: أصل مقبول بلا اعتماد في المهلة يُغلق بالرمز المسجل
+  cases.add((
+    code: 'ws_auth_timeout',
+    run: () => walkWs(
+      wsServer(),
+      drive: (srv) async {
+        final ws = await WebSocket.connect(
+          'ws://127.0.0.1:${srv.port}/ws',
+          headers: {'Origin': 'https://portal.example'},
+        ).timeout(const Duration(seconds: 5));
+        return awaitClosed(ws);
+      },
+    ),
+  ));
+
+  // رسالة الاعتماد الفاسدة: إغلاق بالرمز المسجل
+  cases.add((
+    code: 'ws_auth_invalid',
+    run: () => walkWs(
+      wsServer(),
+      drive: (srv) async {
+        final ws = await WebSocket.connect(
+          'ws://127.0.0.1:${srv.port}/ws',
+          headers: {'Origin': 'https://portal.example'},
+        ).timeout(const Duration(seconds: 5));
+        ws.add(jsonEncode({'hello': 1}));
+        return awaitClosed(ws);
+      },
+    ),
+  ));
+
+  // رسالة فوق سقف القناة: الإطار الإفصاحي ثم الإغلاق
+  cases.add((
+    code: 'ws_message_too_large',
+    run: () => walkWs(
+      wsServer(),
+      drive: (srv) async {
+        final ws = await WebSocket.connect(
+          'ws://127.0.0.1:${srv.port}/ws',
+          headers: {'Origin': 'https://portal.example'},
+        ).timeout(const Duration(seconds: 5));
+        ws.add(jsonEncode({'token': _t64}));
+        ws.add(jsonEncode(['x' * (300 * 1024)]));
+        return awaitClosed(ws);
+      },
+    ),
+  ));
+
+  // الخمول: مهلة بلا رسائل تغلق بالرمز المسجل
+  cases.add((
+    code: 'ws_idle_timeout',
+    run: () => walkWs(
+      wsServer(
+        config: const BridgeConfig(
+          wsPath: '/ws',
+          idleTimeout: Duration(milliseconds: 250),
+        ),
+      ),
+      drive: (srv) async {
+        final ws = await WebSocket.connect(
+          'ws://127.0.0.1:${srv.port}/ws',
+          headers: {'Origin': 'https://portal.example'},
+        ).timeout(const Duration(seconds: 5));
+        ws.add(jsonEncode({'token': _t64}));
+        return awaitClosed(ws, limit: const Duration(seconds: 5));
+      },
+    ),
+  ));
+
+  return cases;
+}
+
+/// يجمع كل ما ترسله القناة إلى إغلاقها — الإطار الأخير مع رمز الإغلاق
+/// الشبكي يقرآن معاً
+Future<(List<String>, int?)> awaitClosed(
+  WebSocket ws, {
+  Duration limit = const Duration(seconds: 5),
+}) async {
+  final replies = <String>[];
+  final done = Completer<void>();
+  late final StreamSubscription sub;
+  sub = ws.listen(
+    (m) => replies.add(m as String),
+    onDone: () => done.complete(),
+    onError: (Object _) => done.complete(),
+  );
+  try {
+    await done.future.timeout(limit);
+  } finally {
+    unawaited(sub.cancel());
+  }
+  return (replies, ws.closeCode);
 }

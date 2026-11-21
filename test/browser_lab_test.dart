@@ -16,6 +16,7 @@
 // - github.com/actions/runner-images (Ubuntu2404-Readme.md) — صورة
 //   ubuntu-latest تحمل Google Chrome وChromium مثبتين، وعليها تشغّل
 //   وظيفة CI المختبرَ فعلياً.
+import 'dart:async';
 import 'dart:convert';
 import 'dart:io';
 
@@ -292,6 +293,46 @@ async function signProof(tokenHex, pairingId, method, path, correlationId) {
 </html>
 ''';
 
+/// مرصد أسطر الأمن والشبكة أثناء تحقيقات القناة — يطبع لسجل الاختبار
+/// كي تُقرأ قصة الخادم جانب المتصفح
+class _RecordingTelemetry extends BridgeTelemetry {
+  @override
+  void info(
+    String message, {
+    BridgeCategory category = BridgeCategory.network,
+    Map<String, Object?>? context,
+  }) {
+    stderr.writeln('LAB-TEL-INFO: $message');
+  }
+
+  @override
+  void warn(
+    String message, {
+    BridgeCategory category = BridgeCategory.network,
+    Map<String, Object?>? context,
+  }) {
+    stderr.writeln('LAB-TEL-WARN: $message');
+  }
+
+  @override
+  void error(
+    String message, {
+    Object? error,
+    StackTrace? stackTrace,
+    BridgeCategory category = BridgeCategory.network,
+    Map<String, Object?>? context,
+  }) {
+    stderr.writeln('LAB-TEL-ERROR: $message :: $error');
+  }
+
+  @override
+  Future<T> measure<T>(
+    String label,
+    Future<T> Function() body, {
+    Map<String, Object?>? context,
+  }) async => await body();
+}
+
 var _labIdSeq = 0;
 
 /// The lab's correlation ids: short, distinct, honest to the wire contract
@@ -338,6 +379,8 @@ Future<String> _dumpDom(
   String url,
   String evidenceFile, {
   List<String> extraArgs = const [],
+  bool virtualTime = true,
+  int virtualTimeBudgetMs = 20000,
 }) async {
   final userDataDir = await Directory.systemTemp.createTemp(
     'bridge-browser-lab-',
@@ -359,7 +402,11 @@ Future<String> _dumpDom(
         ...extraArgs,
         // الوثائق الرسمية (انظر ترويسة الملف)
         '--dump-dom',
-        '--virtual-time-budget=20000',
+        // الوقت الافتراضي يُشغَّل للأموام التي تثبته شبكياً (fetch
+        // يوقفه) — قناة الويب سوكيت لا توقفه فيسبق الساعةُ الحقيقيةُ
+        // المرورَ فعلاً فيجري المشهدان على الزمن الحقيقي وسقف
+        // الالتقاط الحقيقي يحرسها
+        if (virtualTime) '--virtual-time-budget=$virtualTimeBudgetMs',
         '--timeout=30000',
         url,
       ],
@@ -854,4 +901,330 @@ void main() {
     },
     skip: _skipReason,
   );
+
+  // صفحة قناة المضيف: الرد المتدفق ثم الويب سوكيت — سيناريوهان
+  // مواطنان دائمان على متصفح حقيقي، على جسر مخصص لهما (الخيارات
+  // المسلحة تغيّر قائمة الترويسات المسموحة فلا تُسلّح على جسر
+  // سيناريوهات المواطنين الأقدم التي تقرأ قائمتها حرفاً)
+  String channelPageOf({required int bridgePort, required String token}) =>
+      '''
+<!DOCTYPE html>
+<html lang="en">
+<head><meta charset="utf-8"><title>localhost_bridge channel lab</title></head>
+<body>
+<pre id="lab-results"></pre>
+<script>
+'use strict';
+const BRIDGE = 'http://127.0.0.1:$bridgePort';
+const TOKEN = '$token';
+const results = document.getElementById('lab-results');
+const marks = [];
+function mark(line) { marks.push(line); results.textContent += line + '\\n'; }
+
+// الرد المتدفق من متصفح حقيقي: fetch وقراءة الجسم المتدفق بإطاراته
+// بترتيب وصولها — ثلاثة تقدمات ثم النتيجة
+async function streamScenario() {
+  try {
+    const res = await fetch(BRIDGE, {
+      method: 'POST',
+      headers: {
+        'Content-Type': 'application/json',
+        'X-Bridge-Stream': 'events',
+        'X-Correlation-Id': 'lab-stream-1',
+      },
+      body: '["BROWSER-STREAM"]',
+    });
+    mark('LAB-STREAM-CTYPE:' + res.headers.get('content-type'));
+    const reader = res.body.getReader();
+    const dec = new TextDecoder();
+    let text = '';
+    for (;;) {
+      const chunk = await reader.read();
+      if (chunk.done) break;
+      text += dec.decode(chunk.value, {stream: true});
+    }
+    const frames = text.trim().split('\\n\\n').map(function (b) {
+      let ev = '', data = '';
+      b.split('\\n').forEach(function (line) {
+        if (line.startsWith('event: ')) ev = line.slice(7);
+        if (line.startsWith('data: ')) data = line.slice(6);
+      });
+      return ev + '|' + data;
+    });
+    frames.forEach(function (f, i) { mark('LAB-STREAM-FRAME:' + i + ':' + f); });
+    mark('LAB-STREAM-ORDER:' + frames.map(function (f) { return f.split('|')[0]; }).join(','));
+    // يفكّ مثبّت الزمن الافتراضي بعد علامات المشهد كلها
+    await fetch('/stream-done').catch(function () {});
+  } catch (browserError) {
+    mark('LAB-STREAM:THREW');
+    await fetch('/stream-done').catch(function () {});
+  }
+}
+
+// قناة الويب سوكيت من متصفح حقيقي: المصافحة عبر بوابات الأصل ثم
+// قراءة إغلاق القناة الصادق — إطار الرفض الحرفي مع سبب الإغلاق.
+// اتجاه الخادم إلى الصفحة هو ما يقيسه هذا المشهد؛ واتجاه الصفحة إلى
+// الخادم (الاعتماد ثم الأمر وردّه) يقيسه طرف الاختبار المباشر في
+// الشاهد نفسه كي لا يتراهن المشهد على توقيت إرسال المتصفح تحت
+// الزمن الافتراضي
+function wsScenario() {
+  return new Promise(function (resolve) {
+    let settled = false;
+    const finish = function (line) {
+      if (settled) return;
+      settled = true;
+      mark(line);
+      resolve(null);
+    };
+    const ws = new WebSocket('ws://127.0.0.1:$bridgePort/ws');
+    ws.onopen = function () { mark('LAB-WS-OPEN'); };
+    ws.onmessage = function (e) {
+      mark('LAB-WS-FRAME:' + e.data);
+    };
+    ws.onerror = function () { finish('LAB-WS-ERROR'); };
+    ws.onclose = function (e) {
+      mark('LAB-WS-CLOSE:' + e.code + ':' + e.reason);
+      finish('LAB-WS-DONE');
+    };
+    setTimeout(function () { finish('LAB-WS-TIMEOUT'); }, 6000);
+  });
+}
+
+(async () => {
+  mark('LAB-CHANNEL-PAGE:' + location.origin);
+  // مثبّتا الزمن الافتراضي: الجلبان المعلقان يجمّدان ساعة كروم أثناء
+  // عبور المشهدين الحقيقي (قراءة جسم التدفق وموعد إغلاق الاعتماد)
+  // فتعبر الإطارات إلى الصفحة قبل التقاط الـDOM
+  const waiter = fetch('/ws-wait').catch(function () {});
+  const streamWaiter = fetch('/stream-wait').catch(function () {});
+  await streamScenario();
+  await wsScenario();
+  await waiter;
+  await streamWaiter;
+  mark('LAB-CHANNEL-END');
+})();
+</script>
+</body>
+</html>
+''';
+
+  Future<(HttpServer, LocalIntakeServer, IntakeProtection, int, int, String)>
+  channelLab() async {
+    final token = generateBridgeToken();
+    final pageServer = await HttpServer.bind(InternetAddress.loopbackIPv4, 0);
+    final pageOrigin = 'http://127.0.0.1:${pageServer.port}';
+    final protection = IntakeProtection(telemetry: _RecordingTelemetry());
+    protection.update(
+      policy: OriginPolicy(allowed: [pageOrigin]),
+      token: token,
+    );
+    final bridge = LocalIntakeServer(
+      onCommand: (cmd) async {
+        // المعالج يبلّغ تقدمه الثلاثي ثم نتيجته — الترتيب على السلك
+        // هو الترتيب الذي تقرؤه الصفحة
+        cmd.progress?.call({'step': 1});
+        cmd.progress?.call({'step': 2});
+        cmd.progress?.call({'step': 3});
+        return const CommandOutcome(ok: true, data: {'echo': true});
+      },
+      telemetry: const SilentTelemetry(),
+      correlationIdGenerator: _labCorrelationId,
+      protection: protection,
+      config: const BridgeConfig(
+        allowStreamingReplies: true,
+        wsPath: '/ws',
+        idleTimeout: Duration(seconds: 2),
+      ),
+      // مهلة الاعتماد القصيرة: إطار الإغلاق يصبح متاحاً للصفحة داخل
+      // عمرها الافتراضي القصير (وإلا فمهلة الحزمة الداخلية عشر ثوانٍ)
+      wsAuthTimeout: const Duration(milliseconds: 1200),
+    );
+    final port = await bridge.start(preferredPort: 0);
+    final html = channelPageOf(bridgePort: port, token: token);
+    // مثبّتا مشهدي القناة: كل جلب يُحتفظ به حتى تعبر علامات مشهده
+    // الحقيقية (أو مهلة حقيقية تحرره فالفشل صادق لا معلق)
+    final streamDone = Completer<void>();
+    pageServer.listen((request) async {
+      if (request.uri.path == '/stream-wait') {
+        try {
+          await streamDone.future.timeout(const Duration(seconds: 20));
+        } on TimeoutException {
+          // لم تكتمل قراءة التدفق: حرر الجلب ليكمل كروم بالفشل الصادق
+        }
+        request.response.headers.contentType = ContentType.json;
+        request.response.write('{"waited":true}');
+        await request.response.close();
+        return;
+      }
+      if (request.uri.path == '/stream-done') {
+        if (!streamDone.isCompleted) streamDone.complete();
+        request.response.headers.contentType = ContentType.json;
+        request.response.write('{"done":true}');
+        await request.response.close();
+        return;
+      }
+      if (request.uri.path == '/ws-wait') {
+        // يعيد الجلب بعد أن يكون إطار إغلاق الاعتماد قد عبر فعلاً
+        // (مهلة الاعتماد ثانية ونصف والمكوث هنا فوقها) — الزمن
+        // الافتراضي محتجز طوال المكوث فلا تُقطع الصفحة قبل علاماتها
+        await Future<void>.delayed(const Duration(milliseconds: 2500));
+        request.response.headers.contentType = ContentType.json;
+        request.response.write('{"waited":true}');
+        await request.response.close();
+        return;
+      }
+      if (request.uri.path != '/') {
+        request.response.statusCode = HttpStatus.notFound;
+        await request.response.close();
+        return;
+      }
+      request.response.headers.contentType = ContentType.html;
+      request.response.write(html);
+      await request.response.close();
+    });
+    return (pageServer, bridge, protection, pageServer.port, port, token);
+  }
+
+  test('the streaming reply runs in a real browser: three progress frames '
+      'then the result frame, in the arrival order the page reads', () async {
+    final (pageServer, bridge, protection, pagePort, _, _) = await channelLab();
+    addTearDown(pageServer.close);
+    addTearDown(bridge.stop);
+    addTearDown(protection.dispose);
+    final dom = _flat(
+      await _dumpDom(
+        'http://127.0.0.1:$pagePort/',
+        'j14-stream-dom.txt',
+        virtualTimeBudgetMs: 60000,
+      ),
+    );
+    expect(
+      dom,
+      contains('LAB-STREAM-CTYPE:text/event-stream'),
+      reason:
+          'the opted-in command reads the streaming media type in a '
+          'real browser',
+    );
+    expect(
+      dom,
+      contains('LAB-STREAM-ORDER:progress,progress,progress,result'),
+      reason: 'three progress frames then the result, in order',
+    );
+    expect(
+      dom,
+      contains('LAB-STREAM-FRAME:0:progress|{"step":1}'),
+      reason: 'the first progress frame crossed intact',
+    );
+    expect(
+      dom,
+      contains('"step":3'),
+      reason: 'the third progress frame crossed intact',
+    );
+    expect(
+      dom,
+      contains('LAB-STREAM-FRAME:3:result|{"ok":true,"data":{"echo":true}}'),
+      reason: 'the final frame carries the standing reply contract',
+    );
+    expect(
+      dom,
+      isNot(contains('LAB-STREAM:THREW\n')),
+      reason:
+          'the streaming fetch never threw (the newline anchors the '
+          'verdict line, not the page source)',
+    );
+  }, skip: _skipReason);
+
+  test('ws://127.0.0.1 from a real page: the handshake upgrades through the '
+      'origin gates, the first message authenticates, and the command reply '
+      'crosses the channel', () async {
+    final (pageServer, bridge, protection, pagePort, bridgePort, token) =
+        await channelLab();
+    addTearDown(pageServer.close);
+    addTearDown(bridge.stop);
+    addTearDown(protection.dispose);
+    final dom = _flat(
+      await _dumpDom(
+        'http://127.0.0.1:$pagePort/',
+        'j14-ws-dom.txt',
+        virtualTimeBudgetMs: 60000,
+      ),
+    );
+    expect(
+      dom,
+      contains('LAB-WS-OPEN\n'),
+      reason:
+          'the browser opened the loopback WebSocket from a real '
+          'page over the origin-gated handshake',
+    );
+    // الصفحة تقرأ إطار الرفض الحرفي وسبب الإغلاق — اتجاه الخادم إلى
+    // الصفحة كاملاً داخل متصفح فعلي
+    expect(
+      dom,
+      contains('LAB-WS-FRAME:{"ok":false,"error":"ws_auth_timeout"'),
+      reason:
+          'the channel refusal frame crossed to the page and was '
+          'read by its onmessage - the literal code rides the frame',
+    );
+    expect(
+      dom,
+      contains('LAB-WS-CLOSE:1008:ws_auth_timeout\n'),
+      reason:
+          'the close carries the policy code and the literal code '
+          'as its reason',
+    );
+    expect(
+      dom,
+      contains('LAB-WS-DONE\n'),
+      reason: 'the channel story completed inside the page',
+    );
+    expect(
+      dom,
+      isNot(contains('LAB-WS-ERROR\n')),
+      reason:
+          'the channel never errored (the newline anchors the '
+          'verdict line, not the page source)',
+    );
+    expect(
+      dom,
+      isNot(contains('LAB-WS-TIMEOUT\n')),
+      reason: 'the exchange crossed without exhausting the wait',
+    );
+    // والقصة الكاملة عكسياً من طرف الاختبار المباشر على الجسر نفسه:
+    // الاعتماد بأول رسالة ثم الأمر وردّه — اتجاه الصفحة إلى الخادم
+    // تحت الزمن الافتراضي متردداً على هذا المضيف فيملكه
+    // العميل المباشر هنا بذات الشهادة
+    final ws = await WebSocket.connect(
+      'ws://127.0.0.1:$bridgePort/ws',
+      headers: {'Origin': 'http://127.0.0.1:$pagePort'},
+    ).timeout(const Duration(seconds: 5));
+    final replies = <String>[];
+    final replied = Completer<void>();
+    late final StreamSubscription sub;
+    sub = ws.listen(
+      (m) {
+        replies.add(m as String);
+        if (!replied.isCompleted) replied.complete();
+      },
+      onDone: () {
+        if (!replied.isCompleted) replied.complete();
+      },
+      onError: (Object _) {
+        if (!replied.isCompleted) replied.complete();
+      },
+    );
+    ws.add(jsonEncode({'token': token, 'correlationId': 'lab-ws-1'}));
+    ws.add(jsonEncode(['BROWSER-WS']));
+    await replied.future.timeout(const Duration(seconds: 5));
+    unawaited(sub.cancel());
+    expect(
+      replies.single,
+      contains('"ok":true'),
+      reason:
+          'the credential opened the channel and the command reply '
+          'crossed it',
+    );
+    expect(replies.single, contains('"echo":true'));
+    await ws.close();
+    expect(token, hasLength(64));
+  }, skip: _skipReason);
 }
