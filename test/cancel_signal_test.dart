@@ -67,14 +67,17 @@ Future<(int, String)> _post(
   }
 }
 
-/// معالج يستطلع الإشارة حتى تشعل أو ينفد موعده القصوى — القراءة اختيار
-/// المعالج وهو جوهر العقد
+/// معالج يستطلع الإشارة حتى تشعل — والمهلة الحقيقية الطويلة حارسُ
+/// «لم تُشعل أبداً» فقط (فيسقط الاختبار بمهلة القشرة لا بخروج المعالج
+/// صامتاً): على عدّاء بنواتين تحت طقم متوازٍ تُجوَّع العزلة ثوانيَ
+/// متواصلة، فمهلة قصيرة تنفد قبل وصول الإشارة فيُكمل المعالج دون أن
+/// يلمحها — سباق جوعٍ لا سباق عقد
 Future<CommandOutcome> _pollUntilCancelled(
   TrustedCommand cmd,
   void Function(bool cancelled) onExit,
 ) async {
   final signal = cmd.cancellation;
-  final deadline = DateTime.now().add(const Duration(seconds: 5));
+  final deadline = DateTime.now().add(const Duration(seconds: 30));
   while (!signal.isCancelled && DateTime.now().isBefore(deadline)) {
     await Future<void>.delayed(const Duration(milliseconds: 10));
   }
@@ -102,8 +105,13 @@ void main() {
         expect(status, 504);
         expect(body, contains('handler_timeout'));
         // المعالج يعمل كيتيم بعد الرد؛ الشاهد أن الإشارة شُعلت لحظة
-        // الـ504 فلمسه المعالج قبل مهلته القصوى
-        await Future<void>.delayed(const Duration(milliseconds: 300));
+        // الـ504 فلمسه المعالج — الاقتراع حتى الرؤية (لا نوماً ثابتاً)
+        // يصمد ضد تجويع العزلة على عدّاء بطيء تحت طقم متوازٍ
+        var waited = 0;
+        while (!observed && waited < 10000) {
+          await Future<void>.delayed(const Duration(milliseconds: 10));
+          waited += 10;
+        }
         expect(
           observed,
           isTrue,
