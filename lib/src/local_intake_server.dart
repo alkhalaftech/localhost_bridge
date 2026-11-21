@@ -1896,12 +1896,26 @@ class LocalIntakeServer {
             );
             return;
           }
-          // نص المضيف تحت سقفه (خيار): فوق الحد يُقصّ إلى حدّه حصرا —
-          // الرمز وشكل الرد لا يمسّهما القص، والمطفأ يمرر النص كله
+          // نص المضيف تحت سقفه (خيار): السقف بالبايتات على السلك (UTF-8)
+          // لا بالمحارف — النص متعدد البايتات كان يعبر السقف البايتي
+          // المتوهم بعدد محارفه، والقص الآن عند حدّ محرفٍ كامل حصراً فلا
+          // يسافر نصفُ محرفٍ قط (المحرف متعدد البايتات لا يُجزأ: إما
+          // كله أو يسقط كله)، والرمز وشكل الرد لا يمسّهما القص، والمطفأ
+          // (وصفر) يمرر النص كله، والسالب رماه بناء الخادم
           var hostMessage = result.errorMessage ?? 'Command execution failed';
           final messageCap = config.maxErrorMessageLength;
-          if (messageCap > 0 && hostMessage.length > messageCap) {
-            hostMessage = hostMessage.substring(0, messageCap);
+          if (messageCap > 0) {
+            final encoded = utf8.encode(hostMessage);
+            if (encoded.length > messageCap) {
+              var cut = messageCap;
+              // الرجوع من حدّ البايتات إلى بداية المحرف: بايتُ تتمة
+              // (10xxxxxx) يعني وقوفاً وسط محرفٍ فيتراجع القصُّ إلى
+              // بدايته فيسقط المحرف كله لا نصفه
+              while (cut > 0 && (encoded[cut] & 0xC0) == 0x80) {
+                cut--;
+              }
+              hostMessage = utf8.decode(encoded.sublist(0, cut));
+            }
           }
           // حالة الرفض المعلّمة من المعالج (خيار): داخل 400..499 تصل
           // السلك بدل الـ500 الافتراضي، وخارجها تُتجاهل بتحذير مكبوح —

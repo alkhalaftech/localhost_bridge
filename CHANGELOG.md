@@ -217,8 +217,9 @@
     the option off the field is inert - the default stays `500`.
   - `maxErrorMessageLength` (0 = off, negative throws at construction) -
     the host error text echoed to trusted origins is capped on the wire
-    to exactly this many characters; the code and the reply shape are
-    never touched.
+    to at most this many UTF-8 bytes, cut at a whole-character boundary
+    (a multi-byte character is dropped whole, never split); the code and
+    the reply shape are never touched.
   - `acceptBinaryBodies` - `application/octet-stream` joins the admitted
     media types and the raw bytes reach the handler as the new
     `TrustedCommand.binaryPayload` (`payloads` stays empty - a binary

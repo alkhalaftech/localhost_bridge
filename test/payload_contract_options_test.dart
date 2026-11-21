@@ -528,6 +528,82 @@ void main() {
     );
   });
 
+  test('message cap counts UTF-8 bytes, not characters: a multi-byte '
+      'message over the byte cap truncates even when its character count '
+      'fits, cut at a whole-character boundary', () async {
+    // عشرة محارف عربية = عشرة محارف (كانت تعبر كاملة تحت سقف 12 محرفاً)
+    // لكنها عشرون بايتاً على السلك — السقف البايتي يقطعها إلى ستة محارف
+    // (اثنا عشر بايتاً بالضبط) لا إلى سابعٍ فوق حده
+    final arabic = 'ا' * 10;
+    expect(utf8.encode(arabic).length, 20);
+    server = _server(
+      config: const BridgeConfig(maxErrorMessageLength: 12),
+      onCommand: (cmd) async =>
+          CommandOutcome(ok: false, errorCode: 'e', errorMessage: arabic),
+    );
+    await server.start(preferredPort: 0);
+    final res = await _post(server);
+    expect(res.status, 500);
+    expect(
+      res.body.contains('ا' * 6),
+      isTrue,
+      reason: 'twelve bytes of Arabic are exactly six characters',
+    );
+    expect(
+      res.body.contains('ا' * 7),
+      isFalse,
+      reason: 'the reply never carries a seventh character past the byte '
+          'cap - the cap is byte-wise',
+    );
+    server.stop();
+    // القص عند حدّ محرفٍ كامل: ثلاثة محارف عربية (ستة بايتات) ثم رمزَان
+    // من أربعة بايتات لكلٍّ — سقف 9 بايتات يُسقط الرمز الثاني كله ولا
+    // يسافر نصفُه قط، والرد يبقى UTF-8 صالحاً بقراءته نفسها
+    final emojis = 'ااا🖥🖥';
+    expect(utf8.encode(emojis).length, 14);
+    final bounded = _server(
+      config: const BridgeConfig(maxErrorMessageLength: 9),
+      onCommand: (cmd) async =>
+          CommandOutcome(ok: false, errorCode: 'e', errorMessage: emojis),
+    );
+    server = bounded;
+    await bounded.start(preferredPort: 0);
+    final cut = await _post(bounded);
+    expect(
+      cut.body.contains('"message":"ااا"'),
+      isTrue,
+      reason: 'the cut lands exactly at the second emoji - neither emoji '
+          'is split, the whole character is dropped instead',
+    );
+    server.stop();
+    // والقصيرة تعبر بمحارفها كلها ما دامت بايتاتها تحت السقف
+    final shortServer = _server(
+      config: const BridgeConfig(maxErrorMessageLength: 12),
+      onCommand: (cmd) async => const CommandOutcome(
+        ok: false,
+        errorCode: 'e',
+        errorMessage: 'أهلاً',
+      ),
+    );
+    server = shortServer;
+    await shortServer.start(preferredPort: 0);
+    final small = await _post(shortServer);
+    expect(
+      small.body.contains('أهلاً'),
+      isTrue,
+      reason: 'ten bytes of a five-character message sit under the cap - '
+          'delivered verbatim',
+    );
+    server.stop();
+    // والسالب يبقى خطأ بناء لا خياراً صامتاً
+    expect(
+      () => _server(config: const BridgeConfig(maxErrorMessageLength: -1)),
+      throwsArgumentError,
+      reason: 'a negative cap is a configuration mistake - the standing '
+          'construction-time refusal unchanged',
+    );
+  });
+
   // ── خيار الجسم الثنائي ──────────────────────────────────────────────
 
   test('binary off: application/octet-stream refuses 415 and the '

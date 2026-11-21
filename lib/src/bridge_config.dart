@@ -146,12 +146,15 @@ class BridgeConfig {
   /// stays `500` either way.
   final bool acceptHandlerRefusal;
 
-  /// Host-message cap in characters - the standing failure reply echoes
+  /// Host-message cap in UTF-8 bytes - the standing failure reply echoes
   /// [CommandOutcome.errorMessage] verbatim; a value above zero bounds
-  /// that text on the wire: a longer message is truncated to exactly this
-  /// many characters (the code and the `ok` shape are never touched). `0`
-  /// (the default) keeps the option off - messages travel whole. A
-  /// negative value throws [ArgumentError] at server construction.
+  /// that text on the wire byte-wise: a longer message is truncated to
+  /// at most this many UTF-8 bytes, cut at a whole-character boundary -
+  /// a multi-byte character is never split, it is dropped whole (a cap
+  /// smaller than the first character truncates to an empty message).
+  /// The code and the `ok` shape are never touched. `0` (the default)
+  /// keeps the option off - messages travel whole. A negative value
+  /// throws [ArgumentError] at server construction.
   final int maxErrorMessageLength;
 
   /// Binary bodies - when true, `application/octet-stream` joins the
