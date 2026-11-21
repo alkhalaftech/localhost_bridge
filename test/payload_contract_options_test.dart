@@ -552,7 +552,8 @@ void main() {
     expect(
       res.body.contains('ا' * 7),
       isFalse,
-      reason: 'the reply never carries a seventh character past the byte '
+      reason:
+          'the reply never carries a seventh character past the byte '
           'cap - the cap is byte-wise',
     );
     server.stop();
@@ -572,7 +573,8 @@ void main() {
     expect(
       cut.body.contains('"message":"ااا"'),
       isTrue,
-      reason: 'the cut lands exactly at the second emoji - neither emoji '
+      reason:
+          'the cut lands exactly at the second emoji - neither emoji '
           'is split, the whole character is dropped instead',
     );
     server.stop();
@@ -591,7 +593,8 @@ void main() {
     expect(
       small.body.contains('أهلاً'),
       isTrue,
-      reason: 'ten bytes of a five-character message sit under the cap - '
+      reason:
+          'ten bytes of a five-character message sit under the cap - '
           'delivered verbatim',
     );
     server.stop();
@@ -599,7 +602,8 @@ void main() {
     expect(
       () => _server(config: const BridgeConfig(maxErrorMessageLength: -1)),
       throwsArgumentError,
-      reason: 'a negative cap is a configuration mistake - the standing '
+      reason:
+          'a negative cap is a configuration mistake - the standing '
           'construction-time refusal unchanged',
     );
   });

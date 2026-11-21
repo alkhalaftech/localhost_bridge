@@ -1259,63 +1259,60 @@ void main() {
     },
   );
 
-  test(
-    'the Arabic README wire table matches the rejection registry line '
-    'for line, like the English table',
-    () {
-      final readme = File('README.ar.md').readAsStringSync();
-      // قسم عقد السلك في الخلاصة العربية حصراً — من عنوانه إلى قسم دعم
-      // المتصفحات، وبقراءة عمود الرموز ذاتها التي يقرأ بها الحارس
-      // الإنجليزي فالخلاصة العربية مرآة للعقد لا ترجمة اختيارية
-      const startMark = '## عقد السلك';
-      const endMark = '## دعم المتصفحات';
-      final start = readme.indexOf(startMark);
-      final end = readme.indexOf(endMark);
-      expect(start, greaterThan(0), reason: 'the Arabic wire section exists');
-      expect(end, greaterThan(start), reason: 'the section is delimited');
-      final section = readme.substring(start, end);
-      final row = RegExp(r'^\|\s*(\d{3})\s*\|\s*([^|]+)\|', multiLine: true);
-      final wire = <String, int>{};
-      for (final m in row.allMatches(section)) {
-        final status = int.parse(m.group(1)!);
-        for (final c in RegExp(r'`([a-z_0-9]+)`').allMatches(m.group(2)!)) {
-          final code = c.group(1)!;
-          final existing = wire[code];
-          if (existing != null) {
-            expect(
-              existing,
-              status,
-              reason: '$code is documented with one status only',
-            );
-          }
-          wire[code] = status;
+  test('the Arabic README wire table matches the rejection registry line '
+      'for line, like the English table', () {
+    final readme = File('README.ar.md').readAsStringSync();
+    // قسم عقد السلك في الخلاصة العربية حصراً — من عنوانه إلى قسم دعم
+    // المتصفحات، وبقراءة عمود الرموز ذاتها التي يقرأ بها الحارس
+    // الإنجليزي فالخلاصة العربية مرآة للعقد لا ترجمة اختيارية
+    const startMark = '## عقد السلك';
+    const endMark = '## دعم المتصفحات';
+    final start = readme.indexOf(startMark);
+    final end = readme.indexOf(endMark);
+    expect(start, greaterThan(0), reason: 'the Arabic wire section exists');
+    expect(end, greaterThan(start), reason: 'the section is delimited');
+    final section = readme.substring(start, end);
+    final row = RegExp(r'^\|\s*(\d{3})\s*\|\s*([^|]+)\|', multiLine: true);
+    final wire = <String, int>{};
+    for (final m in row.allMatches(section)) {
+      final status = int.parse(m.group(1)!);
+      for (final c in RegExp(r'`([a-z_0-9]+)`').allMatches(m.group(2)!)) {
+        final code = c.group(1)!;
+        final existing = wire[code];
+        if (existing != null) {
+          expect(
+            existing,
+            status,
+            reason: '$code is documented with one status only',
+          );
         }
+        wire[code] = status;
       }
-      // كل رمز في السجل له صفه بالجدول العربي بحالته المسجلة نفسها
-      intakeRejectionRegistry.forEach((code, spec) {
-        expect(
-          wire[code],
-          spec.status,
-          reason:
-              '$code must sit in the Arabic README wire table with exactly '
-              'its registry status - a registry row with no Arabic mirror '
-              'row fails here like a missing English one',
-        );
-      });
-      // وكل رمز موثق بالجدول العربي إما رفض مسجل أو من عائلة نتائج
-      // المعالج الموثقة ذاتها
-      const outcomeFamily = {'internal', 'command_failed'};
-      wire.forEach((code, status) {
-        if (intakeRejectionRegistry.containsKey(code)) return;
-        expect(
-          outcomeFamily.contains(code),
-          isTrue,
-          reason:
-              '$code appears in the Arabic README wire table but sits in '
-              'no registry - register it, or name it in the documented '
-              'outcome family',
-        );
-      });
-    },
-  );
+    }
+    // كل رمز في السجل له صفه بالجدول العربي بحالته المسجلة نفسها
+    intakeRejectionRegistry.forEach((code, spec) {
+      expect(
+        wire[code],
+        spec.status,
+        reason:
+            '$code must sit in the Arabic README wire table with exactly '
+            'its registry status - a registry row with no Arabic mirror '
+            'row fails here like a missing English one',
+      );
+    });
+    // وكل رمز موثق بالجدول العربي إما رفض مسجل أو من عائلة نتائج
+    // المعالج الموثقة ذاتها
+    const outcomeFamily = {'internal', 'command_failed'};
+    wire.forEach((code, status) {
+      if (intakeRejectionRegistry.containsKey(code)) return;
+      expect(
+        outcomeFamily.contains(code),
+        isTrue,
+        reason:
+            '$code appears in the Arabic README wire table but sits in '
+            'no registry - register it, or name it in the documented '
+            'outcome family',
+      );
+    });
+  });
 }

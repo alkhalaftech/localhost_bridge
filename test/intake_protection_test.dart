@@ -2601,8 +2601,13 @@ void main() {
             a.settle();
             await pumpEventQueue();
           }
-          expect(asked, 3, reason: 'the parent budget takes exactly three '
-              'fires');
+          expect(
+            asked,
+            3,
+            reason:
+                'the parent budget takes exactly three '
+                'fires',
+          );
           for (var i = 3; i < 10; i++) {
             final a = await p.admit(origin: 'https://s$i.pump.example');
             expect(a.rejection?.code, 'origin_parent_rate_limited');
@@ -2612,7 +2617,8 @@ void main() {
           expect(
             asked,
             3,
-            reason: 'seven more asks of the same parent fire nothing - the '
+            reason:
+                'seven more asks of the same parent fire nothing - the '
                 'pump has not jumped yet, so nothing renewed',
           );
           // خطوة المضخة الوحيدة: القفزة فوق النافذة
@@ -2621,7 +2627,8 @@ void main() {
           expect(
             renewed.rejection?.code,
             'origin_pending',
-            reason: 'the jump ages the parent stamps out by the clock alone '
+            reason:
+                'the jump ages the parent stamps out by the clock alone '
                 '- the renewal is honest time passing, never an early one',
           );
           renewed.settle();
@@ -2639,109 +2646,111 @@ void main() {
           expect(fourth.rejection?.code, 'origin_parent_rate_limited');
           fourth.settle();
           await pumpEventQueue();
-          expect(asked, 6, reason: 'the fresh window counts its own three '
-              'fires');
+          expect(
+            asked,
+            6,
+            reason:
+                'the fresh window counts its own three '
+                'fires',
+          );
           p.dispose();
         },
       );
 
-      test(
-        'the pump with a parent budget armed evicts no live always-allow: '
-        'the open question keeps its late answer and the only wash is the '
-        'documented oldest-entry cap wash',
-        () async {
-          var fakeNow = 0;
-          var asked = 0;
-          final gates = <String, Completer<OriginConsent>>{};
-          final p = IntakeProtection(nowMs: () => fakeNow)
-            ..update(
-              policy: OriginPolicy(
-                askFiresPerParentPerWindow: 2,
-                requireFetchMetadata: false,
-                onUnknownOrigin: (origin) {
-                  asked++;
-                  final g = Completer<OriginConsent>();
-                  gates[origin] = g;
-                  return g.future;
-                },
-                // أبعد من مدة الاختبار كله: السؤال الحي يبقى مفتوحاً
-                askTimeout: const Duration(minutes: 10),
-              ),
-            );
-          // سؤال حي يُفتح أولاً ويبقى بلا جواب فوق خريطة الموافقات
-          const live = 'https://live.example';
-          final rl = await p.check(
-            origin: live,
+      test('the pump with a parent budget armed evicts no live always-allow: '
+          'the open question keeps its late answer and the only wash is the '
+          'documented oldest-entry cap wash', () async {
+        var fakeNow = 0;
+        var asked = 0;
+        final gates = <String, Completer<OriginConsent>>{};
+        final p = IntakeProtection(nowMs: () => fakeNow)
+          ..update(
+            policy: OriginPolicy(
+              askFiresPerParentPerWindow: 2,
+              requireFetchMetadata: false,
+              onUnknownOrigin: (origin) {
+                asked++;
+                final g = Completer<OriginConsent>();
+                gates[origin] = g;
+                return g.future;
+              },
+              // أبعد من مدة الاختبار كله: السؤال الحي يبقى مفتوحاً
+              askTimeout: const Duration(minutes: 10),
+            ),
+          );
+        // سؤال حي يُفتح أولاً ويبقى بلا جواب فوق خريطة الموافقات
+        const live = 'https://live.example';
+        final rl = await p.check(
+          origin: live,
+          fetchMode: 'cors',
+          fetchDest: 'empty',
+        );
+        expect(rl!.code, 'origin_pending');
+        // مضخة الألف نفسها: كل عشرة إطلاقات قفزة نافذة، وكل مضيف
+        // مقطعين أبٌ لنفسه فميزانية الأب المسلحة لا تكبح واحداً منهم.
+        // العدّ يبدأ من واحد: السؤال الحي نفسه استهلك خانة من ميزانية
+        // العشرة العامة فطابورها يبدأ بعنصر واحد
+        var sinceBudgetBump = 1;
+        Future<void> askAndAnswer(String origin) async {
+          if (sinceBudgetBump == 10) {
+            fakeNow += 601_000;
+            sinceBudgetBump = 0;
+          }
+          final r = await p.check(
+            origin: origin,
             fetchMode: 'cors',
             fetchDest: 'empty',
           );
-          expect(rl!.code, 'origin_pending');
-          // مضخة الألف نفسها: كل عشرة إطلاقات قفزة نافذة، وكل مضيف
-          // مقطعين أبٌ لنفسه فميزانية الأب المسلحة لا تكبح واحداً منهم.
-          // العدّ يبدأ من واحد: السؤال الحي نفسه استهلك خانة من ميزانية
-          // العشرة العامة فطابورها يبدأ بعنصر واحد
-          var sinceBudgetBump = 1;
-          Future<void> askAndAnswer(String origin) async {
-            if (sinceBudgetBump == 10) {
-              fakeNow += 601_000;
-              sinceBudgetBump = 0;
-            }
-            final r = await p.check(
-              origin: origin,
-              fetchMode: 'cors',
-              fetchDest: 'empty',
-            );
-            expect(r!.code, 'origin_pending');
-            sinceBudgetBump++;
-            gates[origin]!.complete(OriginConsent.allowAlways);
-            await pumpEventQueue();
-          }
-
-          for (var i = 0; i < 1000; i++) {
-            await askAndAnswer('https://w$i.example');
-          }
-          expect(
-            asked,
-            1001,
-            reason: 'every distinct-parent origin fired its own question - '
-                'the armed budget suppressed none and the pump renewed '
-                'nothing early',
-          );
-          // جواب السؤال الحي بعد ملء الخريطة يبقى الكلمة الأخيرة
-          gates[live]!.complete(OriginConsent.allowAlways);
+          expect(r!.code, 'origin_pending');
+          sinceBudgetBump++;
+          gates[origin]!.complete(OriginConsent.allowAlways);
           await pumpEventQueue();
-          expect(
-            await p.check(
-              origin: live,
-              fetchMode: 'cors',
-              fetchDest: 'empty',
-            ),
-            isNull,
-            reason: 'the pump and the armed parent budget washed nothing '
-                'live - the late always-allow is remembered',
-          );
-          // والغسل الوحيد هو غسل السقف الموثق: أقدم إدراج (w0) هو من
-          // خرج ليدخل الحي مكانه — فإعادة فحصه تفتح سؤالاً جديداً
-          expect(
-            (await p.check(
-              origin: 'https://w0.example',
-              fetchMode: 'cors',
-              fetchDest: 'empty',
-            ))!.code,
-            'origin_pending',
-            reason: 'the oldest always-allow left through the documented '
-                'no-denial cap wash alone - never through the pump or the '
-                'parent budget',
-          );
-          expect(
-            asked,
-            1002,
-            reason: 'the washed oldest origin is asked anew - the wash was '
-                'the cap\'s, and it took the oldest entry only',
-          );
-          p.dispose();
-        },
-      );
+        }
+
+        for (var i = 0; i < 1000; i++) {
+          await askAndAnswer('https://w$i.example');
+        }
+        expect(
+          asked,
+          1001,
+          reason:
+              'every distinct-parent origin fired its own question - '
+              'the armed budget suppressed none and the pump renewed '
+              'nothing early',
+        );
+        // جواب السؤال الحي بعد ملء الخريطة يبقى الكلمة الأخيرة
+        gates[live]!.complete(OriginConsent.allowAlways);
+        await pumpEventQueue();
+        expect(
+          await p.check(origin: live, fetchMode: 'cors', fetchDest: 'empty'),
+          isNull,
+          reason:
+              'the pump and the armed parent budget washed nothing '
+              'live - the late always-allow is remembered',
+        );
+        // والغسل الوحيد هو غسل السقف الموثق: أقدم إدراج (w0) هو من
+        // خرج ليدخل الحي مكانه — فإعادة فحصه تفتح سؤالاً جديداً
+        expect(
+          (await p.check(
+            origin: 'https://w0.example',
+            fetchMode: 'cors',
+            fetchDest: 'empty',
+          ))!.code,
+          'origin_pending',
+          reason:
+              'the oldest always-allow left through the documented '
+              'no-denial cap wash alone - never through the pump or the '
+              'parent budget',
+        );
+        expect(
+          asked,
+          1002,
+          reason:
+              'the washed oldest origin is asked anew - the wash was '
+              'the cap\'s, and it took the oldest entry only',
+        );
+        p.dispose();
+      });
     },
   );
 

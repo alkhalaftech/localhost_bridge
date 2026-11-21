@@ -270,7 +270,8 @@ void main() {
         expect(
           suppressed.rejection?.status,
           429,
-          reason: 'the parent budget is a rate budget, so its code answers '
+          reason:
+              'the parent budget is a rate budget, so its code answers '
               'with the quota family status',
         );
         expect(
@@ -278,10 +279,7 @@ void main() {
           isNotNull,
           reason: 'the suppression carries the honest parent-window remainder',
         );
-        expect(
-          suppressed.rejection!.retryAfterMs!,
-          greaterThanOrEqualTo(1000),
-        );
+        expect(suppressed.rejection!.retryAfterMs!, greaterThanOrEqualTo(1000));
         suppressed.settle();
         await pumpEventQueue();
         // سقف العام لا يتغير حرفاً: الأصل البريء يفتح سؤاله بالرمز العام
@@ -293,8 +291,13 @@ void main() {
         );
         fresh.settle();
         await pumpEventQueue();
-        expect(asked, 2, reason: 'two fires: the parent head and the fresh '
-            'origin - the suppression fired nothing');
+        expect(
+          asked,
+          2,
+          reason:
+              'two fires: the parent head and the fresh '
+              'origin - the suppression fired nothing',
+        );
         p.dispose();
       },
     );
