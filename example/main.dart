@@ -1,6 +1,8 @@
-// localhost_bridge example - a complete host in pure Dart (zero deps).
-// Run it, then send a fetch POST from any admitted https page, or try:
-// curl -X POST -H "Origin: https://demo.example" -H "Content-Type: application/json" -d '{"data":["hello"]}' http://127.0.0.1:9100/
+// مثال localhost_bridge — مضيف كامل بدارت صرفة (صفر تبعيات).
+// شغّله ثم أرسل POST بـfetch من صفحة https مقبولة، أو جرّب السطر التالي
+// على المنفذ المطبوع (start() يخدم المنفذ المفضل فقط إن لم يكن مشغولاً
+// بغيره — الصفحة تقرأ المنفذ الذي أعاده من عنوان فتح الصفحة):
+// curl -X POST -H "Origin: https://demo.example" -H "Content-Type: application/json" -d '{"data":["hello"]}' http://127.0.0.1:$PORT/
 import 'dart:convert';
 import 'dart:io';
 import 'dart:math';
@@ -20,6 +22,11 @@ String newCorrelationId() {
 
 /// A quick local gauge with no external logger - swap in your real one for production.
 final _requests = <String>[];
+
+// سقف داخلي مسمّى لسجل العرض: القائمة عدّاد عرض تجريبي لا دفتر تنفيذ
+// (للتنفيذ المضمون مرة واحدة انظر example/idempotent_handler.dart) —
+// عند السقف يُسقط الأقدم إدراجاً كي لا ينمو السجل بلا حد في جلسة طويلة.
+const _maxRequestLogEntries = 64;
 
 class ConsoleTelemetry extends BridgeTelemetry {
   const ConsoleTelemetry();
@@ -70,9 +77,9 @@ class ConsoleTelemetry extends BridgeTelemetry {
 
 void main() async {
   final server = LocalIntakeServer(
-    // The handler - the bridge is payload-agnostic: commands are strings,
-    // their meaning is yours alone. This one refuses anything outside a
-    // small allowlist (payloads are always untrusted).
+    // المعالج — الجسر لا يفهم الحمولات: الأوامر نصوص ومعناها لك وحدك.
+    // هذا المعالج يرفض كل ما خرج عن قائمة صغيرة (الحمولات غير موثوقة
+    // دائماً)، والسجل أدناه عرض تجريبي مسقوف لا دفتر حماية.
     onCommand: (cmd) async {
       const allowed = {'PING', 'HELLO'};
       for (final payload in cmd.payloads) {
@@ -85,6 +92,9 @@ void main() async {
           );
         }
       }
+      if (_requests.length >= _maxRequestLogEntries) {
+        _requests.removeAt(0); // الأقدم أولاً — عرض لا حماية
+      }
       _requests.add('${cmd.correlationId} from ${cmd.source}');
       return const CommandOutcome(ok: true);
     },
@@ -94,9 +104,12 @@ void main() async {
     protection: IntakeProtection(telemetry: const ConsoleTelemetry())
       ..update(
         policy: const OriginPolicy(
-          // Closed by default - this list is your contract with the gates.
+          // مغلق افتراضياً — هذه القائمة عقدك مع البوابات.
           allowed: ['https://demo.example'],
           allowAllHardened: false,
+          // صفر يترك المدرجين بلا حصة فيظل فيض أصلٍ مدرج ممسكاً المقاعد
+          // ما دامت طلباته قائمة — والقيمة الموجبة تحصره بالرمز نفسه 429.
+          listedPerOriginPerMinute: 120,
         ),
       ),
   );
@@ -114,7 +127,8 @@ void main() async {
   await ProcessSignal.sigint.watch().first;
   await server.stop();
   stdout.writeln(
-    'served ${_requests.length} accepted commands; bye '
+    'served ${_requests.length} accepted commands (log capped at '
+    '$_maxRequestLogEntries, oldest dropped); bye '
     '(${jsonEncode(_requests.take(3))})',
   );
 }

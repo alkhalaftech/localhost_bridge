@@ -5,6 +5,7 @@
 import 'dart:async';
 import 'dart:convert';
 import 'dart:io';
+import 'dart:typed_data' show BytesBuilder;
 
 import 'package:test/test.dart';
 import 'package:localhost_bridge/localhost_bridge.dart';
@@ -556,6 +557,59 @@ void main() {
         // وstop يفرغ بلا تعليق — لا مؤقت حي ولا مقعد محجوز
         await server.stop().timeout(const Duration(seconds: 3));
       },
+    );
+  });
+
+  test('a stalled body answers 408 with the stable request_timeout code in '
+      'the reply body', () async {
+    // الحارس الحرفي للرمز المنشور في جدول Stable error codes: الحالة
+    // وحدها لا تكفي — الجسم هو ما تقرأه الصفحة فالرمز يُقاس فيه
+    final port = await server.start(preferredPort: 0);
+    final sock = await Socket.connect(InternetAddress.loopbackIPv4, port);
+    unawaited(sock.done.catchError((Object _) {}));
+    sock.add(
+      utf8.encode(
+        'POST / HTTP/1.1\r\n'
+        'Host: 127.0.0.1:$port\r\n'
+        'Origin: https://portal.example\r\n'
+        'Content-Type: application/json\r\n'
+        'Content-Length: 100\r\n'
+        '\r\nA',
+      ),
+    );
+    final buffer = BytesBuilder();
+    final done = Completer<String>();
+    late final StreamSubscription<List<int>> sub;
+    sub = sock.listen(
+      (d) {
+        buffer.add(d);
+      },
+      onDone: () {
+        if (!done.isCompleted) {
+          done.complete(latin1.decode(buffer.toBytes(), allowInvalid: true));
+        }
+      },
+      onError: (Object _) {
+        if (!done.isCompleted) {
+          done.complete(latin1.decode(buffer.toBytes(), allowInvalid: true));
+        }
+      },
+    );
+    // الرد 408 يقطع الاتصال بعقده (persistentConnection=false) —
+    // الاكتمال عند النهاية يجمع الرأس والجسم كما وصلوا لا جزءاً منهما
+    final reply = await done.future.timeout(const Duration(seconds: 5));
+    await sub.cancel();
+    sock.destroy();
+    expect(reply.split('\r\n').first, contains(' 408 '));
+    expect(
+      reply.substring(reply.indexOf('\r\n\r\n') + 4),
+      contains('"error":"request_timeout"'),
+      reason: 'the published code sits in the body the page reads',
+    );
+    expect(
+      handlerCalls,
+      0,
+      reason: 'the stalled request never reaches the handler',
     );
   });
 }

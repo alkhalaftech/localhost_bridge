@@ -1,3 +1,35 @@
+## 0.1.3
+
+- Security: an early rejection (405, a Host, shape or policy reject,
+  415, a payload-shape reject, an OPTIONS preflight) no longer holds a
+  concurrency seat: the connection is cut after the reply, and no
+  request holds a seat past the request timeout before its handler
+  starts.
+- Security: the per-origin quota and token-failure window maps have an
+  internal size cap.
+- Security: a body carrying more than one payload wrapper key is refused
+  with `400 unsupported_payload_shape` instead of running the first key
+  alone.
+- Security: an `Origin` that is not `scheme://host[:port]` is refused
+  with `400 origin_malformed`, and the consent callback receives the
+  normalized origin.
+- Security: a listed origin sending a mismatched `Sec-Fetch-Mode` or
+  `Sec-Fetch-Dest` is refused with `403 cross_site_blocked`.
+- Security: an `X-Portal-Token` longer than 1,024 bytes is refused with
+  `400 token_too_long`.
+- Security: the `Origin` value in telemetry contexts is sanitized like
+  the rejection log lines.
+- A body the HTTP parser rejects is answered `400 bad_request` instead
+  of `500 internal`.
+- A POST to a path other than `/` logs a throttled warning; the request
+  is still served.
+- Intake warning lines are throttled to one per second, with the muted
+  count on the next line.
+- `ArrivalGuard` queues are bounded by their per-minute limits.
+- Documentation: the token path and the availability model, re-verified
+  browser and platform tables, a consent example page, two domain
+  examples, and an attack-to-test index.
+
 ## 0.1.2
 
 - Security: a long run of `/` characters in the `Origin` header no

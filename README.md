@@ -5,8 +5,9 @@
 A localhost HTTP bridge for Dart & Flutter: web pages and local token
 clients (CLIs, AI agents) send commands to your app; CORS, Local Network
 Access handling, a DNS-rebinding guard and strict limits are built in —
-and the bridge never reads the command, so its meaning belongs to your
-handler alone.
+and the bridge parses the payload's shape — JSON, wrapper keys, element
+and depth counts — without interpreting the command, so its meaning
+belongs to your handler alone.
 
 Your Dart app runs an HTTP server on `127.0.0.1` (never exposed to the
 network). A web page the user visits sends commands to it directly from
@@ -17,19 +18,62 @@ commands *mean* stays entirely in your handler.
 - **Zero runtime dependencies** — pure `dart:io`, one package, no native
   code. (The SDK constraint pub.dev displays is a compatibility range,
   not a dependency.)
-- Every rejection carries a stable error `code` — the developer contract.
+- Rejections carry a stable error `code` — the developer contract. The
+  honest exceptions cut the connection immediately: the busy 503, the
+  403 Host reject (a request whose Host is not this bridge's local
+  address), and a 413 whose body cannot be drained within the discard
+  limits — on those paths the code may never reach the caller.
 
 ## Quick start
 
 ```dart
-import 'dart:io';
 import 'dart:math';
 import 'package:localhost_bridge/localhost_bridge.dart';
 
+// One telemetry sink, shared with the protection object — a protection
+// built without one logs nothing. This one prints its lines: the const
+// SilentTelemetry() type swallows the security warnings (lockouts,
+// policy blocks, oversized tokens), so keep a printing sink while you
+// bring the bridge up.
+final class _PrintTelemetry extends BridgeTelemetry {
+  const _PrintTelemetry();
+
+  @override
+  void info(
+    String message, {
+    BridgeCategory category = BridgeCategory.network,
+    Map<String, Object?>? context,
+  }) {}
+
+  @override
+  void warn(
+    String message, {
+    BridgeCategory category = BridgeCategory.network,
+    Map<String, Object?>? context,
+  }) =>
+      print('[warn/$category] $message');
+
+  @override
+  void error(
+    String message, {
+    Object? error,
+    StackTrace? stackTrace,
+    BridgeCategory category = BridgeCategory.network,
+    Map<String, Object?>? context,
+  }) =>
+      print('[error/$category] $message');
+
+  @override
+  Future<T> measure<T>(
+    String label,
+    Future<T> Function() body, {
+    Map<String, Object?>? context,
+  }) =>
+      body();
+}
+
 void main() async {
-  // One telemetry sink, shared with the protection object — a protection
-  // built without one logs nothing.
-  const telemetry = SilentTelemetry();
+  const telemetry = _PrintTelemetry();
 
   final server = LocalIntakeServer(
     // Required: your command handler — the bridge is payload-agnostic.
@@ -37,49 +81,67 @@ void main() async {
       print('from ${cmd.source}: ${cmd.payloads}');
       return const CommandOutcome(ok: true);
     },
-    // Required: your telemetry sink (use const SilentTelemetry() to start).
+    // Required: your telemetry sink — print the warnings while you wire
+    // the bridge up; the silent sink hides the security lines.
     telemetry: telemetry,
     // Required: correlation ids — any unique string per request. A
     // Random.secure-based UUID-v4-style generator lives in example/main.dart.
     correlationIdGenerator: () =>
         '${DateTime.now().microsecondsSinceEpoch.toRadixString(16)}'
         '-${Random.secure().nextInt(1 << 32).toRadixString(36)}',
-    // No default: without it a stuck handler holds its seat indefinitely.
+    // Frees a slow handler's seat with a reconcilable 504
+    // handler_timeout; without it a slow handler holds its seat until
+    // it completes - pass a value in production.
     handlerTimeout: Duration(seconds: 10),
     protection: IntakeProtection(telemetry: telemetry)
       ..update(
         policy: const OriginPolicy(
           allowed: ['https://portal.example.com', '*.partner.io'],
+          // Bounds a compromised listed origin with the same 429 as the
+          // allow-all path; 0 (the default) leaves listed origins
+          // unquotaed, so a flood from one holds seats for as long as
+          // its requests stay in flight.
+          listedPerOriginPerMinute: 120,
         ),
-        // Optional token layer for non-browser integrations only — the
-        // token must be persisted and shared out-of-band (the quick start
-        // omits it; see the token layer bullet below).
+        // Optional token layer — most useful for non-browser
+        // integrations; the token must be persisted and shared
+        // out-of-band (the quick start omits it; the token bullet below
+        // says where a page can send one too).
       ),
   );
 
   final port = await server.start(preferredPort: 9100);
-  print('listening on http://127.0.0.1:$port');
+  print('listening on http://127.0.0.1:$port'); // the port start() returned
 }
 ```
 
-The page side is a plain `fetch('http://127.0.0.1:9100/', { method: 'POST',
-... })` — the server answers with CORS headers for **admitted** origins
-(origin echo + `Vary: Origin`), so HTTPS pages you admitted can call and
-read it; every other origin is rejected **before your handler runs** — the
-request never reaches your command code, and the reply is unreadable. From
+The page side is a plain `fetch` `POST` to the port `start()` returned —
+the page-side reference below reads it from the URL the host used to
+open the page. The server answers with CORS headers for **admitted**
+origins (origin echo + `Vary: Origin`), so HTTPS pages you admitted can
+call and read it; every other origin is rejected **before your handler
+runs** — the request never reaches your command code, and the page can
+read such a reply only where the CORS echo applies (the
+consent-question rejection and the quota rejections that carry
+`Retry-After` are readable by design). From
 an HTTPS page, add `targetAddressSpace: 'loopback'` to the fetch options —
-Chrome's Local Network Access guide asks for it (verified 2026-11-13),
-keeping the request exempt from mixed-content blocking and checking the
-address space against loopback after DNS resolution
+Chrome's Local Network Access guide asks for it (verified 2026-11-13) and
+re-verified 2026-11-15, keeping the request exempt from mixed-content
+blocking and checking the address space against loopback after DNS resolution
 ([Local Network Access guide](https://developer.chrome.com/docs/modern-web-guidance/guides/security/local-network-access)).
 
 Adding a token does not make it required: while any origin path admits
 (a listed origin, allow-all, a remembered consent), a local program can
 present that Origin and enter without the token. To require the token,
-keep the origin policy empty. In this release a browser page cannot use
-the token path: the CORS preflight that would let a page send
-`X-Portal-Token` is answered only for origins the origin policy admits,
-so the token belongs to non-browser senders.
+keep the origin policy empty. In this release whether a browser page can
+use the token path follows the CORS echo: with an empty origin policy
+and no consent callback nothing is echoed at all, so the token stays a
+non-browser path; with a listed origin policy it is echoed for the
+listed origins themselves - a page on one can send `X-Portal-Token`
+too, though it is already admitted without it; in the discovery
+and allow-all modes the preflight is answered for any valid https origin
+that has not been refused, so a page on such an origin can send
+`X-Portal-Token` as well.
 
 A local token client needs no browser at all — one `curl` is the whole
 client. Configure the token once with
@@ -98,7 +160,10 @@ The bridge cannot know whether a site is legitimate or compromised: it
 only sees the `Origin` header (set by the browser, forgeable by any local
 program), the `Sec-Fetch-*` headers, and the payload.
 
-- **Closed by default.** An empty policy rejects everything. Ship-safe.
+- **Closed by default.** An empty policy rejects every origin — token
+  holders still enter once a token is configured, because the token
+  layer is an independent entry path, not a gate over the policy.
+  Ship-safe.
 - **Allowlist** stops unknown sites. It does **not** stop a compromised
   allowlisted site.
 - **Allow-all (hardened)** accepts any valid HTTPS origin, but blocks
@@ -118,10 +183,15 @@ program), the `Sec-Fetch-*` headers, and the payload.
   not make it required: while any origin path admits (a listed origin,
   allow-all, a remembered consent), a local program can present that
   Origin and enter without the token. To require the token, keep the
-  origin policy empty. In this release a browser page cannot use the
-  token path: the CORS preflight that would let a page send
-  `X-Portal-Token` is answered only for origins the origin policy
-  admits, so the token belongs to non-browser senders. On Android it is
+  origin policy empty. In this release a browser page can use the token
+  path wherever the preflight is echoed for it: listed and
+  always-approved origins (the origins your consent callback answered
+  with a remembered `allowAlways` grant) always - a page on a listed
+  origin can present the token too, though it is already admitted
+  without it - and in the discovery and allow-all modes any valid https
+  origin not yet refused.
+  Only with an empty origin policy and no consent callback is nothing
+  echoed, so the token belongs to non-browser senders there. On Android it is
   the practical requirement, not an optional extra: any installed app
   can open the port and present a forged `Origin`.
 - **"Trusted" means admitted, not validated.** A `TrustedCommand` is so
@@ -161,7 +231,7 @@ because no legitimate `fetch` caller can ever fail those checks.
 | `allowed` | Exact origins (`https://host`) — matched against the full origin the browser sends, so a non-default port must be written in the entry itself (`https://host:8443`); bare hosts (`partner.io`) — matched against the host name alone, so a bare entry admits the host on **any** port; and `*.example.com` (subdomains only — list the root explicitly). Bare and wildcard entries admit `https` only (plus local `http` under `allowLocalHttp`); full-origin entries carry their scheme. |
 | `allowAllHardened` | Any valid HTTPS origin passes the hardening (origin, fetch-mode, per-origin quota). Loud warning on activation. |
 | `allowLocalHttp` | Dev exception: accept `http://localhost` / `http://127.0.0.1` (allow-all path and bare/wildcard entries). |
-| `onUnknownOrigin` | First-use consent callback (`allowAlways` / `allowOnce` / `reject` / `dismissed`). Non-blocking: the request returns `origin_pending` immediately (CORS-readable, with `Retry-After` exposed) and the page retries after the host answers; `allowOnce` grants exactly one retry within ~30s; `dismissed` closes the question with no decision — nothing is remembered and the origin is asked again on its next request. New questions carry a time budget (10 per 10 minutes) — beyond it the request still gets `origin_pending`, with no new question until stamps age out. Call `dispose()` when done to cancel pending window timers. |
+| `onUnknownOrigin` | First-use consent callback (`allowAlways` / `allowOnce` / `reject` / `dismissed`) — this callback is the whole of the **discovery** mode named elsewhere in the docs: an origin that no rule admits asks the host once through it. Non-blocking: the request returns `origin_pending` immediately (CORS-readable, with `Retry-After` exposed) and the page retries after the host answers; `allowOnce` grants exactly one retry within ~30s; `dismissed` closes the question with no decision — nothing is remembered and the origin is asked again on its next request. New questions carry a time budget (10 per 10 minutes) — beyond it the request still gets `origin_pending`, with no new question until stamps age out. Call `dispose()` when done to cancel pending window timers. |
 | `reportOnly` | Observe-and-log for the origin quota only; request-shape checks always reject. |
 | `perOriginPerMinute` | Per-origin rate budget on the allow-all path (default 30). |
 | `listedPerOriginPerMinute` | Optional per-origin budget on the listed path too — 0 (the default) keeps listed origins unquotaed; a positive value bounds a compromised listed origin's flood with the same `429 origin_rate_limited`. Watch mode (`reportOnly`) covers this quota like the allow-all one, and a failed token attempt carrying a listed origin also counts against its window. |
@@ -228,17 +298,21 @@ deferred to a later release; treat it as provisional.
 > double-execute the command. Reconcile on `X-Correlation-Id` before any
 > retry (the page-side reference shows the flow).
 
-JSON everywhere: `POST` with `Origin`; responses carry `X-Correlation-Id` (yours echoed back when it matches `[A-Za-z0-9._-]` and is at most 128 chars; anything else is replaced with a generated id) Stable error codes:
+JSON everywhere: `POST` with `Origin`; responses carry `X-Correlation-Id` (yours echoed back when it matches `[A-Za-z0-9._-]` and is at most 128 chars; anything else is replaced with a generated id).
 
 The `Access-Control-Allow-Headers` list is fixed — `Content-Type`,
 `X-Portal-Token`, `X-Correlation-Id` — so the page must not send any
 other header: the preflight answer will not allow it. Commands are sent
-to `/`; other paths are reserved.
+to `/`: in this release every path reaches the handler, and non-root
+POSTs just warn the host — so keep sending commands to `/`.
+
+Stable error codes:
 
 | HTTP | `error` code | Meaning |
 |---|---|---|
 | 200 | — | Handler succeeded (`{"ok":true}`). |
 | 400 | `duplicate_header` / `origin_too_long` | A single-valued header was sent twice / an `Origin` header over the package's internal length cap (1,024 characters), refused before any processing. |
+| 400 | `origin_malformed` / `token_too_long` / `bad_request` | An `Origin` header that is not `scheme://host[:port]` / an `X-Portal-Token` header over the internal byte cap (1,024 bytes) / the HTTP parser rejected the request framing — all refused before your handler runs. |
 | 400 | `invalid_utf8` / `empty_payload` / `unsupported_payload_shape` | Body not UTF-8 / no valid command payload / JSON object without any of the known command keys. A body that fails JSON decoding altogether is **not** a 400 — it falls through as a raw text command (the tested non-JSON contract); a JSON number, boolean, or `null` body takes the same raw path. Inside a JSON array, non-string and empty-string elements drop without notice. |
 | 405 | `method_not_allowed` | Only `POST` (and `OPTIONS` preflight) are accepted. |
 | 403 | `origin_not_listed` / `origin_declined` / `origin_unknown` / `origin_blocked` / `origin_pending` | Origin policy rejection (not listed / consent declined / not confirmable / allow-all hardening / consent window open — retry after `Retry-After`). |
@@ -264,7 +338,13 @@ The wire contract above is the real contract; the snippet below is a
 reference pattern for a browser page, not a required client.
 
 ```javascript
-const ENDPOINT = 'http://127.0.0.1:9100/'; // the port start() returned
+// BRIDGE_PORT travels from the host that opened this page - here read
+// from the query string the opener used (?bridge-port=9100). The host
+// prints the port start() returned at boot. Page code never assumes the
+// preferred port: a same-session program may hold it, and start() then
+// serves elsewhere.
+const BRIDGE_PORT = new URLSearchParams(location.search).get('bridge-port');
+const ENDPOINT = `http://127.0.0.1:${BRIDGE_PORT}/`;
 
 // Explain the Local Network Access permission to the user before the
 // browser raises its own prompt. The query can hang in some embedded
@@ -400,22 +480,24 @@ and Edge 157 a Background Fetch request is subject to the same CORS
 enforcement and Local Network Access checks as a regular `fetch`, so it
 cannot reach the bridge where a `fetch` cannot
 ([Chrome 157 release notes](https://chromestatus.com/release-notes/157),
-verified 2026-11-09).
+verified 2026-11-15).
 
 ## Browser support (reviewed 2026-11)
 
 Status vocabulary: **shipped** — in the vendor's shipped, documented
 release; **planned** — dated by the vendor, not shipped yet;
 **untested here** — verified against documents, not against a device;
-**not supported** — the vendor's documented behavior blocks it.
+**not supported** — the vendor's documented behavior blocks it. Edge is
+built on the Chromium engine, so the Chromium sources in this table govern
+the behavior they share.
 
 | Browser | Status | As of | Source |
 |---|---|---|---|
-| Chrome, Edge (desktop and Android) | shipped — the browser asks the user for Local Network Access permission | 2026-11-13 | [Chrome: Local Network Access](https://developer.chrome.com/blog/local-network-access) · [Chrome 142 release notes](https://chromestatus.com/release-notes/142) |
-| Firefox (desktop 153+) | shipped — permission prompt as above, enabled by default | 2026-11-09 | [Firefox 153.0 release notes](https://www.mozilla.org/en-US/firefox/153.0/releasenotes/) |
-| Firefox (Android 160+) | shipped — the vendor's shipped-versions feed lists 160.0 at re-verification | 2026-11-10 | [Mozilla product details: Firefox for Android versions](https://product-details.mozilla.org/1.0/mobile_versions.json) · [Mozilla release calendar](https://wiki.mozilla.org/Release_Management/Calendar) |
-| Safari, and iOS browsers built on WebKit | not supported — WebKit blocks `http://127.0.0.1` from an `https` page as mixed content, with no Local Network Access prompt to exempt it. Apple permits other engines in the EU (iOS 17.4+); none is tested here | 2026-11-09 | [WebKit bug 171934](https://bugs.webkit.org/show_bug.cgi?id=171934) · [Apple: alternative browser engines](https://developer.apple.com/support/alternative-browser-engines) |
-| Android WebView | untested here — no permission prompt of its own; reachability follows the permissions of the app embedding the WebView. On Android 17, WebView traffic inherits the host app's local-network permission state, and the `ACCESS_LOCAL_NETWORK` permission applies only to apps targeting SDK 37; the official local-network definition does not mention loopback | 2026-11-09 | [Android: local network permission](https://developer.android.com/privacy-and-security/local-network-permission) · [Android: local network definition](https://developer.android.com/privacy-and-security/local-network-definition) |
+| Chrome, Edge (desktop and Android) | shipped — the browser asks the user for Local Network Access permission | 2026-11-15 | [Chrome: Local Network Access](https://developer.chrome.com/blog/local-network-access) · [Chrome 142 release notes](https://chromestatus.com/release-notes/142) |
+| Firefox (desktop 153+) | shipped — permission prompt as above, enabled by default | 2026-11-15 | [Firefox 153.0 release notes](https://www.mozilla.org/en-US/firefox/153.0/releasenotes/) |
+| Firefox (Android 160+) | shipped — the vendor's shipped-versions feed lists 160.0 at re-verification | 2026-11-15 | [Mozilla product details: Firefox for Android versions](https://product-details.mozilla.org/1.0/mobile_versions.json) · [Mozilla release calendar](https://wiki.mozilla.org/Release_Management/Calendar) |
+| Safari, and iOS browsers built on WebKit | not supported — WebKit blocks `http://127.0.0.1` from an `https` page as mixed content, with no Local Network Access prompt to exempt it. Apple permits other engines in the EU (iOS 17.4+); none is tested here | 2026-11-15 | [WebKit bug 171934](https://bugs.webkit.org/show_bug.cgi?id=171934) · [Apple: alternative browser engines](https://developer.apple.com/support/alternative-browser-engines) |
+| Android WebView | untested here — no permission prompt of its own; reachability follows the permissions of the app embedding the WebView. On Android 17, WebView traffic inherits the host app's local-network permission state, and the `ACCESS_LOCAL_NETWORK` permission applies only to apps targeting SDK 37; the official local-network definition does not mention loopback | 2026-11-15 | [Android: local network permission](https://developer.android.com/privacy-and-security/local-network-permission) · [Android: local network definition](https://developer.android.com/privacy-and-security/local-network-definition) |
 
 "Shipped" means the page can send and read a reply after the user grants
 the prompt. The fetch-mode hardening does not depend on any prompt — it
@@ -425,9 +507,9 @@ applies wherever the request arrives.
 
 | Host platform | Status | As of | Source |
 |---|---|---|---|
-| Desktop (Windows, macOS, Linux) | shipped — the usual loopback server model; Windows and Linux put no platform gate on it, while a macOS host inside App Sandbox needs the `com.apple.security.network.server` entitlement | 2026-11-09 | [Apple: App Sandbox entitlements](https://developer.apple.com/documentation/bundleresources/entitlements/com.apple.security.network.server) |
-| Android | shipped — an in-app loopback server; run the host app foregrounded or behind a foreground service, or the system may stop it. Chrome and Firefox reach it after the user grants Local Network Access. On Android 17, loopback traffic between two profiles (work and personal) is blocked by default for every app regardless of targetSdk; loopback within one profile is unaffected. On Android, any installed app can reach the port and send any `Origin`, so the token is the real barrier there. Native clients on the device send the token. In this release a browser page cannot present the token: it is admitted through a listed origin or user consent, and another installed app can present the same origin. | 2026-11-09 | [Android: local network permission](https://developer.android.com/privacy-and-security/local-network-permission) · [Android 17 behavior changes](https://developer.android.com/about/versions/17/behavior-changes-all) |
-| iOS | untested here — no browser path: WebKit blocks `http://127.0.0.1` from `https` pages (mixed content), and iOS suspends in-app sockets when the host app backgrounds | 2026-11-09 | [WebKit bug 171934](https://bugs.webkit.org/show_bug.cgi?id=171934) |
+| Desktop (Windows, macOS, Linux) | shipped — the usual loopback server model; Windows and Linux put no platform gate on it, while a macOS host inside App Sandbox needs the `com.apple.security.network.server` entitlement | 2026-11-15 | [Apple: App Sandbox entitlements](https://developer.apple.com/documentation/bundleresources/entitlements/com.apple.security.network.server) |
+| Android | shipped — an in-app loopback server; run the host app foregrounded or behind a foreground service, or the system may stop it. Chrome and Firefox reach it after the user grants Local Network Access. On Android 17, loopback traffic between two profiles (work and personal) is blocked by default for every app regardless of targetSdk; loopback within one profile is unaffected. On Android, any installed app can reach the port and send any `Origin`, so the token is the real barrier there. Native clients on the device send the token. In this release a browser page presents the token only where its preflight is echoed: a listed origin, or any valid https origin not yet refused under the discovery and allow-all modes — and an installed app can present that same listed origin. | 2026-11-15 | [Android: local network permission](https://developer.android.com/privacy-and-security/local-network-permission) · [Android 17 behavior changes](https://developer.android.com/about/versions/17/behavior-changes-all) |
+| iOS | untested here — no browser path: WebKit blocks `http://127.0.0.1` from `https` pages (mixed content), and iOS suspends in-app sockets when the host app backgrounds | 2026-11-15 | [WebKit bug 171934](https://bugs.webkit.org/show_bug.cgi?id=171934) |
 
 ### When this package fits
 
@@ -443,9 +525,9 @@ For that case, SECURITY.md collects the host-side disciplines in one
 place: "Recommended setup for irreversible commands", with the two
 sender paths spelled out — non-browser senders keep the origin policy
 empty and hold the token, and a browser page is admitted through an
-explicit origin list instead, since in this release it cannot use the
-token path; each path names its residual (a local program can present
-a listed origin).
+explicit origin list instead (and in the discovery and allow-all modes
+its preflight is echoed, so it can use the token path there too); each
+path names its residual (a local program can present a listed origin).
 A command that is safe to
 repeat and carries no consequence is fine on a plain local HTTP server — the
 bridge's walls exist for the commands that must not run twice or from
@@ -502,7 +584,14 @@ open the two URLs it prints (expect all checks green via `localhost`, and
 blocked by design via `127.0.0.1`). It serves its check page from loopback
 and admits `localhost` only, so it proves the loopback CORS round trip —
 admission of a public HTTPS origin is proven by opening your deployed
-page. API docs ship with the package. An Arabic guide lives in
+page. `example/origin_pending_page.dart` walks the consent question as a
+full state machine — pending, one respectful `Retry-After` retry, grant
+or refuse — over the wire at boot, and serves the same machine as a page
+to copy into your https portal. Two examples from outside printing show
+host-side validation in other domains: `example/shipping_label.dart`
+(label commands with a closed spec) and `example/payment_receipt.dart`
+(token-only policy with a single-use, host-issued authorize ref). API
+docs ship with the package. An Arabic guide lives in
 `README.ar.md`.
 
 License: BSD 3-Clause.

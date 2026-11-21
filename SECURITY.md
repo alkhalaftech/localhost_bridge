@@ -62,13 +62,15 @@ the Host-authority check, the origin policy, and the token layer.
   `generatePortalToken` is the recommended source of a token),
   constant-time padded comparison, and a per-origin lockout (5 misses /
   60 s → `429 token_locked`) whose `Retry-After` states the real
-  remaining window. The lockout stops pages: a local sender can rotate
-  `Origin` values to walk past it — the barrier ahead of that path is
-  the token's randomness itself. Nor does the lockout stop a page on the
-  allow-all or discovery paths: a site can rotate subdomains, and each
-  rotated origin opens its own window. The residual that remains: a
-  local sender can keep originless token clients locked out with five
-  wrong tokens per minute in the shared originless window.
+  remaining window. The lockout pins its window to one origin: a local
+  sender can rotate `Origin` values to walk past it — the barrier ahead
+  of that path is the token's randomness itself. Nor does the lockout
+  stop a page on the allow-all or discovery paths (discovery is the
+  consent-callback mode — the `OriginPolicy` reference in README.md
+  names the callback behind the term): a site can rotate subdomains,
+  and each rotated origin opens its own window. The residual that
+  remains: a local sender can keep originless token clients locked out
+  with five wrong tokens per minute in the shared originless window.
 - **Resource exhaustion** — body byte cap with early `Content-Length`
   refusal, JSON structural-element cap before decoding, concurrency seat
   cap with `503`, per-request and idle timeouts, per-origin rate quota,
@@ -76,10 +78,13 @@ the Host-authority check, the origin policy, and the token layer.
   1,024 characters is refused before any map, log line, consent question,
   handler, or telemetry context reads it), and bounded bookkeeping under
   web-page flood: the per-origin failure and quota maps sweep their idle
-  entries once their window expires even below the map cap, so a
-  same-session local program forging many distinct `Origin` values no
-  longer pins expired entries until the cap is crossed (what remains is
-  inside the trust boundary those maps defend against anyway).
+  entries once their window expires, and each map is held to an internal
+  10,000-entry cap, so a same-session local program forging many distinct
+  `Origin` values no longer pins expired entries past the cap. A flood
+  with rotating origins can evict a live window from the map, and origin
+  rotation bypasses the quota and the lockout anyway; that residual is
+  stated here (the request being processed never loses its own window, so
+  the token lockout still forms under the flood).
 - **Header smuggling ambiguity** — duplicate `Origin`, `X-Portal-Token`,
   or `X-Correlation-Id` headers are refused (`400 duplicate_header`).
 - **Information disclosure** — rejected origins get no CORS echo at all;
@@ -117,8 +122,12 @@ These are stated plainly so no host builds on a false assumption:
   the system may stop it. And on Android 17, loopback traffic between two
   profiles (work and personal) is blocked by default for every app
   regardless of targetSdk; loopback within one profile is unaffected.
-  On Android, any installed app can reach the port and send any `Origin`, so the token is the real barrier there. Native clients on the device send the token. In this release a browser page cannot present the token: it is admitted through a listed origin or user consent, and another installed app can present the same origin. On
-  iOS there is no path from a browser at all: Safari, and iOS browsers
+  Native clients on the device send the token. In this release a browser
+  page presents the token only where its preflight is echoed: a listed
+  origin, or any valid https origin not yet refused under the discovery
+  and allow-all modes — and an installed app can present that same
+  listed origin.
+  On iOS there is no path from a browser at all: Safari, and iOS browsers
   built on WebKit, block `http://127.0.0.1` from an `https` page as mixed
   content — Apple permits other engines in the EU (iOS 17.4+); none is
   tested here — and in-app sockets suspend when the host app goes to the
@@ -151,16 +160,63 @@ These are stated plainly so no host builds on a false assumption:
   seat, but the handler may still complete in the background — a retried
   command can double-execute. Callers must deduplicate on
   `X-Correlation-Id` before retrying, not treat 504 as "not executed".
-- **A stuck handler with no `handlerTimeout`.** The default (null) sets no
-  deadline: a stuck handler holds its seat indefinitely, sixteen stuck
-  handlers stop the service, and `stop()` waits for them — set
-  `handlerTimeout`; the full remedy (a bounded `stop()` and a default
+- **A stuck handler with no `handlerTimeout`.** No deadline covers the
+  handler phase: a stuck handler holds its seat until it completes, and
+  its caller waits on a reply that may never come — sixteen stuck
+  handlers exhaust the service. Set `handlerTimeout` for the
+  disciplined path: the seat frees at the handler's budget with
+  `504 handler_timeout`, and the orphaned handler is counted in the
+  live-work budget; the full remedy (a bounded `stop()` and a default
   budget) is planned for a later release.
 - **Host-side process-identity decisions.** The bridge never identifies
   peers; a host that decides to kill or trust a local process by image
-  name (e.g. a `tasklist` prefix match) is forgable by any process that
+  name (e.g. a `tasklist` prefix match) is forgeable by any process that
   picks the same name. Identity needs a full path plus a digital
   signature check — a host responsibility, not a bridge one.
+
+### Availability
+
+What the bridge guards now:
+
+- **Seats are one bounded budget.** `maxConcurrentRequests` (default 16)
+  bounds requests in flight; seats and orphaned handlers count as one
+  live-work budget and above it new commands get `503 server_busy`.
+  The total request deadline (`requestTimeout`, 30 s default) bounds
+  the pre-handler phase — the gates, the policy checks, and the body
+  read — so no pre-handler seat outlives it; a handler without a
+  budget holds its seat until it completes.
+- **Early rejections cannot pin seats.** Every pre-body rejection (405,
+  the origin and token policy rejects, 415, the parser's 400) replies
+  and cuts the connection, draining the unread body under bounded
+  patience in a background that holds no seat — a flood of malformed
+  requests cannot keep seats occupied.
+- **Per-origin bookkeeping is capped.** The per-origin token-miss and
+  quota maps are each held to an internal 10,000-entry cap — oldest
+  evicted, the request being processed never evicted — so origin
+  rotation cannot grow the bridge's bookkeeping without bound; the
+  worst case is the cap, not the flood.
+
+What remains:
+
+- **A listed origin or an allow-all page can keep the seats cycling.**
+  Listed origins carry no quota by default (`listedPerOriginPerMinute`
+  stays 0), and an allow-all page is quotaed per origin but can rotate
+  subdomains into fresh windows; each in-flight request holds its seat
+  for as long as it stays in flight, so a sustained flood from such an
+  origin keeps answering every legitimate command `503` while its
+  requests sit. Set `listedPerOriginPerMinute` to bound a compromised
+  listed origin, and set `handlerTimeout` so a slow handler frees its
+  seat early with a reconcilable `504 handler_timeout` - without one a
+  slow handler holds its seat until it completes.
+- **Peak memory under origin rotation is bounded by the caps** — the
+  two 10,000-entry maps plus `dart:io`'s own per-connection buffers,
+  which the package does not bound.
+- **`dart:io` sets no limit on a single header's length or on the
+  number of open connections.** The package caps only the headers it
+  reads (`Origin` over 1,024 characters, `X-Portal-Token` over 1,024
+  bytes); the seats bound requests in flight, not sockets — idle
+  connections close after `idleTimeout` (60 s default), but the count
+  of active open connections stays unbounded.
 
 ## Recommended setup for irreversible commands
 
@@ -172,21 +228,25 @@ its own side:
 1. **Keep the origin policy empty and make the token the only path.**
    The empty policy (the default) rejects every origin; with the token
    layer on, the holders of the secret are the only senders, and a web
-   page - whatever it forges - cannot enter at all.
-   **The browser-page alternative replaces step 1, not the rest:** in
-   this release a browser page cannot use the token path - the CORS
-   preflight that would let a page send `X-Portal-Token` is answered
-   only for origins the origin policy admits - so a page that must send
-   irreversible commands admits itself with an explicit origin list
-   instead: `allowed` names the exact page origins and nothing else,
-   and every other origin is refused before the handler runs. Steps 2
-   to 5 below apply to this path unchanged. The residual of the page
-   path: another local program can present a listed origin (the header
-   is forgeable outside a browser), which is why the empty-policy token
-   path above stays the default for senders that do not need a browser.
-2. **Set `handlerTimeout`.** Without it a stuck handler holds its seat
-   indefinitely; a bounded budget keeps the service responsive while
-   the irreversible command is being confirmed.
+   page - whatever it forges - cannot enter at all while no consent
+   callback is configured.
+   **The browser-page alternative replaces step 1, not the rest:** a
+   page that must send irreversible commands admits itself with an
+   explicit origin list instead: `allowed` names the exact page origins
+   and nothing else, and every other origin is refused before the
+   handler runs. (In the discovery and allow-all modes the preflight is
+   echoed for any valid https origin not yet refused, so a page on such
+   an origin can send the token too — the empty-policy token setup
+   above keeps no such echo.) Steps 2 to 5 below apply to this path
+   unchanged. The residual of the page path: another local program can
+   present a listed origin (the header is forgeable outside a browser),
+   which is why the empty-policy token path above stays the default for
+   senders that do not need a browser.
+2. **Set `handlerTimeout`.** Without a budget a stuck handler holds its
+   seat indefinitely — no deadline covers the handler phase, and the
+   caller waits on a reply that may never come. A handler budget frees
+   the seat early with a reconcilable `504 handler_timeout` while the
+   irreversible command is being confirmed.
 3. **Give the handler a closed list of commands and refuse everything
    else.** The bridge hands opaque payloads to your handler; the allow
    list of what may run is host code, not bridge configuration.
@@ -204,21 +264,46 @@ its own side:
 
 ## Attack → control → witness
 
-Every control is pinned by a test that names the attack. Representative
-witnesses (all in `test/`):
+Every control is pinned by a test that names the attack. The index below
+maps every known attack this package defends against to the test or
+tests that guard it (all in `test/`); broader randomized corpora remain
+on the roadmap. The names are the tests' real names.
 
-| Attack | Control | Witness test |
+| Attack | Control | Witness test(s) |
 |---|---|---|
-| Rebound DNS name reaching the port | Host authority allowlist, absolute-form refusal | `replays 14 corpus cases over the wire…` (cases `12_host_evil`, `13_absolute_form`) |
-| Hidden HTML form / `no-cors` fetch / navigation send | `Sec-Fetch` request-shape checks | `navigate and no-cors fetch modes rejected: 403 cross_site_blocked` |
-| Form-encoded body smuggling | Content-Type gate (415) | `hidden-form content types are refused while the textual gateway passes` |
-| Token guessing from a page | Constant-time compare + per-origin lockout with honest `Retry-After` | `Retry-After says the real lockout window, not a generic constant` |
-| Guessable configured token | 32-byte length floor at `update()`, inert saved short token at boot | `short token refusal: configuration error, inert at boot` |
-| Consent-question flooding | Ask caps + time budget with honest `Retry-After` | `question-budget Retry-After tells the honest multi-minute wait` |
-| Duplicate-header smuggling | 400 `duplicate_header` | `400 duplicate header with ACAO for listed origins — stranger gets none` |
-| Body flood / memory growth | Byte cap + early refusal + bounded buffers | `300 consecutive 413 rejections: RSS stays stable` |
-| Deep-JSON inflation | Structural element cap before decode | `a 1MiB body of empty JSON elements is rejected with 413 …` |
-| Reading replies cross-origin | CORS echo for the admitted only | `CORS echo of 503 and 400 for listed origins — rejects stay echoless` |
+| Origin rotation flooding the per-origin bookkeeping | Per-origin maps held to an internal 10,000-entry cap, oldest evicted, the request being processed never evicted | `the token-miss map is hard-capped: the oldest-inserted window is evicted by the flood` · `the origin quota map is hard-capped: the oldest-inserted window is evicted by the flood` · `during an eviction flood a fixed origin still locks: five misses then the sixth answers 429` (`window_map_cap_test`) |
+| Origin rotation walking past a per-origin quota (documented residual) | Per-origin quota with honest `429`, rotation stated as residual | `per-origin quota exceeded: 429, another origin passes same moment` (`hardened_open_test`) · `unlisted origin with correct token: the guessing origin stays locked, another passes` (`priority_contract_test`) |
+| Hidden HTML form / `no-cors` fetch / navigation send | `Sec-Fetch` request-shape checks on every browser path, listed included | `navigate and no-cors fetch modes rejected: 403 cross_site_blocked` (`hardened_open_test`) · `a navigate send from a listed origin answers 403 cross_site_blocked and never reaches the handler` · `a no-cors send from a listed origin answers 403 cross_site_blocked` · `a document fetch destination from a listed origin answers 403 cross_site_blocked even with mode cors` · `a real hidden-form send (text/plain wire shape) from a listed origin is blocked before the handler` (`listed_fetch_metadata_test`) |
+| Form-encoded body smuggling | Content-Type gate (415) | `hidden-form content types are refused while the textual gateway passes` (`wire_contract_test`) |
+| Malformed `Origin` shapes (userinfo, path, query, control characters) | Shape gate answers `400 origin_malformed` before any map, log, consent question, or echo | `a userinfo origin answers 400 origin_malformed with the handler, the consent callback, the rejection counter, and its log untouched` · `path, query, space, and control-character origins each answer 400 origin_malformed and no consent question fires` · `the consent callback receives the normalized origin: lowercase scheme and host, port kept` (`origin_malformed_test`) |
+| Oversized `Origin` header | 1,024-character cap, `400 origin_too_long` first | `an Origin one char over the cap answers 400 origin_too_long with the handler and the consent callback never invoked` · `the length gate precedes the shape gate: an Origin both oversized and malformed answers origin_too_long` · `the length gate precedes the single-header gate: a duplicated oversized Origin answers origin_too_long, not duplicate_header` (`origin_cap_test`) · `a 64 KiB slash-padded Origin is answered inside the usual test response timeout, then the next normal request is served` (`wire_contract_test`) |
+| Oversized token header | 1,024-byte cap, `400 token_too_long`, no miss window left behind | `a 1,025-byte token answers 400 token_too_long with the handler, the rejection counter, its log, and CORS untouched` · `five oversized tokens leave no miss window behind: the correct token right after them is served, not locked` · `the Origin gates settle first: an oversized token with a malformed Origin answers origin_malformed` (`token_length_cap_test`) |
+| Timing side channel on the token comparison | Constant-time padded comparison over `max(256, secret length)` | `comparison semantics hold for generated lengths: correct passes, and wrong at the first byte, the last byte, past the secret, and below the secret all fail` (`token_length_cap_test`) · `lengths 32/255/256/257: correct accepted, wrong rejected at each` (`priority_contract_test`) |
+| Token brute force and lockout edges | 5 misses / 60 s → `429 token_locked` with the honest remaining window | `Retry-After says the real lockout window, not a generic constant` (`wire_contract_test`) · `window edges on the injected clock: the sixth miss locks, 60001ms unlocks` · `no-origin and web-origin misses keep two independent windows` (`priority_contract_test`) |
+| Guessable or short configured token | 32-byte floor at `update()`, saved short token inert at boot, empty token disables the layer | the `short token refusal: configuration error, inert at boot` group with `update() throws for a token below 32 bytes instead of warning` · `the short-token error names the length, never the token itself` (`intake_protection_test`) · `empty configured token: the header layer is fully disabled` (`priority_contract_test`) |
+| JSON amplification (small body, huge parse) | Structural-element and depth count before decode, `413 payload_too_complex` | `a 1MiB body of empty JSON elements is rejected with 413 payload_too_complex before parsing` · `braces and commas inside JSON strings are not counted as elements` (`intake_limits_test`) · `json amplification: 16 concurrent 1MiB bodies of empty objects stay under a declared ceiling` (`resources_test`) · `a real nested 1MB body over the live wire leaves the server alive` (`wire_contract_test`) · `deep nesting under the element cap is refused before decode` (`intake_health_test`) |
+| Body flood / memory growth | Byte cap with early refusal, bounded buffers | `300 consecutive 413 rejections: RSS stays stable` (`hardened_open_test`) · `body resources: 15 chunked rejections over the cap plus 15 accepts at the cap — RSS never escapes` (`resources_test`) |
+| Seat starvation by early rejections | Every pre-body rejection replies and cuts, draining in a background that holds no seat | `sixteen early-rejected connections with an unfinished body cannot starve the next legitimate request` · `every attacker connection is closed after the request timeout with margin, and the next request is served` (`early_reject_cut_test`) · `above the concurrent request cap: 503 comes immediately without waiting` (`intake_limits_test`) |
+| Stuck handler pinning seats | `handlerTimeout` frees the seat with a reconcilable 504; without it the handler holds its seat - the documented hold | `a null handler budget lets a handler run past the request timeout and answer 200 - the total deadline never reaches the handler phase` · `a handler budget longer than the request timeout answers 504 at its own deadline and counts the handler as an orphan` · `sixteen handlers without a handler budget hold their seats past the request timeout - the seventeenth request is refused 503 server_busy` (`handler_deadline_contract_test`) · `handler exceeds handlerTimeout: 504 handler_timeout, seat freed, late ignored` · `orphan handlers count against the live-work budget: the 17th request is refused before any new handler` (`intake_health_test`) |
+| Replay after `504 handler_timeout` | Reconcile on `X-Correlation-Id`; the reference ledger registers before the work runs | `the same command twice: the second send after an artificial 504 replays the stored reply and the work ran once` · `a duplicate racing the first execution is refused while it runs, then replayed once the first settles` · `a flood of fresh ids cannot evict a running command: the repeat sees duplicate_in_flight and the work stays one execution` (`idempotent_handler_test`) |
+| Log-line injection via control characters or oversized origins | Sanitize and truncate to 200 characters before any log or measurement context | `logged Origin is stripped of control characters and capped` (`intake_protection_test`) · `strips control characters (BEL, ESC) before it truncates` · `caps a 1,024-character value at exactly 200 characters` · `an Origin carrying BEL and ESC control characters is refused 400 origin_malformed before any measurement context captures it` (`origin_telemetry_sanitized_test`) · `no rejection line and no telemetry context carries an Origin longer than the cap` (`origin_cap_test`) |
+| Raw disclosure through telemetry contexts | Sanitized origin only; correlation id replaced, only its length logged | `a long well-formed Origin reaches the measurement context truncated to exactly 200 characters` · `an ordinary short Origin reaches the measurement context exactly as sent` (`origin_telemetry_sanitized_test`) · `correlation id: valid is honored — invalid replaced, only its length logged` (`priority_contract_test`) · `the seam carries level, category, error, stack, and context without loss` (`telemetry_seam_test`) |
+| Parser destruction (`Content-Length` + `Transfer-Encoding`, lying chunk sizes) | Parser errors answer `400 bad_request` and cut the connection | `a request carrying Content-Length together with Transfer-Encoding answers 400 bad_request with the handler, the security counter, and the crash log untouched` · `an invalid chunk-size line mid-body is answered 400 bad_request the same way` · `the next request on a fresh connection is served after a parser-error reject` (`parser_error_test`) |
+| Disconnect-on-rejection semantics (readable vs unreadable) | Policy rejects cut after the reply; consent and quota rejections stay CORS-readable by design | `protocol rejections cut the connection after the reply` · `an origin_pending reply is readable while the body still arrives, then the connection cuts` · `a rate-limited listed origin reply is readable with an unread body, then the connection cuts` (`early_reject_cut_test`) · `origin_rate_limited 429 echoes CORS: the page reads the code and Retry-After` · `token_locked 429 echoes CORS: the page reads the code and Retry-After` (`hardened_open_test`) |
+| Port exhaustion and bind races | Explicit `IntakeBindException`, fallback ports | `all ports busy: IntakeBindException — a plain Exception, never an Error` (`intake_health_test`) · `falls back when preferred port is busy` (`intake_payload_test`) |
+| DNS rebinding / forged `Host` | Host-authority allowlist, absolute-form refusal, explicit opt-out warnings | `replays 14 corpus cases over the wire across 3 protection modes and writes the comparison output` (cases `12_host_evil`, `13_absolute_form`) (`wire_contract_test`) · `a loopback-resolving public name warns; literal loopback stays silent` · `a public extraHost name warns about the rebinding opt-out` · `every non-loopback extraHosts entry warns - dotless names and non-loopback IPv6 included` (`intake_health_test`) |
+| Duplicate-header smuggling | `400 duplicate_header` | `duplicate X-Correlation-Id: 400 duplicate_header, connection closed, zone clean` · `repeated Origin or X-Portal-Token, even identical values: 400 duplicate_header` (`intake_health_test`) · `400 duplicate header with ACAO for listed origins — stranger gets none` (`priority_contract_test`) |
+| Consent-question flooding | 3 open windows, a 10-per-10-minutes ask budget, honest `Retry-After` | `question-budget Retry-After tells the honest multi-minute wait` (`wire_contract_test`) · `a throwing consent callback consumes the question budget` · `a late answer for an open question survives a thousand abandoned windows` (`intake_protection_test`) |
+| Slowloris / body drip | Absolute body deadline, `408`, trickling senders never hold a gate | `a request stalling mid-body is answered with 408 within the timeout` · `a chunked body completing after the deadline is rejected 408, handler untouched` · `a drip under the silence window is cut by the absolute deadline before 1.25x of it` (`intake_limits_test`) · `413 drain cut on time: a trickling sender never holds the gate` (`wire_contract_test`) |
+| 413 drain abuse | Bounded drain budget, cut past it | `413 drain is bounded: past four bodies the connection is cut` · `413 drain cut on the byte-counter path: a chunked body with no Content-Length past the cap` · `both 413 responses name the 1 MiB limit, never 0MB` (`wire_contract_test`) |
+| Handler crash information leak | Fixed `500` body; host error text only for trusted senders | `a handler crash still answers 500 internal - the internal-error path is unchanged` (`parser_error_test`) · `safety net: escaped exception returns 500 internal, server stays alive` (`intake_health_test`) · `host failure detail hidden from unapproved origin, shown to trusted one` (`hardened_open_test`) · `a locked origin with the correct token gets the error code without the host message` (`priority_contract_test`) |
+| Reading replies cross-origin | CORS echo for the admitted only | `no ACAO for unlisted origin; listed and allow-all echo theirs` · `token-only host: a preflight from any origin carries no ACAO` (`hardened_open_test`) · `CORS echo of 503 and 400 for listed origins — rejects stay echoless` · `declined discovery origins (origin_declined) see no ACAO` (`priority_contract_test`) |
+| Warning-line flooding (log spam) | Every warning throttled to one line per second with the muted count | `a thousand busy rejects within one injected second write exactly one warning line, and the next second writes a line carrying the muted count` · `a thousand orphan-busy rejects within one injected second write exactly one warning line, and the next second writes a line carrying the muted count` · `a thousand handler timeouts within one injected second write exactly one warning line, and the next second writes a line carrying the muted count` · `a thousand total-deadline cuts within one injected second write exactly one warning line, and the next second writes a line carrying the muted count` (`throttled_warnings_test`) · `correlation-id warning throttle on the injected clock: per-second cap, suppressed count reported` (`priority_contract_test`) |
+| Non-root path abuse | Wire unchanged, throttled warning only | `a POST on /x is still served 200 with the handler invoked - the wire behavior does not change` · `a thousand POSTs to /x within one injected second write exactly one warning line, and the next second writes a line carrying the muted count` · `an OPTIONS preflight on /x answers 204 and writes no path warning - only the command method warns` · `a bloated request path is capped inside the warning line` (`reserved_path_warning_test`) |
+| Policy-change TOCTOU | Policy generation seals updates; late answers under a stale policy are void | `updateFromSaved: removed open mode denies with a warning` · `a policy change revokes grants but keeps the denials` (`intake_protection_test`) · `policy generation seals the updateFromSaved TOCTOU bypass` · `late answer under a stale policy is void after update` (`priority_contract_test`) |
+| Bookkeeping growth inside `ArrivalGuard` | Per-minute queue caps plus one | `a hundred thousand decide calls in one window keep every verdict identical and hold the fingerprint queue at the per-minute limit plus one` · `an arrival judged flood still extends the flood state after the cap, and the state still expires exactly with its window` (`arrival_queue_cap_test`) · `map cap 500: idle fingerprints are evicted` · `window 60_000: stamps outside it are pruned` (`arrival_guard_test`) |
+| Double start / use after dispose | `StateError` on double start; dispose final on every path | `second start rejects with StateError, first server stays alive` (`intake_health_test`) · `dispose is final on every path: listed and token flows stop too` · `full idleness after dispose: no prompt, no timer, no answer effect` (`priority_contract_test`) |
+| Silent sends from browsers without Fetch Metadata | `requireFetchMetadata` on by default | `missing Sec-Fetch headers: rejected by default, pass with requireFetchMetadata off` (`hardened_open_test`) · `with requireFetchMetadata off the listed path still blocks a wrong value and still serves absence` (`listed_fetch_metadata_test`) · `fetch metadata: navigate, no-cors, and absent headers rejected — cors alone passes` (`intake_protection_test`) |
 
 ## Binding and deployment notes
 

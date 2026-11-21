@@ -4,6 +4,10 @@
 /// cap or timeout throws ArgumentError instead of silently rejecting
 /// everything.
 class BridgeConfig {
+  /// Builds the configuration - every parameter is optional and defaults to
+  /// the values documented above. A LocalIntakeServer re-checks the
+  /// positive limits at its own construction and throws [ArgumentError]
+  /// for a non-positive cap or timeout.
   const BridgeConfig({
     this.maxBodyBytes = 1024 * 1024,
     this.maxConcurrentRequests = 16,

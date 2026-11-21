@@ -7,15 +7,20 @@ import 'bridge_telemetry.dart';
 
 /// The host's answer to an unknown-origin question. [allowAlways] and
 /// [reject] are remembered for the session, [allowOnce] grants a single
-/// retry window, and [dismissed] closes the question without a decision:
-/// nothing is remembered and the origin is asked again on its next request
-/// (use it when the question was displaced, its window expired, or the
-/// session ended before the user answered).
+/// retry inside a 30-second window, and [dismissed] closes the question
+/// without a decision: nothing is remembered and the origin is asked
+/// again on its next request (use it when the question was displaced, its
+/// window expired, or the session ended before the user answered).
 enum OriginConsent { allowAlways, allowOnce, reject, dismissed }
 
 /// Origin policy - the single concept left after the open mode was merged in:
 /// the list rules; allow-all is its widest value with the hardening attached; discovery grows it. Closed by default (an empty list denies all).
 class OriginPolicy {
+  /// Builds the policy - every field is optional and defaults to the
+  /// closed shape: an empty `allowed` list with no allow-all and no
+  /// discovery callback, a per-origin quota of 30 requests/minute on the
+  /// allow-all path only, listed origins unquotaed, Fetch Metadata
+  /// required, and a 60-second consent-question timeout.
   const OriginPolicy({
     this.allowed = const [],
     this.allowAllHardened = false,
@@ -71,13 +76,18 @@ class OriginPolicy {
   /// are never affected either way.
   final bool requireFetchMetadata;
 
-  /// Timeout of the single discovery question - without it an unanswered
-  /// window would hold a seat forever (injectable for tests).
+  /// Timeout of a single discovery question - a window left unanswered is
+  /// closed after this long, freeing its place among the 3 open-question
+  /// slots (injectable for tests).
   final Duration askTimeout;
 }
 
 /// The intake rejection - the code is the developer contract, the message neutral English.
 class IntakeRejection {
+  /// Builds the rejection: [status] is the HTTP status on the wire, [code]
+  /// the developer-facing `error` field, [message] its `message` field,
+  /// and [retryAfterMs] the honest wait this rejection carries (null keeps
+  /// the caller's own default).
   const IntakeRejection(
     this.status,
     this.code,
@@ -87,7 +97,17 @@ class IntakeRejection {
 
   /// 403 for denial, 429 for the origin quota.
   final int status;
+
+  /// The stable developer contract for the rejection - one of the codes
+  /// this class produces (`origin_not_listed`, `origin_pending`,
+  /// `origin_declined`, `origin_unknown`, `origin_rate_limited`,
+  /// `token_locked`, `cross_site_blocked`, `origin_blocked`,
+  /// `protection_disposed`). The message text may change; the code does
+  /// not.
   final String code;
+
+  /// The package's constant neutral English sentence for the rejection -
+  /// safe to show a developer, carrying no host details.
   final String message;
 
   /// The honest wait for THIS rejection in milliseconds - the remainder of
@@ -113,6 +133,11 @@ class IntakeRejection {
 /// - The token layer: an X-Portal-Token header matching a shared secret - an
 /// integrated client proves itself with it and crosses without browser
 /// headers (server-side integrations, or when origins multiply).
+///
+/// The remembered state is bounded: discovery decisions kept for the
+/// session are capped at 1,000 (oldest evicted), one-time grants at 64,
+/// consent questions open at once at 3, and new questions at 10 per
+/// 10 minutes.
 class IntakeProtection {
   /// [nowMs] is an injectable test clock (lock, grant, and quota windows);
   /// the default is an internal monotonic clock owned by the object.
@@ -232,7 +257,26 @@ class IntakeProtection {
   static const _windowMs = 60_000;
   int _nextWindowSweepMs = 0;
 
+  /// Hard cap on each per-origin window map (the token-miss map and the
+  /// quota map alike): the idle sweeps alone cannot bound them - a local
+  /// sender rotating unique origins creates entries faster than their
+  /// windows expire, so the maps track the rotation rate and the memory
+  /// with it, past what a mobile host process survives. Crossing the cap
+  /// evicts the oldest-inserted entry through the same order queue each
+  /// sweep drives; the in-flight request's own key is never an eviction
+  /// candidate, so the stamp the request is about to record always lands
+  /// in a live window and the token lockout still forms under the flood.
+  static const _maxOriginWindows = 10000;
+
+  /// The policy currently in force - replaced live by [update] and
+  /// [updateFromSaved]. Read it to mirror settings UI state; admission
+  /// decisions keep reading this same live object per request.
   OriginPolicy get policy => _policy;
+
+  /// Every rejection counted so far - origin and token policy decisions
+  /// and host-authority rejects alike ([noteRejection] counts too).
+  /// The wire behavior never reads it; [onRejected] refreshes it live in
+  /// a UI.
   int get rejectedCount => _rejectedCount;
 
   void _countRejection() {
@@ -255,16 +299,16 @@ class IntakeProtection {
   /// sessions is the host's business).
   ///
   /// Throws [ArgumentError] for a configured token below the length floor
-  /// ([_minTokenBytes] UTF-8 bytes) BEFORE anything is applied, so a host
-  /// that catches the error keeps its previous protection state untouched.
+  /// of 32 UTF-8 bytes BEFORE anything is applied, so a host that catches
+  /// the error keeps its previous protection state untouched.
   /// The error names the offending length, never the token itself.
   /// The policy's numbers are validated the same way and at the same point:
   /// a negative quota and a non-positive ask timeout are configuration
   /// mistakes that must surface at setup, never as mystery rejects or
   /// instantly-closed questions on the wire.
   void update({OriginPolicy? policy, String? token}) {
-    // الحقل المفقود يبقى على حاله: تحديثُ حقلٍ واحدٍ كان يطفئ الطبقة
-    // الأخرى بصمت (من ضبط توكنا ثم حدّث القائمة فقد سرّه، والعكس)
+    // الحقل المفقود يبقى على حاله: تحديثُ حقلٍ واحدٍ لا يطفئ الطبقة
+    // الأخرى — ضبط التوكن وحده لا يمس القائمة، والعكس
     final effectivePolicy = policy ?? _policy;
     final effectiveToken = token ?? _token;
     _validatePolicyNumbers(effectivePolicy);
@@ -283,9 +327,10 @@ class IntakeProtection {
     }
     _apply(policy: effectivePolicy, token: effectiveToken);
     _warnDeadAllowlistEntries();
-    // حارس طول التوكن: المقارنة الزمنية-الثابتة تغطي التوكن كاملاً في
-    // _fixedTimeEquals (الحلقة تمتد لأطول الطرفين فوق الحشوة الدنيا) —
-    // هنا تحذير وتدقيق فقط بلا أي تغيير لنتيجة المطابقة (صفر سلك).
+    // حارس طول التوكن: المقارنة الزمنية-الثابتة تغطي السر المضبوط
+    // كاملاً في _fixedTimeEquals (الحلقة تمتد على الحشوة الدنيا وطول
+    // السر المضبوط وحده — زيادة توكن المرسل تُطوى في المُراكِم) — هنا
+    // تحذير وتدقيق فقط بلا أي تغيير لنتيجة المطابقة (صفر سلك).
     final configuredBytes = utf8.encode(_token).length;
     if (configuredBytes > _tokenComparePad) {
       // تحذير إعداد لا رفض طلب — لا يلوث عدّاد المرفوضات
@@ -488,9 +533,7 @@ class IntakeProtection {
     );
   }
 
-  /// Compiled once - it used to be rebuilt on every settings update (per
-  /// request on the normalize path). It is static now: the hot paths use it
-  /// directly.
+  /// A static compiled pattern: the hot paths use it directly.
   static final RegExp _bareOrigin = RegExp(r'^[a-z]+://[^/]+$');
 
   /// Strips every trailing '/' in one backward scan. The regex sweep this
@@ -507,6 +550,35 @@ class IntakeProtection {
     return end == s.length ? s : s.substring(0, end);
   }
 
+  /// The one Origin wire shape this intake accepts: `scheme://host[:port]`,
+  /// plus the trailing slashes [normalize] strips. Userinfo (`@`), a path,
+  /// a query, a fragment, and any space or control character fail the
+  /// check: browsers never send those forms, so only a hand-crafted value
+  /// carries them, and it must not become a map key, a consent question,
+  /// or a telemetry context. The check is not an acceptance decision - the
+  /// scheme policy and the list still decide after it. Used by this
+  /// package's server, not a stable host-facing interface.
+  static bool isWellFormedOrigin(String origin) {
+    final stripped = _stripTrailingSlashes(origin);
+    // محرف تحكم لا يصير أصلاً مهما وقع في الشكل — الفحص على مدى
+    // المحارف المضبوطة نفسه الذي يعقم السجل
+    for (final rune in stripped.runes) {
+      if (_isControlChar(rune)) return false;
+    }
+    return _originShape.hasMatch(stripped);
+  }
+
+  /// `scheme://host[:port]` in one match: a letter-led scheme, then either
+  /// a bracketed IP-literal host or a plain host that cannot carry the
+  /// grammar the shape refuses (no `@`, `/`, `?`, `#`, no `:` outside
+  /// brackets, no whitespace), then an optional numeric port. Trailing
+  /// slashes are stripped by the caller, not matched here.
+  static final RegExp _originShape = RegExp(
+    r'^[A-Za-z][A-Za-z0-9+.\-]*://'
+    r'(?:\[[0-9A-Fa-f:.]+\]|[^\[\]:/?#@\s][^\[\]:/?#@\s]*)'
+    r'(?::\d+)?$',
+  );
+
   /// Is the origin listed? - full match, bare host, or `*.domain` pattern
   /// (the pattern covers subdomains only; the root must be listed explicitly).
   bool _isListed(String? origin) {
@@ -519,7 +591,7 @@ class IntakeProtection {
     final host = uri.host.toLowerCase();
     // المدخلان المجرد والنمطي يطابقان
     // https حصرا (أو المضيف المحلي عند allowLocalHttp): قبول http لهما
-    // كان انحدارا يعيد ثغرة الشبكة العامة — والمدخل الكامل يحمل مخططه
+    // يعيد ثغرة الشبكة العامة — والمدخل الكامل يحمل مخططه
     // فمطابقته واعية للمخطط أصلا
     final schemeOk =
         uri.scheme == 'https' ||
@@ -529,7 +601,7 @@ class IntakeProtection {
     final normalized = normalize(origin);
     for (final entry in _allowed) {
       if (entry == normalized) return true;
-      // المدخل «*.» بلا جذر كان يقبل أي مضيف
+      // المدخل «*.» بلا جذر يطابق أي مضيف
       // بخاتمة نقطة (أصل متصفحي مشروع) — النمط يُشترط له جذر
       if (schemeOk && entry == host) return true;
       if (schemeOk && entry.startsWith('*.') && entry.length > 2) {
@@ -576,7 +648,7 @@ class IntakeProtection {
       );
     }
     // (0) طبقة التوكن المستقلة. القفل يفحص قبل المقارنة: المقفول يُرد
-    // 429 حتى بتوكن صحيح (كان الصحيح يُقبل بعد القفل فلا يوقف التخمين)
+    // 429 حتى بتوكن صحيح — فلا مقارنة صحيحة تسقط حاجز القفل عن التخمين
     // — والصحيح من نافذة غير مقفولة يصفرها ويعبر فورا.
     if (_token.isNotEmpty && portalToken != null && portalToken.isNotEmpty) {
       final now = _now;
@@ -634,6 +706,18 @@ class IntakeProtection {
       window = Queue<int>();
       _tokenMissWindows[key] = window;
       _tokenMissOrder.addLast(key);
+      // السقف الصلب للخريطة: إدراج فوق السقف يطرد الأقدم إدراجاً بطابور
+      // الترتيب نفسه الذي يقوده الكنس. مفتاح الطلب الجاري ليس مرشحاً
+      // للطرد: هو آخر الطابور حديثاً وأولُه الأقدم، والحارس يوقف الطرد
+      // عنده إن تناقض الترتيب — فطابع هذا الطلب لا يتيم في طابور
+      // منفصل عن الخريطة وقفل التوكن يبقى يتكون تحت الفيضان
+      while (_tokenMissWindows.length > _maxOriginWindows &&
+          _tokenMissOrder.isNotEmpty) {
+        final oldest = _tokenMissOrder.first;
+        if (oldest == key) break;
+        _tokenMissOrder.removeFirst();
+        _tokenMissWindows.remove(oldest);
+      }
     }
     while (window.isNotEmpty && now - window.first > _tokenLockWindowMs) {
       window.removeFirst();
@@ -677,6 +761,13 @@ class IntakeProtection {
     // يملأ المقاعد بلا حد، فالحصة هنا تحصر ضرره بنافذته ولا تمس
     // بقية المدرجين
     if (_isListed(origin)) {
+      // ترويستا الإرسال الحاضرتان بقيمة مخالفة نموذج مخفي أو إرسال
+      // no-cors بلا شك — تُرفضان هنا كالمسارين المتصفحيين
+      // (نموذج text/plain يمر بوابة الأنواع المسموحة فيغلقه هذا
+      // الفحص). غيابهما يبقى ممراً هنا: العملاء غير المتصفحات المدرجة
+      // لا يرسلونهما
+      final mismatched = _fetchMetadataMismatch(fetchMode, fetchDest);
+      if (mismatched != null) return mismatched;
       final listedQuota = _policy.listedPerOriginPerMinute;
       if (listedQuota > 0) {
         final quota = _originQuotaVerdict(origin, listedQuota);
@@ -686,7 +777,7 @@ class IntakeProtection {
           if (!_policy.reportOnly) return quota;
           telemetry?.warn(
             'intake report-only: would reject — ${quota.code}: '
-            '${quota.message} (origin=${_originForLog(origin) ?? 'none'})',
+            '${quota.message} (origin=${originForLog(origin) ?? 'none'})',
             category: BridgeCategory.security,
           );
         }
@@ -707,7 +798,7 @@ class IntakeProtection {
       if (_policy.reportOnly) {
         telemetry?.warn(
           'intake report-only: would reject — ${quota.code}: '
-          '${quota.message} (origin=${_originForLog(origin) ?? 'none'})',
+          '${quota.message} (origin=${originForLog(origin) ?? 'none'})',
           category: BridgeCategory.security,
         );
         return null;
@@ -735,17 +826,19 @@ class IntakeProtection {
         );
       }
       // منحة سماح-مرة: طلب واحد خلال نافذتها القصيرة ثم تُستهلك — لا
-      // تمرير دفعي لكل المنتظرين (جواب واحد كان يجيز حتى حد المقاعد)
+      // تمرير دفعي لكل المنتظرين (الجواب الواحد لا يجيز غير الطلب
+      // الذي استهلكها)
       final grant = _onceGrants[key];
       if (grant != null) {
         _onceGrants.remove(key);
         if (_now <= grant) return null;
       }
       // السؤال غير المعطِّل: الطلب يطلق النافذة ويعود فورا — لا منتظر
-      // يمسك مقعد خادم (ستة عشر منتظراً كانوا يعطلون المدرج دقيقة
-      // كاملة)، والنافذة تبقى محجوزة حتى الجواب أو أقصى عمرها.
+      // يمسك مقعد خادم (المقاعد الستة عشر ميزانية العمل الحي كلها:
+      // من يمسك مقعداً بلا عمل يعطل المدرج إلى المهلة الكلية)،
+      // والنافذة تبقى محجوزة حتى الجواب أو أقصى عمرها.
       // السقف هنا وحده — بعد المنحة والمرفوض المحفوظ كي لا يحجبهما
-      // مهاجم يشغل النوافذ الثلاث (كان الفحص المبكر يحجبهما)
+      // مهاجم يشغل النوافذ الثلاث
       if (_pendingAsks.length >= _maxPendingAsks) {
         return const IntakeRejection(
           403,
@@ -815,11 +908,17 @@ class IntakeProtection {
   /// Launch a question window or join the open one's queue - without waiting.
   /// The slot is deleted only on matching identity (an old awaiter never deletes
   /// a newer question), and the max timeout closes the silent window for others.
+  /// The host callback receives the normalized origin (lowercase scheme and
+  /// host, the port if present) - never the raw header value: the window must
+  /// read the same canonical form the keys and the list matching use.
   void _fireAsk(String key, String origin) {
     if (_disposed || _pendingAsks.containsKey(key)) return;
     Future<OriginConsent> ask;
     try {
-      ask = _policy.onUnknownOrigin!(origin);
+      // النافذة ترى الأصل المطبَّع حصراً — القيمة الخام يتحكم فيها
+      // الخصم ولا تصل قرار المضيف، والمفتاح مطبَّع أصلاً فيعود الجواب
+      // على الشكل نفسه الذي خُزِّن به
+      ask = _policy.onUnknownOrigin!(normalize(origin));
     } catch (e) {
       // رد نداء يرمي متزامنا: نافذة منهارة كالحوار المنهار — لا 500،
       // والإطلاق نفسه يستهلك ميزانية الزمن: نداء معطوب لا يُستدعى بلا
@@ -954,6 +1053,20 @@ class IntakeProtection {
       }
       return null;
     }
+    return _fetchMetadataMismatch(fetchMode, fetchDest);
+  }
+
+  /// The send-method mismatch alone: a present `Sec-Fetch-Mode` other than
+  /// `cors`, or a present `Sec-Fetch-Dest` other than `empty`, is a hidden
+  /// form or a no-cors send everywhere - the listed path included, where
+  /// the check stands on its own. Absence is the caller's business: the
+  /// browser paths reject it behind [OriginPolicy.requireFetchMetadata],
+  /// and the listed path keeps accepting it (headerless non-browser
+  /// clients listed by the host).
+  IntakeRejection? _fetchMetadataMismatch(
+    String? fetchMode,
+    String? fetchDest,
+  ) {
     if (fetchMode != null && fetchMode.isNotEmpty && fetchMode != 'cors') {
       return const IntakeRejection(
         403,
@@ -986,6 +1099,19 @@ class IntakeProtection {
       window = Queue<int>();
       _originWindows[key] = window;
       _windowOrder.addLast(key);
+      // السقف الصلب للخريطة بنمط خريطة التوكن أعلاه: إدراج فوق السقف
+      // يطرد الأقدم إدراجاً بطابور الترتيب، ومفتاح الطلب الجاري ليس
+      // مرشحاً للطرد أبداً. نافذة حية قد يخرجها فيضان التدوير — وهي
+      // متخطَّف معلن لا جديد عليه: الأصل الذي يدوّر أصولاً فريدة
+      // يتجاوز الحصة والقفل أصلاً، فما يخرجه الطرد هنا هو حساب حصة
+      // أصل قديم لا يدير إلا الفيضان نفسه
+      while (_originWindows.length > _maxOriginWindows &&
+          _windowOrder.isNotEmpty) {
+        final oldest = _windowOrder.first;
+        if (oldest == key) break;
+        _windowOrder.removeFirst();
+        _originWindows.remove(oldest);
+      }
     }
     while (window.isNotEmpty && now - window.first > _windowMs) {
       window.removeFirst();
@@ -1029,10 +1155,14 @@ class IntakeProtection {
     return null;
   }
 
-  /// CORS echo for the allowed only: the listed (including the always-approved)
-  /// or a valid https origin on the allow-all path - anyone else gets no ACAO
-  /// header at all, so the browser blocks reading the reply: echoing to everyone
-  /// equaled '*' and would open token guessing from any page.
+  /// CORS echo for the allowed only: the listed (including the
+  /// always-approved), a valid https origin on the allow-all path, and —
+  /// with a consent callback configured — discovery origins: any valid
+  /// browser origin not yet declined, whose preflight must be answered or
+  /// the browser never sends the request the consent question needs.
+  /// Anyone else gets no ACAO header at all, so the browser blocks reading
+  /// the reply: echoing to everyone equaled '*' and would open token
+  /// guessing from any page.
   /// Used by this package's server, not a stable host-facing interface.
   bool echoesCorsFor(String? origin) {
     if (origin == null || origin.isEmpty) return false;
@@ -1122,16 +1252,17 @@ class IntakeProtection {
     _nextRejectionLogMs = now + _rejectionLogPacingMs;
     telemetry?.warn(
       'intake rejected a request (protection active): ${reason ?? ''} '
-      '— origin=${_originForLog(origin) ?? 'none'}$suffix',
+      '— origin=${originForLog(origin) ?? 'none'}$suffix',
       category: BridgeCategory.security,
     );
   }
 
-  /// The logged form of an Origin header: control characters in the C0
-  /// and C1 ranges are stripped so a hostile value cannot forge extra log
-  /// lines, and the result is capped so a bloated value cannot inflate
-  /// every throttled line. Logging-only: the counter and the admission
-  /// decision still see the real value.
+  /// The logged (and telemetry-context) form of an Origin header: control
+  /// characters in the C0 and C1 ranges are stripped so a hostile value
+  /// cannot forge extra log lines, and the result is capped so a bloated
+  /// value cannot inflate every throttled line or measurement context.
+  /// Logging-only: the counter and the admission decision still see the
+  /// real value.
   static const _maxLoggedOriginChars = 200;
 
   /// C0 covers U+0000 to U+001F and C1 covers U+007F to U+009F - the
@@ -1139,7 +1270,11 @@ class IntakeProtection {
   static bool _isControlChar(int rune) =>
       rune <= 0x1F || rune == 0x7F || (rune >= 0x80 && rune <= 0x9F);
 
-  static String? _originForLog(String? origin) {
+  /// The one sanitizing pass every Origin value takes on its way to
+  /// telemetry: rejection log lines and the request measurement context
+  /// alike carry this form, never the raw header. Used by this package's
+  /// server, not a stable host-facing interface.
+  static String? originForLog(String? origin) {
     if (origin == null) return null;
     final cleaned = String.fromCharCodes(
       origin.runes.where((r) => !_isControlChar(r)),
@@ -1172,21 +1307,27 @@ class IntakeProtection {
   /// Checking length before the loop leaked the token length early: a reject
   /// at a different length returned faster than a matching one, handing the
   /// attacker a length ordering that spares full guessing. The iteration count
-  /// here is fixed for any input (the minimum pad or the longer side's length,
-  /// whichever is greater) and the length itself folds into the accumulator
-  /// like any positional difference - reject time never depends on input content.
-  /// All bytes compare: a difference past the minimum pad is caught, and different tokens never collide.
+  /// here is fixed for any input: the minimum pad or the configured secret's
+  /// length, whichever is greater - never the supplied value's length, so the
+  /// loop never grows with what the caller sends (a token past the header
+  /// length cap never reaches this at all). The length difference still folds
+  /// into the accumulator like any positional difference - reject time never
+  /// depends on input content - and supplied bytes beyond the loop land in the
+  /// accumulator too, so a longer token with a correct prefix is still caught.
+  /// All secret bytes compare: a difference inside the secret is caught, and
+  /// different tokens never collide.
   static const _tokenComparePad =
-      256; // حشوة الدنيا — الحلقة تمتد لطول أطول الطرفين إن زاد
+      256; // حشوة الدنيا — الحلقة تمتد لطول السر المضبوط إن زاد
 
-  bool _fixedTimeEquals(String a, String b) {
-    final ab = utf8.encode(a);
-    final bb = utf8.encode(b);
+  bool _fixedTimeEquals(String supplied, String secret) {
+    final ab = utf8.encode(supplied);
+    final bb = utf8.encode(secret);
     var diff = ab.length ^ bb.length;
-    // الحلقة تغطي أطول الطرفين كاملا: القصر على الحشوة وحدها كان يسمح
-    // بمرور توكن صحيح-البادئة فقط (سر قصير بعد بادئة طويلة يمر) — والفرق
-    // في الطول يدخل المقارنة من البداية فيغلق الطريق الثالث
-    final pad = _tokenComparePad > ab.length ? _tokenComparePad : ab.length;
+    // الحلقة على الحشوة الدنيا وطول السر المضبوط وحدهما — لا على طول
+    // القيمة المرسلة: كلفة المقارنة لا تنمو بطول المرسل، وفرق الطول
+    // يدخل المُراكِم من البداية فيرفض الزائد والناقص معاً، وبايتات
+    // القيمة المرسلة فوق مدى الحلقة تسقط فيه هي أيضاً
+    final pad = _tokenComparePad > bb.length ? _tokenComparePad : bb.length;
     for (var i = 0; i < pad; i++) {
       diff |= (i < ab.length ? ab[i] : 0) ^ (i < bb.length ? bb[i] : 0);
     }

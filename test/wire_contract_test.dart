@@ -737,7 +737,8 @@ void main() {
       // cap 1KiB => drain budget 4KiB: the client promises 10KiB and sends
       // 5KiB past the budget on purpose. A sender that never stops must not
       // hold the server draining forever - the connection has to end for
-      // the client well before the promised body or the request timeout.
+      // the client well before the promised body or the request timeout,
+      // and the honest 413 travels the raw socket before the cut.
       final small = make(
         pr: makeProtection('allowAll'),
         config: const BridgeConfig(maxBodyBytes: 1024),
@@ -746,6 +747,23 @@ void main() {
       addTearDown(small.stop);
       final socket = await Socket.connect('127.0.0.1', small.port);
       addTearDown(socket.destroy);
+      final buffer = BytesBuilder();
+      final ended = Completer<void>();
+      var endedVia = 'open';
+      late final StreamSubscription<List<int>> sub;
+      sub = socket.listen(
+        (d) {
+          buffer.add(d);
+        },
+        onDone: () {
+          endedVia = 'done';
+          if (!ended.isCompleted) ended.complete();
+        },
+        onError: (Object _) {
+          endedVia = 'error';
+          if (!ended.isCompleted) ended.complete();
+        },
+      );
       socket.write(
         'POST / HTTP/1.1\r\n'
         'Host: 127.0.0.1:${small.port}\r\n'
@@ -755,22 +773,30 @@ void main() {
       );
       socket.write('x' * 5120);
       unawaited(socket.flush().catchError((Object _) {}));
-      final ended = Completer<void>();
-      late final StreamSubscription sub;
-      sub = socket.listen(
-        (_) {},
-        onDone: () {
-          if (!ended.isCompleted) ended.complete();
-        },
-        onError: (Object _) {
-          if (!ended.isCompleted) ended.complete();
-        },
-      );
       // The drain window is two seconds and the request timeout guards the
       // rest: six seconds is comfortably past the cut and far under the
       // 30s default an unbounded drain would have waited for.
       await ended.future.timeout(const Duration(seconds: 6));
       await sub.cancel();
+      // الرد يُكتب على المقبس الخام قبل التفريغ فيصل حتماً قبل القطع —
+      // الاكتمال عند النهاية يجمع الرأس والجسم كما وصلوا
+      final replyText = latin1.decode(buffer.toBytes(), allowInvalid: true);
+      expect(
+        replyText,
+        isNotEmpty,
+        reason: 'the bounded cut still delivers the honest reply first',
+      );
+      expect(replyText.split('\r\n').first, contains(' 413 '));
+      expect(
+        replyText.substring(replyText.indexOf('\r\n\r\n') + 4),
+        contains('payload_too_large'),
+        reason: 'the stable code rides the reply body',
+      );
+      expect(
+        endedVia,
+        isNot('open'),
+        reason: 'the connection must end after the budget-bounded drain',
+      );
     },
   );
 
@@ -791,6 +817,23 @@ void main() {
       addTearDown(small.stop);
       final socket = await Socket.connect('127.0.0.1', small.port);
       addTearDown(socket.destroy);
+      final buffer = BytesBuilder();
+      final ended = Completer<void>();
+      var endedVia = 'open';
+      late final StreamSubscription<List<int>> sub;
+      sub = socket.listen(
+        (d) {
+          buffer.add(d);
+        },
+        onDone: () {
+          endedVia = 'done';
+          if (!ended.isCompleted) ended.complete();
+        },
+        onError: (Object _) {
+          endedVia = 'error';
+          if (!ended.isCompleted) ended.complete();
+        },
+      );
       socket.write(
         'POST / HTTP/1.1\r\n'
         'Host: 127.0.0.1:${small.port}\r\n'
@@ -802,19 +845,22 @@ void main() {
       socket.write('1\r\nx\r\n');
       socket.write('1e00\r\n${'x' * 7680}\r\n0\r\n\r\n');
       unawaited(socket.flush().catchError((Object _) {}));
-      final ended = Completer<void>();
-      late final StreamSubscription sub;
-      sub = socket.listen(
-        (_) {},
-        onDone: () {
-          if (!ended.isCompleted) ended.complete();
-        },
-        onError: (Object _) {
-          if (!ended.isCompleted) ended.complete();
-        },
-      );
       await ended.future.timeout(const Duration(seconds: 5));
       await sub.cancel();
+      // العقد المقيس لمسار تجاوز ميزانية التفريغ: النهاية حتماً خلال
+      // النافذة، والرد الصادق يتسابق مع الهدم — وصل في جولة قياس
+      // وابتلعه الهدم في أخرى — فلا يُطالَب بوصول دائم، وأي وصل
+      // يجب أن يكون 413 الصادق حصراً لا رداً آخر
+      expect(
+        endedVia,
+        isNot('open'),
+        reason: 'the connection must end once the drain budget tripped',
+      );
+      final text = latin1.decode(buffer.toBytes(), allowInvalid: true);
+      if (text.isNotEmpty) {
+        expect(text.split('\r\n').first, contains(' 413 '));
+        expect(text, contains('payload_too_large'));
+      }
     },
   );
 
@@ -832,23 +878,29 @@ void main() {
       addTearDown(small.stop);
       final socket = await Socket.connect('127.0.0.1', small.port);
       addTearDown(socket.destroy);
+      final buffer = BytesBuilder();
+      final ended = Completer<void>();
+      var endedVia = 'open';
+      late final StreamSubscription<List<int>> sub;
+      sub = socket.listen(
+        (d) {
+          buffer.add(d);
+        },
+        onDone: () {
+          endedVia = 'done';
+          if (!ended.isCompleted) ended.complete();
+        },
+        onError: (Object _) {
+          endedVia = 'error';
+          if (!ended.isCompleted) ended.complete();
+        },
+      );
       socket.write(
         'POST / HTTP/1.1\r\n'
         'Host: 127.0.0.1:${small.port}\r\n'
         'Origin: https://agent.test\r\n'
         'Content-Type: application/json\r\n'
         'Content-Length: 3072\r\n\r\n',
-      );
-      final ended = Completer<void>();
-      late final StreamSubscription sub;
-      sub = socket.listen(
-        (_) {},
-        onDone: () {
-          if (!ended.isCompleted) ended.complete();
-        },
-        onError: (Object _) {
-          if (!ended.isCompleted) ended.complete();
-        },
       );
       // 8 x 256B with 800ms gaps: sending for ~6.4s, never finishing the
       // promised body. The gate cut lands around two seconds.
@@ -862,6 +914,18 @@ void main() {
       // would still be waiting at six and a half seconds of trickle.
       await ended.future.timeout(const Duration(seconds: 4));
       await sub.cancel();
+      // نفس عقد مسار العدّاد: النهاية حتماً خلال النافذة والرد الصادق
+      // يتسابق مع الهدم — أي وصل يجب أن يكون 413 حصراً
+      expect(
+        endedVia,
+        isNot('open'),
+        reason: 'the connection must end within the drain window',
+      );
+      final text = latin1.decode(buffer.toBytes(), allowInvalid: true);
+      if (text.isNotEmpty) {
+        expect(text.split('\r\n').first, contains(' 413 '));
+        expect(text, contains('payload_too_large'));
+      }
     },
   );
 

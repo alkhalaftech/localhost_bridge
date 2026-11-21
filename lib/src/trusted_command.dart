@@ -1,6 +1,8 @@
 /// The pipeline's end contract: the package ends at delivering a "trusted
 /// command" - it knows neither its meaning nor any specific hardware (neutrality).
 class TrustedCommand {
+  /// Builds the command - the package constructs it, the host consumes it;
+  /// all four fields are required.
   const TrustedCommand({
     required this.source,
     required this.payloads,
@@ -26,12 +28,25 @@ class TrustedCommand {
   final String correlationId;
 }
 
-/// The host-side command execution result (fields unchanged).
+/// The host-side command execution result.
 class CommandOutcome {
+  /// Builds the outcome: [ok] true with no error fields for an executed
+  /// command, false with [errorCode] (and optionally [errorMessage]) for
+  /// a refusal or a failure.
   const CommandOutcome({required this.ok, this.errorCode, this.errorMessage});
 
+  /// Whether the host executed the command: true answers the sender with
+  /// `200` and `{"ok": true}`; false answers `500` with the error fields.
   final bool ok;
+
+  /// The host's wire error code for a failed command - sent as the `error`
+  /// field of the JSON reply; null falls back to the configured fallback
+  /// error code (`command_failed` by default).
   final String? errorCode;
+
+  /// Optional host text for a failed command - delivered only to senders
+  /// the protection marks verbose (a correct token or a listed origin);
+  /// the allow-all path sees the code without this text.
   final String? errorMessage;
 }
 

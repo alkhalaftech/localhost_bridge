@@ -1962,7 +1962,7 @@ void main() {
     );
   });
 
-  group('re-audit hygiene: rejection log throttle and once-grant sweep', () {
+  group('rejection log throttle and once-grant sweep', () {
     // فيضان سجل الرفض: طوفان صفحة يغرق telemetry بسطر لكل مرفوض —
     // الكبح بنمط خنق معرف الارتباط (1/ث + عدّاد مكتوم يُقال لاحقا)
     test(

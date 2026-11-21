@@ -223,6 +223,28 @@ void main() {
       );
       expect(r['status'], 400);
       expect(r['body'], contains('origin_too_long'));
+      // بوابة الشكل تكتب سطر رفض صفراً — أي warn هنا يعني سطراً حمل
+      // القيمة الخام خارج العقد، فيُحاكم بحد السجل الإنتاجي 200
+      expect(
+        rec.warns,
+        isEmpty,
+        reason:
+            'a shape-gate reject writes no warning line at all - the '
+            'gate rejects before any log line exists',
+      );
+      // أي سياق قياس يحمل أصلاً هنا يعني وصول القيمة الخام إلى القياس
+      final carried = rec.contexts
+          .map((c) => c?['origin'])
+          .whereType<String>()
+          .where((o) => o != 'unknown')
+          .toList();
+      expect(
+        carried,
+        isEmpty,
+        reason:
+            'no measure context carries the oversized origin - the '
+            'gate rejects before the request measure runs',
+      );
       for (final w in rec.warns) {
         final start = w.indexOf('origin=');
         if (start < 0) continue;
@@ -233,8 +255,8 @@ void main() {
             : w.substring(fieldStart, close);
         expect(
           field.length,
-          lessThanOrEqualTo(1024),
-          reason: 'the log line stays under the origin cap',
+          lessThanOrEqualTo(200),
+          reason: 'the log line stays under the production log cap (200)',
         );
       }
       for (final ctx in rec.contexts) {
@@ -242,8 +264,8 @@ void main() {
         if (origin is String && origin != 'unknown') {
           expect(
             origin.length,
-            lessThanOrEqualTo(1024),
-            reason: 'the telemetry context stays under the origin cap',
+            lessThanOrEqualTo(200),
+            reason: 'the telemetry context stays under the log cap (200)',
           );
         }
       }
@@ -274,9 +296,11 @@ void main() {
     );
     expect(admitted['status'], 200);
     expect(handlerCalls, 1);
-    // وعند السقف بلا شرطات ختامية: الرفض الاعتيادي برمزه الاعتيادي
-    // لا رمز الطول
-    final unlisted = _originOfLength(1024);
+    // وعند السقف بأصل سليم الشكل غير مدرج: الرفض الاعتيادي برمزه
+    // الاعتيادي لا رمز الطول — العينة سليمة الشكل (لا مسار) لأن بوابة
+    // الشكل تسبق السياسة، وأصلٌ بمسارٍ عن السقف يُجاب origin_malformed
+    // في جناحه الخاص
+    final unlisted = 'https://${'a' * (1024 - 'https://'.length)}';
     final rejected = await _exchange(
       p,
       'POST / HTTP/1.1\r\nHost: 127.0.0.1:$p\r\n'

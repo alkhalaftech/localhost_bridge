@@ -2,7 +2,13 @@
 # This file lives inside the package tree; the package root is the
 # repository root. All paths below are therefore repository-root relative.
 # Public repositories get free macOS and Windows minutes, so the full
-# matrix runs on every push and pull request here.
+# matrix runs on every push to main and on every pull request here.
+# Tag pushes trigger nothing: a tag usually points at old code, and the
+# release gates below already run on the main branch.
+# The weekly schedule entry loads everywhere this file does, but every
+# job bails out unless the repository variable SCHEDULED_CI is set to
+# "true". A repository that wants the weekly run sets that one variable;
+# this file never names any repository.
 # Actions are pinned to full commit SHAs instead of mutable major tags -
 # a supply-chain measure, so a moved tag cannot change what runs here.
 # The workflow token is dropped to read-only: nothing here writes back.
@@ -10,8 +16,13 @@ name: dart
 
 on:
   push:
+    branches:
+      - main
   pull_request:
   workflow_dispatch:
+  schedule:
+    # Weekly, at an off-peak minute. Each job checks SCHEDULED_CI.
+    - cron: '17 3 * * 1'
 
 # One run per ref: a new push or PR update cancels the older run.
 concurrency:
@@ -23,6 +34,7 @@ permissions:
 
 jobs:
   test:
+    if: github.event_name != 'schedule' || vars.SCHEDULED_CI == 'true'
     strategy:
       fail-fast: false
       matrix:
@@ -41,6 +53,13 @@ jobs:
         with:
           sdk: ${{ matrix.sdk }}
 
+      # Name the environment a red run ran on: the dart SDK version and
+      # the runner image build.
+      - name: environment versions
+        run: |
+          echo "dart SDK: $(dart --version 2>&1)"
+          echo "runner image: ImageOS=${ImageOS:-unknown} ImageVersion=${ImageVersion:-unknown}"
+
       # The formatter takes the package language version from the resolved
       # package config; without it, it formats in the newest style.
       - name: resolve packages
@@ -54,26 +73,31 @@ jobs:
         if: matrix.sdk == 'stable'
         run: dart format --output=none --set-exit-if-changed .
 
+      # --fatal-infos: an info-level analyzer note fails the run, not
+      # only warnings and errors.
       - name: analyze
-        run: |
-          dart pub get
-          dart analyze
+        run: dart analyze --fatal-infos
 
       - name: test
         run: dart test
 
-  # Release gate for the files that reach pub.dev: rejects stale
-  # pre-publication wording such as "not published yet (publish_to: none)"
-  # or "repository is a placeholder". The patterns match the full stale
-  # sentences, so prose that legitimately uses the word "placeholder" (for
-  # example the changelog line about removing the placeholder homepage)
-  # keeps passing.
   release-doc-gate:
+    if: github.event_name != 'schedule' || vars.SCHEDULED_CI == 'true'
     runs-on: ubuntu-latest
     timeout-minutes: 15
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
 
+      - name: runner image
+        run: |
+          echo "runner image: ImageOS=${ImageOS:-unknown} ImageVersion=${ImageVersion:-unknown}"
+
+      # Release gate for the files that reach pub.dev: rejects stale
+      # pre-publication wording such as "not published yet (publish_to: none)"
+      # or "repository is a placeholder". The patterns match the full stale
+      # sentences, so prose that legitimately uses the word "placeholder" (for
+      # example the changelog line about removing the placeholder homepage)
+      # keeps passing.
       - name: Reject stale pre-publication wording in published files
         run: |
           pattern="not published|publish_to:[[:space:]]*['\"]?none|is a placeholder"
@@ -82,3 +106,152 @@ jobs:
             exit 1
           fi
           echo "No stale pre-publication wording in files published to pub.dev."
+
+  publish-gate:
+    # Release-pipeline rehearsal: whatever pub.dev would receive must
+    # document cleanly, pass the dry run without a single warning, and
+    # then stand alone in an empty directory - resolve, analyze, test,
+    # and stay CR-free. The working tree may contain more than the
+    # archive does; this job judges the archive exactly.
+    if: github.event_name != 'schedule' || vars.SCHEDULED_CI == 'true'
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+
+      - uses: dart-lang/setup-dart@6afc89df92d6eb3834022f73cd65adc8cdfcb92d # v1.8.1
+        with:
+          sdk: stable
+
+      - name: environment versions
+        run: |
+          echo "dart SDK: $(dart --version 2>&1)"
+          echo "runner image: ImageOS=${ImageOS:-unknown} ImageVersion=${ImageVersion:-unknown}"
+
+      - name: resolve packages
+        run: dart pub get
+
+      # Scratch files live outside the package tree ($RUNNER_TEMP): a
+      # stray file inside the package root would enter the publish
+      # listing itself.
+      - name: doc (fails on warnings)
+        run: |
+          dart doc > "$RUNNER_TEMP/doc_output.txt" 2>&1 || { cat "$RUNNER_TEMP/doc_output.txt"; echo "::error::dart doc failed - see the output above."; exit 1; }
+          grep -q '^Found 0 warnings and 0 errors\.$' "$RUNNER_TEMP/doc_output.txt" || { cat "$RUNNER_TEMP/doc_output.txt"; echo "::error::dart doc produced warnings or errors - see the output above."; exit 1; }
+          echo "dart doc: zero warnings, zero errors."
+
+      # The dry run is also the source of truth for the published file
+      # set; its verdict line is captured verbatim for the next step.
+      - name: publish dry-run (fails on any warning)
+        run: |
+          dart pub publish --dry-run > "$RUNNER_TEMP/dry_run.txt" 2>&1 || { cat "$RUNNER_TEMP/dry_run.txt"; echo "::error::publish --dry-run failed - see the output above."; exit 1; }
+          grep -q '^Package has 0 warnings\.$' "$RUNNER_TEMP/dry_run.txt" || { cat "$RUNNER_TEMP/dry_run.txt"; echo "::error::publish --dry-run reported warnings - see the output above."; exit 1; }
+          echo "publish --dry-run: zero warnings."
+
+      # Copy the files the dry run listed - and only those - into an
+      # empty directory, then resolve, analyze strictly, and test there.
+      # The listing is a tree: nested entries show their name only, and
+      # the prefix groups (bar or blank, one per level) carry the depth,
+      # so the full relative path is rebuilt level by level; directory
+      # entries carry no size. A text file carrying a CR character
+      # fails the run, so the published bytes stay LF-only.
+      - name: verify the published archive (exact file set, standalone, CR-free)
+        run: |
+          sed -e 's/│   /L/g' -e 's/    /L/g' "$RUNNER_TEMP/dry_run.txt" | awk '
+            /── / {
+              isfile = /\((<1|[0-9]+) (KB|B)\)$/
+              line = $0
+              if (isfile) sub(/ \((<1|[0-9]+) (KB|B)\)$/, "", line)
+              idx = index(line, "── ")
+              prefix = substr(line, 1, idx - 1)
+              entry_depth = gsub(/L/, "L", prefix) + 1
+              name = substr(line, idx + 3)
+              while (level >= entry_depth) { delete stack[level]; level-- }
+              if (isfile) {
+                path = name
+                for (i = level; i >= 1; i--) path = stack[i] "/" path
+                print path
+              } else {
+                level++
+                stack[level] = name
+              }
+            }
+          ' > "$RUNNER_TEMP/file_list.txt"
+          if [ ! -s "$RUNNER_TEMP/file_list.txt" ]; then
+            echo "::error::could not parse the dry-run file list."
+            exit 1
+          fi
+          listed="$(grep -c . "$RUNNER_TEMP/file_list.txt")"
+          echo "files listed by the dry run: $listed"
+          archive="$(mktemp -d)"
+          while IFS= read -r f; do
+            if [ ! -f "$f" ]; then
+              echo "::error::the dry run lists '$f' but it is missing from the checkout."
+              exit 1
+            fi
+            mkdir -p "$archive/$(dirname "$f")"
+            cp "$f" "$archive/$f"
+          done < "$RUNNER_TEMP/file_list.txt"
+          copied="$(find "$archive" -type f | wc -l)"
+          if [ "$copied" -ne "$listed" ]; then
+            echo "::error::the archive holds $copied files but the dry run listed $listed."
+            exit 1
+          fi
+          cd "$archive"
+          dart pub get
+          dart analyze --fatal-infos
+          dart test
+          # No CR character may survive in any text file of the archive.
+          # A scan that errors is a failure, not a pass: only exit 1
+          # means "no match".
+          cr_status=0
+          cr_scan="$(grep -rIl "$(printf '\r')" . )" || cr_status=$?
+          if [ "$cr_status" -gt 1 ]; then
+            echo "::error::the CR scan failed to run (grep exit $cr_status)."
+            exit 1
+          fi
+          if [ -n "$cr_scan" ] ; then
+            printf '%s\n' "$cr_scan"
+            echo "::error::CR characters found in the published archive - see the files above."
+            exit 1
+          fi
+          echo "published archive verified: $listed files, CR-free, analyze and test green."
+
+  pana:
+    # The pub.dev score as pana computes it. It only runs where the
+    # SCHEDULED_CI variable is "true", so repositories that did not opt
+    # in to the weekly run do not spend minutes on it, and it fails the
+    # build below 160 points.
+    if: vars.SCHEDULED_CI == 'true'
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+
+      - uses: dart-lang/setup-dart@6afc89df92d6eb3834022f73cd65adc8cdfcb92d # v1.8.1
+        with:
+          sdk: stable
+
+      - name: environment versions
+        run: |
+          echo "dart SDK: $(dart --version 2>&1)"
+          echo "runner image: ImageOS=${ImageOS:-unknown} ImageVersion=${ImageVersion:-unknown}"
+
+      - name: resolve packages
+        run: dart pub get
+
+      - name: pana (fails below 160 points)
+        run: |
+          dart pub global activate pana
+          dart pub global run pana:pana . > pana_output.txt 2>&1 || true
+          tail -n 25 pana_output.txt
+          points="$(grep -E '^Points: [0-9]+/[0-9]+\.$' pana_output.txt | tail -n 1 | sed -E 's/^Points: ([0-9]+)\/[0-9]+\.$/\1/')"
+          if [ -z "$points" ]; then
+            echo "::error::could not read the pana score - see the output above."
+            exit 1
+          fi
+          if [ "$points" -lt 160 ]; then
+            echo "::error::pana score is ${points}, below the required 160."
+            exit 1
+          fi
+          echo "pana score: ${points} - accepted."

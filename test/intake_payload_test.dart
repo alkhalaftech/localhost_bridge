@@ -88,4 +88,56 @@ void main() {
     );
     expect(port, isNot(busy.port));
   });
+
+  test('a body carrying more than one wrapper key is refused 400 '
+      'unsupported_payload_shape and nothing reaches the handler', () async {
+    final port = await server.start(preferredPort: 0);
+    final client = HttpClient();
+    final req = await client.postUrl(Uri.parse('http://127.0.0.1:$port/'));
+    req.headers.set('Origin', 'https://portal.example');
+    req.headers.contentType = ContentType.json;
+    // two wrapper keys present at once: an ambiguous envelope must not be
+    // resolved silently by the key order - it is refused as a whole
+    req.write('{"payload":["A"],"data":["B"]}');
+    final resp = await req.close();
+    final body = await resp.transform(utf8.decoder).join();
+    expect(
+      resp.statusCode,
+      400,
+      reason: 'an ambiguous multi-key envelope is refused, never guessed',
+    );
+    expect(body, contains('"error":"unsupported_payload_shape"'));
+    expect(
+      received,
+      isEmpty,
+      reason: 'nothing reaches the handler for an ambiguous envelope',
+    );
+    client.close();
+  });
+
+  test('a single wrapper key still unwraps - the ambiguous refusal does not '
+      'touch the ordinary shapes', () async {
+    final port = await server.start(preferredPort: 0);
+    final client = HttpClient();
+    for (final body in <String>[
+      '{"data":["B"]}',
+      '{"payload":["A"]}',
+      '{"commands":["C"]}',
+    ]) {
+      final req = await client.postUrl(Uri.parse('http://127.0.0.1:$port/'));
+      req.headers.set('Origin', 'https://portal.example');
+      req.headers.contentType = ContentType.json;
+      req.write(body);
+      final resp = await req.close();
+      final text = await resp.transform(utf8.decoder).join();
+      expect(resp.statusCode, 200, reason: 'single key $body stays served');
+      expect(text, contains('"ok":true'));
+    }
+    expect(received.map((p) => p.single), [
+      'B',
+      'A',
+      'C',
+    ], reason: 'each single-key envelope delivers its own command');
+    client.close();
+  });
 }
