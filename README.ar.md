@@ -406,7 +406,8 @@ ws.onmessage = (e) => console.log(JSON.parse(e.data));  // حدث الرد
 ويُقطع على المقبس المنتزع كما يفعل الخادم الخاص حرفاً. سلطات المضيف
 المحلي تُبنى من منفذ خادم المضيف الذي يسمعه فعلاً (يمرَّر بـ
 `hostPort`)، والجسر يتحقق بالطرف البعيد بنفسه: طلب قادم من عنوان غير
-loopback يُرد `403 blocked_by_protection` قبل كل بوابة أخرى، فربطُ
+loopback يُرد `403 blocked_by_protection` بعد بوابات الشكل البروتوكولي
+وقبل كل بوابة سياسة، فربطُ
 المضيف على `0.0.0.0` لا يكسر ضمانة الحزمة للحلقيّة. والطرف المطبوع
 IPv4-mapped IPv6 (‏`::ffff:127.0.0.1`، وهو ما يسلّمه الربط ثنائي
 الطبقة لنداء IPv4 حلقيّ) يعدُّ loopback. وسقف الاتصالات المفتوحة
@@ -473,7 +474,7 @@ final bridge = LocalIntakeServer(
         path: '/pairing',
         content: '<!doctype html><html><body>'
             '<h1>رمز الاقتران: 482913</h1>'
-            '<script>fetch("/commands", {method: "POST",'
+            '<script>fetch("/", {method: "POST",'
             ' headers: {"Content-Type": "application/json"},'
             ' body: JSON.stringify(["STATUS"])});</script>'
             '</body></html>',

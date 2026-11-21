@@ -478,7 +478,8 @@ and the connection cut over the detached socket exactly as the private
 server does it. The local host authorities are built from the host
 server's own listening port (pass it as `hostPort`), and the bridge
 checks the remote peer itself: a request arriving from a non-loopback
-address is refused `403 blocked_by_protection` before any other gate,
+address is refused `403 blocked_by_protection` after the protocol-shape
+gates and before every policy gate,
 so binding the host to `0.0.0.0` does not break the package's loopback
 guarantee. An IPv4-mapped IPv6 peer (`::ffff:127.0.0.1`, what a
 dual-stack bind delivers for an IPv4 loopback caller) counts as
@@ -552,7 +553,7 @@ final bridge = LocalIntakeServer(
         path: '/pairing',
         content: '<!doctype html><html><body>'
             '<h1>Pairing code: 482913</h1>'
-            '<script>fetch("/commands", {method: "POST",'
+            '<script>fetch("/", {method: "POST",'
             ' headers: {"Content-Type": "application/json"},'
             ' body: JSON.stringify(["STATUS"])});</script>'
             '</body></html>',

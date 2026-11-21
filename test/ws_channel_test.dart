@@ -308,7 +308,11 @@ void main() {
       ws.add('x' * (3 * 1024 * 1024));
       final (replies, closeCode) = await awaitClosed(ws);
       if (LocalIntakeServer.wsTransportCeilingActive) {
-        expect(closeCode, 1002);
+        // قراءة رمز الإغلاق نفسها سباقُ معالجةِ إطار الإغلاق تحت الحمل:
+        // النقل يقتل ب1002 لكن العميل قد يقرأ 1006 (إغلاق شاذ) قبل أن
+        // يبلغه الإطار — فالحكم على القتل بمآلاته (لا إطار إفصاح ولا
+        // عدّ) والرمز المرصود أحد الأمرين الصادقين
+        expect(closeCode, anyOf(1002, 1006));
         expect(
           replies.where((r) => r.contains('ws_message_too_large')),
           isEmpty,
