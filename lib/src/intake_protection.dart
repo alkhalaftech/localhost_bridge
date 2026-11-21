@@ -495,6 +495,19 @@ class IntakeProtection {
   /// with no subscriber (the protection object also runs inside the intake with no UI).
   void Function()? onRejected;
 
+  /// Fired exactly once when a consent question window ends - the answer
+  /// arrived (applied or not), the host's future threw, or the ask timeout
+  /// closed it - with the normalized origin the question was asked with.
+  /// The host dialog closes on this instead of racing [OriginPolicy.askTimeout]
+  /// with its own timer. `onUnknownOrigin`'s signature is untouched: this
+  /// is a separate seam. A question the question budget suppressed never
+  /// opened, so it never signals; a callback that throws before the window
+  /// opens never opened one either; and `dispose()` closes the remaining
+  /// windows silently (the host tearing the object down already knows).
+  /// A throwing callback is contained with one telemetry warning and never
+  /// breaks the answer, error, or timeout path closing the window.
+  void Function(String origin)? onQuestionClosed;
+
   /// Discovery decisions kept for the session (always-allow / deny) - the
   /// host may persist them across sessions if it wants.
   final Map<String, OriginConsent> _consents = <String, OriginConsent>{};
@@ -2645,7 +2658,31 @@ class IntakeProtection {
   }
 
   void _removeAskIfIdentical(String key, Future<OriginConsent> ask) {
-    if (identical(_pendingAsks[key], ask)) _pendingAsks.remove(key);
+    if (identical(_pendingAsks[key], ask)) {
+      _pendingAsks.remove(key);
+      // نهاية السؤال هنا حصراً: حارس التطابق يضمن الإشارة مرة واحدة —
+      // المؤقت المتأخر بعد جواب أزال النافذة يجد مكانها فارغاً أو غيرها
+      _signalQuestionClosed(key);
+    }
+  }
+
+  /// The end-of-question signal, contained: the host's UI hook is its own
+  /// code, so a synchronous throw of its own is said once (telemetry) and
+  /// never allowed to break the answer, error, or timeout path that is
+  /// closing the window.
+  void _signalQuestionClosed(String key) {
+    final hook = onQuestionClosed;
+    if (hook == null) return;
+    try {
+      hook(key);
+    } catch (e) {
+      telemetry?.warn(
+        'consent-question closed callback threw synchronously '
+        '(origin=${originForLog(key) ?? 'none'}) — the window is closed '
+        'and the closing path continues',
+        category: BridgeCategory.security,
+      );
+    }
   }
 
   /// The fixed origin and send-method checks - the discovery path shares them before asking the user.
