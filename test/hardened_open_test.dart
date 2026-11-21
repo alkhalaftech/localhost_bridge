@@ -615,21 +615,27 @@ void main() {
         'rawIdle=${idleSlope.toStringAsFixed(3)}B/slot '
         'net=${netPerRejection.toStringAsFixed(3)}B/rejection',
       );
-      // السقف: أي احتفاظ ثابت لكل رفض فوق ~0.15MiB يظهر كاملاً في فرق
-      // ارتفاع نافذة الدفعة (تسربٌ يحتفظ بجسم الـ1MiB المرفوض لكل طلب
-      // يرفع دفعته كلها ~1MiB ≈ 300MB عبر الثلاثمئة) ولا يظهر في نافذة
-      // السكون أبداً، بينما نمو الجيران المستمر يرفع النافذتين معاً
-      // فيلغيه الفرق — وانفجاراتهم اللحظية تنزاحها أقل من أن تحرك
-      // الوسيط، وهي الضوضاء التي أسقطت دلتاي الثلاث نقاط سابقاً
+      // السقف 0.35MiB معايرٌ بالقياس لا بالتخمين: الميل الصافي الصحي
+      // (نفايات مسار الرفض نفسها قبل أن يجمعها GC) رُصد حتى ~158KB/رفض
+      // على عدّاء CI متسلسل بإصدار 3.8.0 الأقدم GC — فالسقف فوق أقصى
+      // صحة مرصودة بهامش ~2.3× (ويندوز/لينكس، متوازٍ ومتسلسل،
+      // 3.8/3.13/3.14) وتحت بصمة التسريب ~1MiB/رفض (احتفاظ بجسم الـ1MiB
+      // المرفوض لكل طلب ≈ 300MB عبر الثلاثمئة) بـ~2.9× — والاحتفاظ يظهر
+      // كاملاً في فرق ارتفاع نافذة الدفعة ولا يظهر في نافذة السكون
+      // أبداً، بينما نمو الجيران يرفع النافذتين معاً فيلغيه الفرق —
+      // وهي الضوضاء التي أسقطت دلتاي الثلاث نقاط سابقاً
       expect(
         netPerRejection,
-        lessThan(0.15 * mb),
+        lessThan(0.35 * mb),
         reason:
             'no persistent per-rejection retention: a leak holding even a '
             'fraction of each refused 1MiB body raises its batch window by '
             'that fraction and never its idle window, so the window-rise '
             'difference carries the retention in full while neighbor '
-            'drift raises both windows and cancels',
+            'drift raises both windows and cancels - the cap sits above '
+            'the measured healthy garbage ceiling (~158KB/rejection on a '
+            'serialized CI runner) and far below a leak signature '
+            '(~1MiB/rejection)',
       );
     },
   );
