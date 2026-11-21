@@ -105,18 +105,17 @@ jobs:
             exit 1
           fi
 
-      # The github reporter puts pass/fail/skip counts in the step
-      # summary, and the post-run grep repeats each failing test line
-      # as its own error annotation - the counts alone say how many,
-      # the lines say which, so a red matrix run names its test
-      # without opening the job log. The runner class is slower than
-      # any dev machine, which is where timing-sensitive tests break
-      # first.
+      # The expanded reporter writes each failing test with an [E]
+      # marker, and the post-run grep repeats those lines as error
+      # annotations - readable from the public API, so a red matrix
+      # run names its test without opening the admin-gated job log.
+      # The runner class is slower than any dev machine, which is
+      # where timing-sensitive tests break first.
       - name: test
         shell: bash
         run: |
           status=0
-          dart test --reporter=github > "$RUNNER_TEMP/test_out.txt" 2>&1 || status=$?
+          dart test --reporter=expanded > "$RUNNER_TEMP/test_out.txt" 2>&1 || status=$?
           grep -E "\[E\]" "$RUNNER_TEMP/test_out.txt" | head -10 | while IFS= read -r line; do
             echo "::error::${line:0:200}"
           done || true
