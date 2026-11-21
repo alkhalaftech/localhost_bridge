@@ -182,6 +182,51 @@
   the host dialog closes without racing `askTimeout`;
   `onUnknownOrigin`'s signature is unchanged, budget-suppressed
   questions never signal, and `dispose()` closes the rest silently.
+- Added: the payload-contract options - seven `BridgeConfig` switches,
+  **every one off by default, so the default wire is byte-identical to
+  previous releases**; each carries enabled and disabled witnesses:
+  - `strictPayloadItems` - a JSON command list (top-level or under a
+    wrapper key) carrying a non-string or empty-string element refuses
+    `400 invalid_payload_item` instead of the default silent drop of
+    that element.
+  - `requireValidJsonShape` - a body whose leading shape claims a JSON
+    container (`{`/`[`) must scan structurally complete (every opener
+    closed, every string terminated) or it answers `400
+    malformed_json_shape` before decoding; quote-leading raw text is
+    never scanned, so textual gateways are untouched.
+  - `rejectInvalidJson` - a body sent as `application/json` that fails
+    JSON decoding answers `400 invalid_json` instead of the default
+    raw-text fallthrough; other content types keep the raw path.
+  - `requireJsonBodies` (JSON-only mode) - the raw-text fallback refuses
+    `400 non_json_body` whole: raw command text and JSON scalar bodies
+    (number, boolean, null) alike; a JSON string body still serves. With
+    `rejectInvalidJson` also on, a broken `application/json` body reads
+    the more specific `invalid_json`.
+  - `acceptHandlerRefusal` - a failed `CommandOutcome` carrying the new
+    `refusalStatus` field (400..499) answers that client-error status
+    with its code instead of the standing `500`; null keeps `500`, an
+    out-of-range marker is ignored with one throttled warning, and with
+    the option off the field is inert - the default stays `500`.
+  - `maxErrorMessageLength` (0 = off, negative throws at construction) -
+    the host error text echoed to trusted origins is capped on the wire
+    to exactly this many characters; the code and the reply shape are
+    never touched.
+  - `acceptBinaryBodies` - `application/octet-stream` joins the admitted
+    media types and the raw bytes reach the handler as the new
+    `TrustedCommand.binaryPayload` (`payloads` stays empty - a binary
+    body is never JSON-parsed), with the command name riding the
+    `X-Command` header into `TrustedCommand.headers` and joining the
+    CORS allowed-header list while the option is on. The bytes sit under
+    an internal named ceiling - 256 KiB, a fixed constant deliberately
+    not an option - and a binary body over it answers `413
+    payload_too_large` naming the binary cap; below the ceiling a file
+    (image or PDF) travels with its command. Off, the type refuses `415`
+    and the header list never offers `X-Command`.
+- The four new refusal codes (`invalid_payload_item`,
+  `malformed_json_shape`, `invalid_json`, `non_json_body`) sit in
+  `intakeRejectionRegistry` and the README wire tables, walked on the
+  live wire like every other code; the handler-refusal statuses are
+  handler-chosen outcomes and stay outside the registry by its contract.
 
 ## 0.1.3
 

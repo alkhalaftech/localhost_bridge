@@ -2,6 +2,8 @@
 /// command" - it knows neither its meaning nor any specific hardware (neutrality).
 library;
 
+import 'dart:typed_data' show Uint8List;
+
 import 'intake_protection.dart';
 
 /// The cooperative cancellation signal a handler may read: the intake
@@ -69,6 +71,7 @@ class TrustedCommand {
     required this.correlationId,
     this.admission = IntakeAdmission.unrecorded,
     this.cancellation = const CommandCancelSignal.never(),
+    this.binaryPayload,
   });
 
   /// The sender's origin as protection read it ('unknown-origin' when absent).
@@ -77,12 +80,17 @@ class TrustedCommand {
   /// Payloads as extracted (kept as a list - no join before the guards).
   ///
   /// Extraction contract: inside a JSON array, non-string and
-  /// empty-string elements drop without notice; a body that fails JSON
-  /// decoding, or a JSON number, boolean, or `null` body, arrives as raw
-  /// command text.
+  /// empty-string elements drop without notice (the `strictPayloadItems`
+  /// option refuses them instead); a body that fails JSON decoding, or a
+  /// JSON number, boolean, or `null` body, arrives as raw command text
+  /// (the `rejectInvalidJson` and `requireJsonBodies` options refuse
+  /// those paths instead). Empty (never carries the file) when the
+  /// request arrived as a binary body - see [binaryPayload].
   final List<String> payloads;
 
   /// Useful request headers (lowercase keys) plus the correlation id.
+  /// With the binary-body option on, the sender's `X-Command` value rides
+  /// here under the `x-command` key (empty string when absent).
   final Map<String, String> headers;
 
   /// The thread tying logs together (honored when incoming, or host-generated).
@@ -99,6 +107,15 @@ class TrustedCommand {
   /// expiry and at stop; a command built outside the intake carries the
   /// const never-cancelled instance. Reading it is the handler's choice.
   final CommandCancelSignal cancellation;
+
+  /// The raw bytes of a binary body, delivered only when the
+  /// binary-body option is on and the request arrived as
+  /// `application/octet-stream`; null for every JSON or raw-text
+  /// request. A binary body is never JSON-parsed and never UTF-8-decoded:
+  /// [payloads] stays empty and the command name rides
+  /// [headers]`['x-command']`. The bytes sit under the server's internal
+  /// binary ceiling - a body over it is refused before the handler runs.
+  final Uint8List? binaryPayload;
 }
 
 /// The host-side command execution result.
@@ -106,12 +123,15 @@ class CommandOutcome {
   /// Builds the outcome: [ok] true with no error fields for an executed
   /// command, false with [errorCode] (and optionally [errorMessage]) for
   /// a refusal or a failure. [data] carries optional reply data for the
-  /// page and is read on success only.
+  /// page and is read on success only. [refusalStatus] marks a failed
+  /// outcome as the sender's doing - inert unless the server's
+  /// refusal option is on (see the field's contract).
   const CommandOutcome({
     required this.ok,
     this.errorCode,
     this.errorMessage,
     this.data,
+    this.refusalStatus,
   });
 
   /// Whether the host executed the command: true answers the sender with
@@ -140,6 +160,18 @@ class CommandOutcome {
   /// internal-error path with the real cause on the host's telemetry -
   /// keep [data] plain JSON types (null, bool, num, String, List, Map).
   final Object? data;
+
+  /// The handler's refusal mark for a failed outcome - the claim that the
+  /// failure is the sender's doing, so the wire may answer a client
+  /// error. Accepted only while the server is built with the refusal
+  /// option on: a value inside 400..499 then rides the wire as the reply
+  /// status (with the [errorCode] and the usual error shape unchanged);
+  /// null keeps the standing `500`, a value outside 400..499 is ignored
+  /// with one throttled warning, and with the option off the whole field
+  /// is inert - every failed outcome answers `500` exactly as before.
+  /// Read on failure only; a successful outcome never carries an error
+  /// status.
+  final int? refusalStatus;
 }
 
 /// The host's single registration point (it knows nothing of ports).

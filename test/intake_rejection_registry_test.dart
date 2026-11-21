@@ -889,6 +889,80 @@ List<_Scenario> _scenarios() {
       return _Walk(srv, link, () async {}, preBody: false);
     },
   ));
+
+  // 400 - the payload-contract options, each armed over a fully read body
+  cases.add((
+    code: 'invalid_payload_item',
+    preBody: false,
+    run: () async {
+      final srv = await _listen(
+        _server(
+          pr: _allowlist(),
+          config: const BridgeConfig(strictPayloadItems: true),
+        ),
+      );
+      final link = await _Link.openFull(
+        srv.port,
+        _head(srv.port, origin: 'https://portal.example', cl: 11),
+        utf8.encode('["CMD", 42]'),
+      );
+      return _Walk(srv, link, () async {}, preBody: false);
+    },
+  ));
+  cases.add((
+    code: 'malformed_json_shape',
+    preBody: false,
+    run: () async {
+      final srv = await _listen(
+        _server(
+          pr: _allowlist(),
+          config: const BridgeConfig(requireValidJsonShape: true),
+        ),
+      );
+      final link = await _Link.openFull(
+        srv.port,
+        _head(srv.port, origin: 'https://portal.example', cl: 6),
+        utf8.encode('["CMD"'),
+      );
+      return _Walk(srv, link, () async {}, preBody: false);
+    },
+  ));
+  cases.add((
+    code: 'invalid_json',
+    preBody: false,
+    run: () async {
+      final srv = await _listen(
+        _server(
+          pr: _allowlist(),
+          config: const BridgeConfig(rejectInvalidJson: true),
+        ),
+      );
+      final link = await _Link.openFull(
+        srv.port,
+        _head(srv.port, origin: 'https://portal.example', cl: 8),
+        utf8.encode('{"data":'),
+      );
+      return _Walk(srv, link, () async {}, preBody: false);
+    },
+  ));
+  cases.add((
+    code: 'non_json_body',
+    preBody: false,
+    run: () async {
+      final srv = await _listen(
+        _server(
+          pr: _allowlist(),
+          config: const BridgeConfig(requireJsonBodies: true),
+        ),
+      );
+      final link = await _Link.openFull(
+        srv.port,
+        _head(srv.port, origin: 'https://portal.example', cl: 4),
+        utf8.encode('PING'),
+      );
+      return _Walk(srv, link, () async {}, preBody: false);
+    },
+  ));
   cases.add((
     code: 'handler_timeout',
     preBody: false,

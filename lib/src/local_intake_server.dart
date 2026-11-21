@@ -1,6 +1,6 @@
 import 'dart:async';
 import 'dart:convert';
-import 'dart:typed_data' show BytesBuilder;
+import 'dart:typed_data' show BytesBuilder, Uint8List;
 
 import 'dart:io';
 
@@ -17,16 +17,49 @@ class _BodyTooLargeException implements Exception {
   const _BodyTooLargeException();
 }
 
-/// The outcome of one body read: either a complete body, or the rejection
-/// error - which is only handed back AFTER the unread remainder was
-/// drained (or the bounded patience ran out): closing over unread data
-/// makes the framework destroy the connection, and Linux and macOS answer
-/// that destroy with a reset that throws the reply away.
+/// Binary body over the internal binary ceiling - the same 413 family as
+/// [_BodyTooLargeException] with its own honest message naming the
+/// binary cap, not the byte cap.
+class _BinaryBodyTooLargeException implements Exception {
+  const _BinaryBodyTooLargeException();
+}
+
+/// A non-string or empty-string element inside a JSON command list while
+/// the strict-items option is on: the whole request is refused instead of
+/// the default silent drop of the offending element.
+class _StrictPayloadItemException implements Exception {
+  const _StrictPayloadItemException();
+}
+
+/// A body sent as `application/json` that failed JSON decoding while the
+/// declared-type strictness option is on.
+class _InvalidJsonException implements Exception {
+  const _InvalidJsonException();
+}
+
+/// A body that reached the raw-text fallback path while the JSON-only
+/// option is on - a decode failure under any type, or a JSON scalar
+/// (number, boolean, null) that arrives as raw command text.
+class _NonJsonBodyException implements Exception {
+  const _NonJsonBodyException();
+}
+
+/// The outcome of one body read: either a complete body (text for the
+/// JSON/raw path, bytes for the binary path), or the rejection error -
+/// which is only handed back AFTER the unread remainder was drained (or
+/// the bounded patience ran out): closing over unread data makes the
+/// framework destroy the connection, and Linux and macOS answer that
+/// destroy with a reset that throws the reply away.
 class _BodyOutcome {
-  _BodyOutcome.ok(this.body) : error = null;
-  _BodyOutcome.rejected(this.error) : body = null;
+  _BodyOutcome.text(String text) : body = text, binary = null, error = null;
+  _BodyOutcome.bytes(Uint8List bytes)
+    : body = null,
+      binary = bytes,
+      error = null;
+  _BodyOutcome.rejected(this.error) : body = null, binary = null;
 
   final String? body;
+  final Uint8List? binary;
   final Object? error;
 }
 
@@ -256,6 +289,13 @@ class LocalIntakeServer {
       throw ArgumentError.value(
         config.maxOpenConnections,
         'config.maxOpenConnections',
+        'must not be negative - 0 is the named off value',
+      );
+    }
+    if (config.maxErrorMessageLength < 0) {
+      throw ArgumentError.value(
+        config.maxErrorMessageLength,
+        'config.maxErrorMessageLength',
         'must not be negative - 0 is the named off value',
       );
     }
@@ -899,6 +939,17 @@ class LocalIntakeServer {
   /// يهدم ردٌّ واحد صفحةَ المرسل أو ينفخ سطر الرد وحده.
   static const int _maxReplyDataBytes = 64 * 1024;
 
+  /// السقف الداخلي للجسم الثنائي بالبايتات - ثابت مسمّى عمداً لا خيار:
+  /// ملف صورة أو PDF مع أمر يقع تحتّه بامتياز، وما فوقه شكل هجومي لا
+  /// استعمال معروف له. فَوْقه يُرد `413 payload_too_large` باسم السقف
+  /// الثنائي حصراً، والقيمة أضيق من سقف الجسم العام (maxBodyBytes) لأن
+  /// تسليم البايتات الخام للمعالج حمولة أكبر من نص يعالَج بالفك نفسه.
+  static const int _maxBinaryBodyBytes = 256 * 1024;
+
+  /// اسم السقف الثنائي كما يظهر على السلك في رد 413 - مشتق من الثابت
+  /// لا مكتوب بيده، فلا يكذب الرد لو تغيّر الثابت يوماً.
+  static final String _binaryCapLabel = '${_maxBinaryBodyBytes ~/ 1024} KiB';
+
   /// The pairing route - the one path the intake answers specially while
   /// the pairing layer is armed. Disarmed, it is no path at all: it rides
   /// the ordinary non-root behavior (a warning and the handler), wire
@@ -974,6 +1025,14 @@ class LocalIntakeServer {
   /// header name admits the line, the rest of its window is muted, and the
   /// next admitted line carries the muted count.
   late final _WarnThrottle _legacyTokenHeaderWarnThrottle = _WarnThrottle(
+    nowMs: () => _now,
+    windowMs: _warnThrottleWindowMs,
+  );
+
+  /// كبح تحذير حالة الرفض غير الصالحة من المعالج: قيمة خارج 400..499
+  /// تُتجاهل والسلوك الافتراضي يبقى، والسطر يُقال مرة في الثانية على
+  /// الأكثر كي لا يغرق سجل المضيف معالجٌ معطوب.
+  late final _WarnThrottle _refusalStatusWarnThrottle = _WarnThrottle(
     nowMs: () => _now,
     windowMs: _warnThrottleWindowMs,
   );
@@ -1499,18 +1558,21 @@ class LocalIntakeServer {
 
           // بوابة نوع المحتوى بعد القبول حصرا: الغريب لا يرى 415 قبل أن
           // ترفضه سياسة الأصول فلا يتسرب شكل السياسة — النموذج المخفي
-          // في الصفحات يرسل أنواع النماذج فيُرد قبل قراءة أي بايت
+          // في الصفحات يرسل أنواع النماذج فيُرد قبل قراءة أي بايت.
+          // نوع الجسم الثنائي يدخل المسموحات بذات البوابة والخيار مسلّح
+          // حصرا: مطفأً يبقى 415 كما كان حرفاً.
           final rawContentType = _firstHeader(
             request,
             HttpHeaders.contentTypeHeader,
           );
+          String? mediaType;
           if (rawContentType != null && rawContentType.trim().isNotEmpty) {
-            final mediaType = rawContentType
-                .split(';')
-                .first
-                .trim()
-                .toLowerCase();
-            if (!config.allowedContentTypes.contains(mediaType)) {
+            mediaType = rawContentType.split(';').first.trim().toLowerCase();
+            final typeAdmitted =
+                config.allowedContentTypes.contains(mediaType) ||
+                (config.acceptBinaryBodies &&
+                    mediaType == 'application/octet-stream');
+            if (!typeAdmitted) {
               // قطع بعد الرد كما في بقية الرفوض المبكرة: الجسم غير مقروء
               // والإغلاق المُدار فوقه يعلق أو يهدم — المقبس الخام يرد ثم يقطع.
               await _replyRejection(
@@ -1524,12 +1586,19 @@ class LocalIntakeServer {
               return;
             }
           }
+          // مسار الجسم الثنائي: الخيار مسلّح والنوع المعلن ثنائي حصرا
+          final isBinaryBody =
+              config.acceptBinaryBodies &&
+              mediaType == 'application/octet-stream';
 
           // رفض مبكر من Content-Length: `>` حصراً وبشرط غياب
-          // الترميز المقطوع — الجسم الكاذب الواعد يظل محروساً بالعدّاد أدناه
+          // الترميز المقطوع — الجسم الكاذب الواعد يظل محروساً بالعدّاد أدناه.
+          // السقف الثنائي الأضيق يفحص أولا للطلب الثنائي: الرد باسم سقفه
+          // هو الحكم الأول فوقه
           final te = _firstHeader(request, HttpHeaders.transferEncodingHeader);
           final cl = request.contentLength;
-          if ((te == null || te.isEmpty) && cl > config.maxBodyBytes) {
+          final declaredLength = (te == null || te.isEmpty);
+          if (declaredLength && cl > config.maxBodyBytes) {
             await _replyRejection(
               response,
               code: 'payload_too_large',
@@ -1538,59 +1607,147 @@ class LocalIntakeServer {
             );
             return;
           }
+          if (isBinaryBody && declaredLength && cl > _maxBinaryBodyBytes) {
+            await _replyRejection(
+              response,
+              code: 'payload_too_large',
+              message:
+                  'Binary request body exceeds the internal binary cap '
+                  '($_binaryCapLabel)',
+              bodyFullyRead: false,
+            );
+            return;
+          }
           // قراءة الجسم بحدوده: عدّاد بايتات تراكمي يقطع بـ413 عند
           // التجاوز (لا اقتطاع صامت يفك UTF-8 ناقصا) ومهلة تحرس الطلب
           // المعلق، ثم فك UTF-8 واحد بعد حسم الحجم — بناء سلسلة الجسم
           // كاملة قبل الحسم يفتح باب الضخّم بعدها (trim + jsonDecode +
-          // toString) فيتضاعف استهلاك الذاكرة بلا حارس تطبيقي
-          final outcome = await _readBody(request);
+          // toString) فيتضاعف استهلاك الذاكرة بلا حارس تطبيقي. المسار
+          // الثنائي يقرأ بايتات خاما بلا أي فك نص
+          final outcome = await _readBody(request, binary: isBinaryBody);
           if (outcome.error != null) {
             await _replyBodyError(response, outcome.error!);
             return;
           }
-          final body = outcome.body!;
-          if (!_jsonShapeWithinLimits(
-            body,
-            config.maxJsonElements,
-            config.maxJsonDepth,
-          )) {
-            await _replyRejection(
-              response,
-              code: 'payload_too_complex',
-              message:
-                  'Request body has too many JSON elements or is '
-                  'nested too deeply (over ${config.maxJsonElements} '
-                  'elements or ${config.maxJsonDepth} deep) — send fewer, '
-                  'shallower elements',
-              bodyFullyRead: true,
-            );
-            return;
-          }
           final List<String> payloads;
-          try {
-            payloads = _extractPayloads(body);
-          } on _UnsupportedPayloadShapeException {
-            // رفض شكل الحمولة يقطع الاتصال بعد الرد — الجسم مقروء كاملا
-            // فالإغلاق المُدار نظيف وحسم الاتصال معه فلا يبقى مقبول رفضا
-            // مع اتصال حي.
-            await _replyRejection(
-              response,
-              code: 'unsupported_payload_shape',
-              message:
-                  'JSON body has a known-but-unsupported '
-                  'shape (object without known command keys)',
-              bodyFullyRead: true,
-            );
-            return;
-          }
-          if (payloads.isEmpty) {
-            await _replyRejection(
-              response,
-              code: 'empty_payload',
-              message: 'No valid command payload found in the request',
-              bodyFullyRead: true,
-            );
-            return;
+          final Uint8List? binaryBytes;
+          if (isBinaryBody) {
+            // الجسم الثنائي: البايتات تسلَّم كما وصلت — لا فك JSON ولا
+            // فك UTF-8 ولا بوابات الحمولة النصية، وسقفه الداخلي حسمه
+            // هنا (عداد القراءة يقطع أولا عند التجاوز أثناء الوصول)
+            binaryBytes = outcome.binary!;
+            payloads = const [];
+            if (binaryBytes.length > _maxBinaryBodyBytes) {
+              await _replyRejection(
+                response,
+                code: 'payload_too_large',
+                message:
+                    'Binary request body exceeds the internal binary cap '
+                    '($_binaryCapLabel)',
+                bodyFullyRead: true,
+              );
+              return;
+            }
+          } else {
+            binaryBytes = null;
+            final body = outcome.body!;
+            if (!_jsonShapeWithinLimits(
+              body,
+              config.maxJsonElements,
+              config.maxJsonDepth,
+            )) {
+              await _replyRejection(
+                response,
+                code: 'payload_too_complex',
+                message:
+                    'Request body has too many JSON elements or is '
+                    'nested too deeply (over ${config.maxJsonElements} '
+                    'elements or ${config.maxJsonDepth} deep) — send fewer, '
+                    'shallower elements',
+                bodyFullyRead: true,
+              );
+              return;
+            }
+            // فحص الشكل (خيار): جسم يعاهده شكل حاوية ولا يكتمل بنيا —
+            // فتحة بلا غالق أو سلسلة بلا نهاية — يُرد قبل الفك لا يسقط
+            // خاماً. المطفأ يمر للسلوك القائم حرفاً
+            if (config.requireValidJsonShape && !_jsonShapeComplete(body)) {
+              await _replyRejection(
+                response,
+                code: 'malformed_json_shape',
+                message:
+                    'Request body claims a JSON container shape but is not '
+                    'structurally complete (an unclosed bracket or string) '
+                    '— send the whole JSON document',
+                bodyFullyRead: true,
+              );
+              return;
+            }
+            try {
+              payloads = _extractPayloads(
+                body,
+                declaredJson: mediaType == 'application/json',
+              );
+            } on _UnsupportedPayloadShapeException {
+              // رفض شكل الحمولة يقطع الاتصال بعد الرد — الجسم مقروء كاملا
+              // فالإغلاق المُدار نظيف وحسم الاتصال معه فلا يبقى مقبول رفضا
+              // مع اتصال حي.
+              await _replyRejection(
+                response,
+                code: 'unsupported_payload_shape',
+                message:
+                    'JSON body has a known-but-unsupported '
+                    'shape (object without known command keys)',
+                bodyFullyRead: true,
+              );
+              return;
+            } on _StrictPayloadItemException {
+              // العناصر الصارمة: عنصر غير نصي أو فارغ في قائمة الأوامر
+              // يرفض الطلب كله بدل السقوط الصامت — الجسم مقروء فالإغلاق
+              // المُدار نظيف
+              await _replyRejection(
+                response,
+                code: 'invalid_payload_item',
+                message:
+                    'Command list carries a non-string or empty element '
+                    '(strict item checking is on)',
+                bodyFullyRead: true,
+              );
+              return;
+            } on _InvalidJsonException {
+              // النوع المعلن application/json والجسم مكسور: عقد النوع
+              // المصرَّح يُحمَل على مرسله بدل مساره الخام
+              await _replyRejection(
+                response,
+                code: 'invalid_json',
+                message:
+                    'Request body was sent as application/json but is not '
+                    'valid JSON',
+                bodyFullyRead: true,
+              );
+              return;
+            } on _NonJsonBodyException {
+              // وضع JSON فقط: كل مسار النص الخام مرفوض — فك مكسور بنوع
+              // آخر، أو رقم/منطقي/null، أو نص خام مجرد
+              await _replyRejection(
+                response,
+                code: 'non_json_body',
+                message:
+                    'This server accepts JSON bodies only — send the '
+                    'command as JSON',
+                bodyFullyRead: true,
+              );
+              return;
+            }
+            if (payloads.isEmpty) {
+              await _replyRejection(
+                response,
+                code: 'empty_payload',
+                message: 'No valid command payload found in the request',
+                bodyFullyRead: true,
+              );
+              return;
+            }
           }
 
           final source = _firstHeader(request, 'Origin') ?? 'unknown-origin';
@@ -1642,6 +1799,7 @@ class LocalIntakeServer {
               correlationId: correlationId,
               admission: admission,
               cancellation: cancelSignal,
+              binaryPayload: binaryBytes,
             ),
           );
           unawaited(
@@ -1721,16 +1879,44 @@ class LocalIntakeServer {
             );
             return;
           }
+          // نص المضيف تحت سقفه (خيار): فوق الحد يُقصّ إلى حدّه حصرا —
+          // الرمز وشكل الرد لا يمسّهما القص، والمطفأ يمرر النص كله
+          var hostMessage = result.errorMessage ?? 'Command execution failed';
+          final messageCap = config.maxErrorMessageLength;
+          if (messageCap > 0 && hostMessage.length > messageCap) {
+            hostMessage = hostMessage.substring(0, messageCap);
+          }
+          // حالة الرفض المعلّمة من المعالج (خيار): داخل 400..499 تصل
+          // السلك بدل الـ500 الافتراضي، وخارجها تُتجاهل بتحذير مكبوح —
+          // والمطفأ يجعل العلامة كلها خاملة فيبقى 500 كما كان حرفاً
+          var outcomeStatus = result.ok
+              ? HttpStatus.ok
+              : HttpStatus.internalServerError;
+          final markedRefusal = config.acceptHandlerRefusal
+              ? result.refusalStatus
+              : null;
+          if (!result.ok && markedRefusal != null) {
+            if (markedRefusal >= 400 && markedRefusal <= 499) {
+              outcomeStatus = markedRefusal;
+            } else {
+              final line = _refusalStatusWarnThrottle.admit(
+                'handler refusal status $markedRefusal is outside '
+                '400..499 — ignored, the failure answers 500',
+              );
+              if (line != null) {
+                telemetry.warn(line, category: BridgeCategory.network);
+              }
+            }
+          }
           await _reply(
             response,
-            status: result.ok ? HttpStatus.ok : HttpStatus.internalServerError,
+            status: outcomeStatus,
             json: {
               'ok': result.ok,
               if (!result.ok)
                 'error': result.errorCode ?? config.fallbackErrorCode,
               // نص المضيف للمعتمدين حصرا — الرمز عقد الجميع
-              if (!result.ok && verboseErrors)
-                'message': result.errorMessage ?? 'Command execution failed',
+              if (!result.ok && verboseErrors) 'message': hostMessage,
               // بيانات المضيف للصفحة: فوق السقف رُفض الرد كله أعلاه
               'data': ?pageData,
             },
@@ -1822,7 +2008,19 @@ class LocalIntakeServer {
   /// An unknown error is rethrown: a socket failure mid-body is not a wire
   /// shape, and it belongs to the safety net.
   Future<void> _replyBodyError(HttpResponse response, Object error) async {
-    if (error is _BodyTooLargeException) {
+    if (error is _BinaryBodyTooLargeException) {
+      // سقف الجسم الثنائي الداخلي: نفس عائلة 413 والرد أولاً على
+      // المقبس المنتزع كما أخوته، والرسالة تسمي السقف الثنائي لا
+      // سقف البايتات العام — كلٌّ يقرأ سقفه الصادق
+      await _replyRejection(
+        response,
+        code: 'payload_too_large',
+        message:
+            'Binary request body exceeds the internal binary cap '
+            '($_binaryCapLabel)',
+        bodyFullyRead: false,
+      );
+    } else if (error is _BodyTooLargeException) {
       // الرفض سُلّم لحظة تجاوز السقف، والرد الآن على مسار «الرد
       // أولاً» نفسه الذي تسلكه بوابات ما قبل الجسم: يُكتب على
       // المقبس المنتزع ويُغسل ويُغلق جهة الكتابة، والبقية تُفرَّغ
@@ -1971,7 +2169,15 @@ class LocalIntakeServer {
   /// precedes every drain byte, and no path cuts before the reply is on
   /// the wire; only a sender that never reads the reply keeps the
   /// documented loss window of the README's honest exceptions.
-  Future<_BodyOutcome> _readBody(HttpRequest request) async {
+  ///
+  /// [binary] reads raw bytes: no UTF-8 decode ever runs (a binary file is
+  /// not text - an image or PDF carries bytes no decoder may touch), the
+  /// completion settles with the bytes whole, and the counter cuts at the
+  /// internal binary ceiling with the binary-cap 413.
+  Future<_BodyOutcome> _readBody(
+    HttpRequest request, {
+    bool binary = false,
+  }) async {
     // copy:false: لا نسخة عند add — النسخة الوحيدة عند
     // takeBytes؛ ومخازن مقاطس dart:io طازجة لكل حدث فلا مشاركة
     final builder = BytesBuilder(copy: false);
@@ -1986,14 +2192,18 @@ class LocalIntakeServer {
     Timer? deadlineTimer;
     var settled = false;
 
-    void settle(Object? error, [String? body]) {
+    void settle(Object? error, [Object? body]) {
       if (settled) return;
       // كل حسم يلغي مؤقت الموعد — التفريغ بعده يملك مؤقته الخاص
       deadlineTimer?.cancel();
       deadlineTimer = null;
       if (error == null) {
         settled = true;
-        done.complete(_BodyOutcome.ok(body!));
+        done.complete(
+          body is Uint8List
+              ? _BodyOutcome.bytes(body)
+              : _BodyOutcome.text(body! as String),
+        );
         return;
       }
       // الرفض يحرر المخزن في الحال — لا ينتظر خروج النطاق. وكل الرفوض
@@ -2035,6 +2245,9 @@ class LocalIntakeServer {
             builder.add(chunk);
             if (builder.length > config.maxBodyBytes) {
               settle(const _BodyTooLargeException());
+            } else if (binary && builder.length > _maxBinaryBodyBytes) {
+              // سقف الثنائي الأضيق: يقطع لحظة تجاوزه برسالة سقفه هو
+              settle(const _BinaryBodyTooLargeException());
             }
           },
           onDone: () {
@@ -2050,7 +2263,12 @@ class LocalIntakeServer {
               return;
             }
             try {
-              settle(null, utf8.decode(builder.takeBytes()));
+              // المسار الثنائي: البايتات كما هي بلا أي فك نص — ملف صورة
+              // أو PDF يحمل بايتات لا يمسّها مفكك
+              settle(
+                null,
+                binary ? builder.takeBytes() : utf8.decode(builder.takeBytes()),
+              );
             } on FormatException catch (e) {
               settle(e);
             }
@@ -2358,6 +2576,49 @@ class LocalIntakeServer {
     return true;
   }
 
+  /// Structural completeness for container-shaped bodies - the shape-check
+  /// option's scanner. Same leading-shape rule as the complexity scan
+  /// above: a body not starting with `{` or `[` is raw-text territory and
+  /// always complete (never scanned). A container that ends with an opener
+  /// still unclosed, or inside a string never terminated, cannot decode
+  /// and the option refuses it before jsonDecode runs - instead of the
+  /// default raw fallthrough. Gross truncation only: a body that scans
+  /// complete but still fails decoding stays on the ordinary paths (the
+  /// declared-type and JSON-only options own those).
+  bool _jsonShapeComplete(String body) {
+    var i = 0;
+    final n = body.length;
+    while (i < n &&
+        (body[i] == ' ' ||
+            body[i] == '\t' ||
+            body[i] == '\n' ||
+            body[i] == '\r')) {
+      i++;
+    }
+    if (i >= n || (body[i] != '{' && body[i] != '[')) return true;
+    var inString = false;
+    var depth = 0;
+    for (; i < n; i++) {
+      final c = body[i];
+      if (inString) {
+        if (c == r'\') {
+          i++;
+        } else if (c == '"') {
+          inString = false;
+        }
+        continue;
+      }
+      if (c == '"') {
+        inString = true;
+      } else if (c == '{' || c == '[') {
+        depth++;
+      } else if (c == '}' || c == ']') {
+        depth--;
+      }
+    }
+    return !inString && depth == 0;
+  }
+
   /// Any non-loopback entry in extraHosts (a public DNS name, a
   /// private-network address like 192.168.x.x or fe80::1, or a bare
   /// dotless name like `printer`) is the host's explicit opt-out of the
@@ -2398,11 +2659,29 @@ class LocalIntakeServer {
   ///
   /// The JSON path (the common one) with no extra full-body copy: jsonDecode
   /// already tolerates surrounding whitespace so no trim precedes it, and
-  /// non-string elements are skipped instead of a toString on any type met.
-  List<String> _extractPayloads(String body) {
+  /// non-string elements are skipped instead of a toString on any type met -
+  /// unless the strict-items option is on, when the first non-string or
+  /// empty element raises the strict reject instead of the silent drop.
+  ///
+  /// [declaredJson] tells whether the sender declared `application/json`:
+  /// a decoding failure under that declared type raises the invalid-json
+  /// reject when its option is on. The raw-text fallback (a decode failure
+  /// under any other type, or a JSON number, boolean, or null body)
+  /// raises the non-json-body reject when the JSON-only option is on -
+  /// otherwise it stays the standing raw-text delivery.
+  List<String> _extractPayloads(String body, {required bool declaredJson}) {
     try {
       final decoded = jsonDecode(body);
       if (decoded is List) {
+        // العناصر الصارمة: أول عنصر غير نصي أو فارغ يرفع الرفض بدل
+        // سقوطه صامتا — المطفأ يبقي السلوك القائم حرفاً
+        if (config.strictPayloadItems) {
+          for (final e in decoded) {
+            if (e is! String || e.isEmpty) {
+              throw const _StrictPayloadItemException();
+            }
+          }
+        }
         return [
           for (final e in decoded)
             if (e is String && e.isNotEmpty) e,
@@ -2430,6 +2709,14 @@ class LocalIntakeServer {
         for (final key in config.payloadWrapperKeys) {
           final value = decoded[key];
           if (value is List) {
+            // القاعدة الصارمة نفسها على قوائم الغلاف
+            if (config.strictPayloadItems) {
+              for (final e in value) {
+                if (e is! String || e.isEmpty) {
+                  throw const _StrictPayloadItemException();
+                }
+              }
+            }
             return [
               for (final e in value)
                 if (e is String && e.isNotEmpty) e,
@@ -2444,8 +2731,22 @@ class LocalIntakeServer {
       // رقم أو منطقي أو null: أمر خام مطابقة نصية — استمر للخام
     } on _UnsupportedPayloadShapeException {
       rethrow;
+    } on _StrictPayloadItemException {
+      rethrow;
+    } on FormatException {
+      // فك مكسور: النوع المعلن application/json يحمل عقد فك صادقا
+      // فخياره يرفض هنا — وغيره يسقط للمسار الخام أدناه حيث يملك
+      // وضع JSON فقط حكمه
+      if (config.rejectInvalidJson && declaredJson) {
+        throw const _InvalidJsonException();
+      }
     } catch (_) {
       // ليس JSON — نص خام مباشر
+    }
+    // مسار النص الخام: وضع JSON فقط يرفضه كله (فك مكسور بنوع آخر،
+    // أو رقم/منطقي/null، أو نص خام مجرد) — والمطفأ يسلّمه كما كان
+    if (config.requireJsonBodies) {
+      throw const _NonJsonBodyException();
     }
     // مسار النص الخام وحده يُقلَّص (توافق السلوك القديم للبوابات التي
     // ترسل لغات أوامر نصية، وغالبا بأسطر ختامية)
@@ -2457,6 +2758,10 @@ class LocalIntakeServer {
     return {
       'origin': _firstHeader(request, 'Origin') ?? '',
       'user-agent': _firstHeader(request, HttpHeaders.userAgentHeader) ?? '',
+      // اسم الأمر للتسليم الثنائي: يمر مع الخيار مسلّحا حصرا — المطفأ
+      // يبقي خريطة الترويسات حرفاً كما هي بلا مفتاح جديد
+      if (config.acceptBinaryBodies)
+        'x-command': _firstHeader(request, 'X-Command') ?? '',
     };
   }
 
@@ -2526,19 +2831,26 @@ class LocalIntakeServer {
   /// Vary - the disallowed get no ACAO at all, so the browser blocks reading
   /// (echoing to everyone equaled '*'); Max-Age trims https-portal preflights.
   /// The allowed-header list extends with the pairing proof header only
-  /// while the pairing layer is armed - the disarmed wire is letter
-  /// identical to previous releases.
+  /// while the pairing layer is armed, and with the binary command-name
+  /// header only while the binary-body option is on - the disarmed wire is
+  /// letter identical to previous releases.
   void _corsHeaders(HttpResponse response) {
     // البوابات صفحات https تتصل بـ http محلي — CORS صريح إلزامي.
     // الصدى (ACAO) يقرر لاحقا بعد حسم القبول أو عند الpreflight — لا
     // هنا: رفض قابل القراءة يعطي المهاجم قناة استطلاع
     response.headers.set('Access-Control-Allow-Methods', 'POST, OPTIONS');
+    // ترويسة اسم الأمر للجسم الثنائي تدخل القائمة مع الخيار مسلّحا حصرا
+    // — المطفأ يبقي القائمة حرفاً كما هي
+    final allowedHeaders = <String>[
+      'Content-Type',
+      'X-Bridge-Token',
+      'X-Correlation-Id',
+      if (protection.pairingEnabled) 'X-Bridge-Pairing',
+      if (config.acceptBinaryBodies) 'X-Command',
+    ];
     response.headers.set(
       'Access-Control-Allow-Headers',
-      protection.pairingEnabled
-          ? 'Content-Type, X-Bridge-Token, X-Correlation-Id, '
-                'X-Bridge-Pairing'
-          : 'Content-Type, X-Bridge-Token, X-Correlation-Id',
+      allowedHeaders.join(', '),
     );
     response.headers.contentType = ContentType.json;
   }

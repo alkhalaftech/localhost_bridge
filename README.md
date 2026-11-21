@@ -347,7 +347,8 @@ JSON everywhere: `POST` with `Origin`; responses carry `X-Correlation-Id` (yours
 
 The `Access-Control-Allow-Headers` list is fixed — `Content-Type`,
 `X-Bridge-Token`, `X-Correlation-Id` (plus `X-Bridge-Pairing` only while
-pairing is armed) — so the page must not send any
+pairing is armed, and `X-Command` only while the binary-body option
+`BridgeConfig.acceptBinaryBodies` is on) — so the page must not send any
 other header: the preflight answer will not allow it. Commands are sent
 to `/`: every path reaches the handler, and non-root
 POSTs just warn the host — so keep sending commands to `/` (with
@@ -362,6 +363,7 @@ Stable error codes:
 | 400 | `duplicate_header` / `origin_too_long` | A single-valued header was sent twice / an `Origin` header over the package's internal length cap (1,024 characters), refused before any processing. |
 | 400 | `origin_malformed` / `token_too_long` / `pairing_too_long` / `bad_request` | An `Origin` header that is not `scheme://host[:port]` / an `X-Bridge-Token` header over the internal byte cap (1,024 bytes) / an `X-Bridge-Pairing` header over the internal byte cap (256 bytes, pairing armed only) / the HTTP parser rejected the request framing — all refused before your handler runs. |
 | 400 | `invalid_utf8` / `empty_payload` / `unsupported_payload_shape` | Body not UTF-8 / no valid command payload / JSON object without any of the known command keys. A body that fails JSON decoding altogether is **not** a 400 — it falls through as a raw text command (the tested non-JSON contract); a JSON number, boolean, or `null` body takes the same raw path. Inside a JSON array, non-string and empty-string elements drop without notice. |
+| 400 | `invalid_payload_item` / `malformed_json_shape` / `invalid_json` / `non_json_body` | The payload-contract options — each **off by default**, so the default wire never answers these: `strictPayloadItems` refuses a JSON list carrying a non-string or empty element (the default drops it silently) / `requireValidJsonShape` refuses a container-shaped body that scans structurally incomplete — an unclosed bracket or string (the default falls through as raw text) / `rejectInvalidJson` refuses a body sent as `application/json` that fails JSON decoding / `requireJsonBodies` (JSON-only mode) refuses the raw-text path whole — raw command text and scalar JSON bodies alike. All four answer before your handler runs. |
 | 405 | `method_not_allowed` | Only `POST` (and `OPTIONS` preflight) are accepted. |
 | 403 | `origin_not_listed` / `origin_declined` / `origin_unknown` / `origin_blocked` / `origin_pending` | Origin policy rejection (not listed / consent declined / not confirmable / allow-all hardening / consent window open — retry after `Retry-After`). |
 | 403 | `token_required` | The origin qualified, but `OriginPolicy.requireOriginWithToken` is on and the request carried no valid token (the shared token, or a paired origin-bound signature) — the readable refusal a paired page retries from. |
@@ -371,18 +373,23 @@ Stable error codes:
 | 403 | `blocked_by_protection` | Host-authority rejection (DNS-rebinding defense). |
 | 408 | `request_timeout` | Body did not arrive in time. |
 | 413 | `payload_too_large` / `payload_too_complex` / `reply_data_too_large` | Body over the byte cap (default 1 MiB) / JSON body over the element cap (default 10,000 structural elements, counted before parsing) / the command succeeded but its `CommandOutcome.data` is over the internal page cap (64 KiB after JSON encoding) - the whole result is refused, never truncated, and the command stays executed. |
-| 415 | `unsupported_media_type` | POST body carries a `Content-Type` outside `BridgeConfig.allowedContentTypes` (default `application/json` and `text/plain`, which covers JSON clients and textual gateways; an absent header passes for raw-socket integrations). Hidden-HTML-form types (`application/x-www-form-urlencoded`, `multipart/form-data`) are refused. Checked after intake admission, so an untrusted origin still sees its origin rejection. Note: `text/plain` itself is a valid HTML form enctype, so it passes this gate — the browser-facing form defense is the fetch-mode hardening (`cross_site_blocked`), with `OriginPolicy.requireFetchMetadata` extending it to headerless requests. |
+| 415 | `unsupported_media_type` | POST body carries a `Content-Type` outside `BridgeConfig.allowedContentTypes` (default `application/json` and `text/plain`, which covers JSON clients and textual gateways; an absent header passes for raw-socket integrations). Hidden-HTML-form types (`application/x-www-form-urlencoded`, `multipart/form-data`) are refused. Checked after intake admission, so an untrusted origin still sees its origin rejection. Note: `text/plain` itself is a valid HTML form enctype, so it passes this gate — the browser-facing form defense is the fetch-mode hardening (`cross_site_blocked`), with `OriginPolicy.requireFetchMetadata` extending it to headerless requests. With `BridgeConfig.acceptBinaryBodies` on, `application/octet-stream` joins the admitted types: the raw bytes reach your handler as `TrustedCommand.binaryPayload` (`payloads` stays empty; the command name rides the `X-Command` header into `TrustedCommand.headers`) under the package's internal binary ceiling — a fixed 256 KiB constant, deliberately not an option; a binary body over it answers `413 payload_too_large` naming the binary cap. |
 | 429 | `origin_rate_limited` / `token_locked` | Per-origin budget exhausted / too many **wrong** token attempts in the last 60 seconds from this origin — the wrong-guess budget is 5 attempts per window (originless attempts share one window). The budget is a signal about wrong guesses, never a refusal of the verified sender: the correct token is compared and accepted whatever the failure history, and a match clears the window. |
 | 429 | `pair_budget_exceeded` | On `POST /pair` (pairing armed): five wrong code attempts per pairing session have been absorbed — the honest `Retry-After` carries the remaining life of the displayed session. The budget is per session, never per origin. |
 | 503 | `server_busy` / `origin_seat_limit` / `protection_disposed` | Concurrency seats full (seats plus timed-out handlers still running are one live-work budget) / one origin holds its full seat share while the server still has room (see `BridgeConfig.maxSeatsPerOrigin`) / the protection object was disposed — create a new one. |
 | 504 | `handler_timeout` | Your handler exceeded `handlerTimeout`; the seat is freed and the late result ignored. **The command may still have run** — treat 504 as "outcome unknown", not "not executed": a blind retry can double-execute. Deduplicate on `X-Correlation-Id` before retrying — the page sends its own id and the bridge echoes it back unchanged on a retry; a server-generated id is not one you can settle on when a reply is lost. |
-| 500 | `internal` / your code / `command_failed` | Handler failure; `command_failed` is the fallback code when your handler fails without one (set `BridgeConfig.fallbackErrorCode` to keep an existing wire contract). Host error *text* is echoed only to trusted origins; everyone gets the code. |
+| 500 | `internal` / your code / `command_failed` | Handler failure; `command_failed` is the fallback code when your handler fails without one (set `BridgeConfig.fallbackErrorCode` to keep an existing wire contract). A failed outcome carrying `CommandOutcome.refusalStatus` (400..499) answers with that client-error status instead, only while `BridgeConfig.acceptHandlerRefusal` is on — the default stays `500`, and a marker outside 400..499 is ignored. Host error *text* is echoed only to trusted origins; everyone gets the code; `BridgeConfig.maxErrorMessageLength` (0 = off) caps that text on the wire in characters when set. |
 
 Bodies arrive as an array of strings, a bare string, or
 `{"data": [...]}` / `{"payload": ...}` / `{"commands": [...]}` wrappers
 (`BridgeConfig.payloadWrapperKeys` — add your domain's key there if your
-gateways use one). Compressed payloads are delivered as-is —
-decompression is the host's responsibility, by design.
+gateways use one). Inside a list, non-string and empty-string elements
+drop without notice by default — `BridgeConfig.strictPayloadItems`
+refuses the request instead. A body that fails JSON decoding falls
+through as raw command text by default — `BridgeConfig.rejectInvalidJson`
+(scoped to `application/json` senders) and `BridgeConfig.requireJsonBodies`
+(JSON-only mode) refuse those paths instead. Compressed payloads are
+delivered as-is — decompression is the host's responsibility, by design.
 
 ## Page-side reference (JavaScript)
 

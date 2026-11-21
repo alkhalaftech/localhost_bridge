@@ -284,7 +284,9 @@ JSON في كل مكان: `POST` مع `Origin`، والردود تحمل `X-Corre
 معرفك يُردّ إليك إن طابق `[A-Za-z0-9._-]` وكان طوله 128 حرفاً فأقل؛ وما
 عداه يُستبدل بمعرف مولَّد.
 قائمة `Access-Control-Allow-Headers` ثابتة: `Content-Type`
-و`X-Bridge-Token` و`X-Correlation-Id` — فلا ترسل صفحتك ترويسة أخرى:
+و`X-Bridge-Token` و`X-Correlation-Id` — يُضاف إليها `X-Bridge-Pairing`
+مع تسليح الاقتران فقط، و`X-Command` مع تشغيل خيار الجسم الثنائي
+`BridgeConfig.acceptBinaryBodies` فقط — فلا ترسل صفحتك ترويسة أخرى:
 جواب الفحص المسبق لن يسمح بها. الأوامر تُرسل إلى `/`: في هذا الإصدار كل
 مسار آخر يبلغ المعالج أيضاً — والمضيف يُنبَّه عن POST في غير الجذر —
 فأرسل أوامرك إلى `/`.
@@ -296,6 +298,7 @@ JSON في كل مكان: `POST` مع `Origin`، والردود تحمل `X-Corre
 | 400 | `duplicate_header` / `origin_too_long` | ترويسة أحادية أُرسلت مرتين / ترويسة `Origin` أطول من السقف الداخلي للحزمة (1,024 محرفاً)، تُرد قبل أي معالجة. |
 | 400 | `origin_malformed` / `token_too_long` / `pairing_too_long` / `bad_request` | ترويسة `Origin` ليست بالشكل `scheme://host[:port]` / ترويسة `X-Bridge-Token` فوق السقف الداخلي (1,024 بايتاً) / ترويسة `X-Bridge-Pairing` فوق السقف الداخلي (256 بايتاً، عند تسليح الاقتران فقط) / محلل HTTP رفض تأطير الطلب — كلها تُرد قبل وصول معالجك. |
 | 400 | `invalid_utf8` / `empty_payload` / `unsupported_payload_shape` | الجسم ليس UTF-8 / لا حمولة صالحة / كائن JSON بلا مفاتيح أوامر معروفة. الجسم الذي يفشل فك JSON كلياً **ليس** 400 — يسقط نصاً خاماً كأمر (عقد «غير JSON يبقى خاماً» المختبَر)؛ والرقم والمنطقي و`null` يسلكون المسار الخام نفسه؛ وداخل مصفوفة JSON تسقط العناصر غير النصية والفارغة بلا إشعار. |
+| 400 | `invalid_payload_item` / `malformed_json_shape` / `invalid_json` / `non_json_body` | خيارات عقد الحمولة — كلٌّ **مطفأ افتراضياً** فالسلك الافتراضي لا يجيب بها أبداً: `strictPayloadItems` ترفض قائمة JSON تحمل عنصراً غير نصي أو فارغاً (الافتراضي يسقطه صامتاً) / `requireValidJsonShape` ترفض جسماً يشبه حاوية JSON وبنيته ناقصة — فتحة بلا غالق أو سلسلة بلا نهاية (الافتراضي يسقطه نصاً خاماً) / `rejectInvalidJson` ترفض جسماً أُرسل بنوع `application/json` وفشل فك JSON / `requireJsonBodies` (وضع JSON فقط) ترفض مسار النص الخام كله — النص الخام المجرد والأجسام القياسية (رقم/منطقي/null) معاً. الأربعة تجيب قبل وصول معالجك. |
 | 405 | `method_not_allowed` | المقبول `POST` (و`OPTIONS` للفحص المسبق) حصراً. |
 | 403 | `origin_not_listed` / `origin_declined` / `origin_unknown` / `origin_blocked` / `origin_pending` | رفض سياسة الأصول (غير مدرج / موافقة مرفوضة / غير قابل للتأكيد / تحصين الكل / نافذة موافقة مفتوحة — أعِد بعد `Retry-After`). |
 | 403 | `token_required` | الأصل تأهل لكن `OriginPolicy.requireOriginWithToken` مفعّل والطلب بلا توكن صالح (التوكن المشترك أو توقيع اقتران مربوط بالأصل) — الرفض المقروء الذي تعيد الصفحة المقترنة من بعده. |
@@ -305,16 +308,20 @@ JSON في كل مكان: `POST` مع `Origin`، والردود تحمل `X-Corre
 | 403 | `blocked_by_protection` | رفض سلطات المضيف (دفاع إعادة ربط DNS). |
 | 408 | `request_timeout` | الجسم لم يصل في وقته. |
 | 413 | `payload_too_large` / `payload_too_complex` / `reply_data_too_large` | الجسم تجاوز سقف البايتات (الافتراضي 1MiB) / جسم JSON تجاوز سقف العناصر (الافتراضي 10,000 عنصر بنيوي، يُعدّ قبل الفك) / الأمر نجح لكن بيانات `CommandOutcome.data` فوق السقف الداخلي للصفحة (64KiB بعد ترميز JSON) — النتيجة كلها تُرفض بلا قصّ، والأمر يبقى منفذاً. |
-| 415 | `unsupported_media_type` | جسم POST يحمل `Content-Type` خارج `BridgeConfig.allowedContentTypes` (الافتراضي `application/json` و`text/plain` — يغطي عملاء JSON والبوابات النصية؛ والغياب يمر لتكاملات المقابس الخام). أنواع نماذج HTML المخفية (`application/x-www-form-urlencoded` و`multipart/form-data`) تُرفض. الفحص بعد قبول المدخل، فمن ترفضه سياسة الأصل يرى رفض الأصل لا 415. انتبه: `text/plain` نفسه ترميزُ نماذج HTML صالح فيمر من هذه البوابة — صدُّ النماذج المتصفحية الفعلي بتحصين طريقة الإرسال (`cross_site_blocked`)، و`OriginPolicy.requireFetchMetadata` يمدّه للطلبات بلا الترويسات. |
+| 415 | `unsupported_media_type` | جسم POST يحمل `Content-Type` خارج `BridgeConfig.allowedContentTypes` (الافتراضي `application/json` و`text/plain` — يغطي عملاء JSON والبوابات النصية؛ والغياب يمر لتكاملات المقابس الخام). أنواع نماذج HTML المخفية (`application/x-www-form-urlencoded` و`multipart/form-data`) تُرفض. الفحص بعد قبول المدخل، فمن ترفضه سياسة الأصل يرى رفض الأصل لا 415. انتبه: `text/plain` نفسه ترميزُ نماذج HTML صالح فيمر من هذه البوابة — صدُّ النماذج المتصفحية الفعلي بتحصين طريقة الإرسال (`cross_site_blocked`)، و`OriginPolicy.requireFetchMetadata` يمدّه للطلبات بلا الترويسات. مع تشغيل `BridgeConfig.acceptBinaryBodies` يدخل `application/octet-stream` الأنواع المسموحة: بايتات الجسم الخام تصل معالجك في `TrustedCommand.binaryPayload` (قائمة `payloads` تبقى فارغة؛ واسم الأمر في ترويسة `X-Command` داخل `TrustedCommand.headers`) تحت السقف الداخلي للجسم الثنائي — ثابت 256KiB لا خيار؛ وفوقه يُرد `413 payload_too_large` باسم السقف الثنائي. |
 | 429 | `origin_rate_limited` / `token_locked` | نفاد حصة الأصل / محاولات توكن **خاطئة** كثيرة في آخر 60 ثانية من هذا الأصل — ميزانية التخمين الخاطئ 5 محاولات في النافذة (محاولات بلا أصل تشارك نافذة واحدة). والميزانية إشارةٌ عن التخمين الخاطئ لا رفضٌ للمرسل المتحقق منه: التوكن الصحيح يُقارن ويُقبَل أياً كان تاريخ الإخفاقات، والمطابقة تصفر النافذة. |
 | 429 | `pair_budget_exceeded` | على `POST /pair` (والاقتران مسلح): خمس محاولات رمز خاطئة لكل جلسة اقتران قد استُوعبت — و`Retry-After` الصادق يحمل بقايا عمر الجلسة المعروضة. الميزانية لكل جلسة لا لكل أصل. |
 | 503 | `server_busy` / `origin_seat_limit` / `protection_disposed` | المقاعد ممتلئة (المقاعد والمعالجات المتجاوزة مهلتها وما زالت تعمل ميزانية واحدة للعمل الحي) / أصل واحد يمسك حصته الكاملة من المقاعد والخادم ما زال فيه واسعاً (انظر `BridgeConfig.maxSeatsPerOrigin`) / كائن الحماية أُغلق — أنشئ جديداً. |
 | 504 | `handler_timeout` | معالجك تجاوز مهلته — **الأمر قد يكون نفّذ فعلاً**: عامل 504 كـ«نتيجة مجهولة» وفكّك التكرار بمعرف الارتباط قبل الإعادة — الصفحة ترسل معرفها بنفسها (`X-Correlation-Id`) ويعود كما هو عند الإعادة؛ أما المعرف الذي يولده الخادم فلا تسوية عليه إذا ضاع الرد. |
-| 500 | `internal` / رمزك / `command_failed` | فشل المعالج؛ `command_failed` هو الرمز الاحتياطي حين يفشل معالجك بلا رمز (`BridgeConfig.fallbackErrorCode` يثبّت عقدك القائم). نص الخطأ يُصدّى للموثوقين حصراً والرمز للجميع. |
+| 500 | `internal` / رمزك / `command_failed` | فشل المعالج؛ `command_failed` هو الرمز الاحتياطي حين يفشل معالجك بلا رمز (`BridgeConfig.fallbackErrorCode` يثبّت عقدك القائم). نتيجة فاشلة تحمل `CommandOutcome.refusalStatus` داخل 400..499 تجيب بحالتها (خطأ عميل) مع تشغيل `BridgeConfig.acceptHandlerRefusal` فقط — والافتراضي يبقى 500، والعلامة خارج المجال تُتجاهل. نص الخطأ يُصدّى للموثوقين حصراً والرمز للجميع؛ و`BridgeConfig.maxErrorMessageLength` (0 = مطفأ) يسقّ النص على السلك بعدد المحارف إن ضُبط. |
 
 الحمولات تصل مصفوفة نصوص أو نصاً واحداً أو أغلفة `{"data": [...]}` /
-`{"payload": ...}` / `{"commands": [...]}` (`BridgeConfig.payloadWrapperKeys` — أضف مفتاح مجالك هناك إن استعملته بواباتك) — والحمولات
-المضغوطة تمر كما هي: فك الضغط مسؤولية المضيف.
+`{"payload": ...}` / `{"commands": [...]}` (`BridgeConfig.payloadWrapperKeys` — أضف مفتاح مجالك هناك إن استعملته بواباتك). داخل القائمة تسقط
+العناصر غير النصية والفارغة بلا إشعار افتراضياً — و`BridgeConfig.strictPayloadItems` ترفض الطلب بدلاً من ذلك. والجسم الذي يفشل فك
+JSON يسقط نصاً خاماً كأمر افتراضياً — و`BridgeConfig.rejectInvalidJson`
+(على مرسلي `application/json` حصراً) و`BridgeConfig.requireJsonBodies`
+(وضع JSON فقط) ترفضان تلك المسارات بدلاً منه. والحمولات المضغوطة تمر
+كما هي: فك الضغط مسؤولية المضيف.
 
 ## دعم المتصفحات (آخر فحص: 2026-11)
 

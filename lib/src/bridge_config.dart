@@ -15,6 +15,13 @@ class BridgeConfig {
     this.maxOpenConnections = 0,
     this.maxJsonElements = 10_000,
     this.maxJsonDepth = 32,
+    this.strictPayloadItems = false,
+    this.requireValidJsonShape = false,
+    this.rejectInvalidJson = false,
+    this.requireJsonBodies = false,
+    this.acceptHandlerRefusal = false,
+    this.maxErrorMessageLength = 0,
+    this.acceptBinaryBodies = false,
     this.requestTimeout = const Duration(seconds: 30),
     this.idleTimeout = const Duration(seconds: 60),
     this.handlerTimeout = defaultHandlerTimeout,
@@ -88,6 +95,78 @@ class BridgeConfig {
   /// 32 is far beyond any real command shape, and over it the same
   /// `413 payload_too_complex` lands before jsonDecode runs.
   final int maxJsonDepth;
+
+  /// Strict list elements - when true, a JSON command list (top-level or
+  /// under a [payloadWrapperKeys] wrapper) carrying a non-string or
+  /// empty-string element refuses the whole request `400
+  /// invalid_payload_item` instead of the default silent drop of the
+  /// offending element. `false` (the default) keeps the silent-drop wire:
+  /// the strings of the list are delivered, the rest vanish without
+  /// notice.
+  final bool strictPayloadItems;
+
+  /// Pre-decode shape scan - when true, a body whose leading shape claims a
+  /// JSON container (it starts with `{` or `[`) must scan structurally
+  /// complete (every opener closed, every string terminated) or the request
+  /// answers `400 malformed_json_shape` before jsonDecode runs. `false`
+  /// (the default) keeps the raw fallthrough: a cut-off container decodes
+  /// badly and travels onward as raw command text. The scan is scoped to
+  /// container-shaped bodies only - a quote-leading raw text command is
+  /// never scanned, so textual gateways are untouched by this option.
+  final bool requireValidJsonShape;
+
+  /// Declared-type JSON strictness - when true, a body sent with the
+  /// `application/json` media type (the part before `;`) that fails JSON
+  /// decoding refuses `400 invalid_json` instead of the default raw-text
+  /// fallthrough. `false` (the default) keeps the tested non-JSON
+  /// contract: a broken body under any content type travels as raw
+  /// command text.
+  final bool rejectInvalidJson;
+
+  /// JSON-only mode - when true, the raw-text fallback path refuses
+  /// `400 non_json_body` whole: a body that fails JSON decoding under any
+  /// content type, and a JSON number, boolean, or `null` body (they arrive
+  /// as raw command text by the standing contract), are refused instead of
+  /// delivered. `false` (the default) keeps textual gateways working: raw
+  /// command text stays a valid delivery. A JSON string body (`"SIZE
+  /// 4mm"`) is still JSON and keeps its decoded delivery under the mode.
+  /// With [rejectInvalidJson] also true, a broken `application/json` body
+  /// reads `invalid_json` - the declared-type code is the specific one and
+  /// wins.
+  final bool requireJsonBodies;
+
+  /// Handler-marked refusals - when true, a failed [CommandOutcome]
+  /// carrying a [CommandOutcome.refusalStatus] inside 400..499 answers the
+  /// sender with that status instead of the standing `500`: the handler
+  /// knows the failure is the sender's doing (a malformed label, an
+  /// unknown device command) and says so on the wire. `false` (the
+  /// default) keeps the failure contract: every failed outcome answers
+  /// `500` with its error code, whatever the marker holds. A marker
+  /// outside 400..499 is ignored with one throttled warning - the default
+  /// stays `500` either way.
+  final bool acceptHandlerRefusal;
+
+  /// Host-message cap in characters - the standing failure reply echoes
+  /// [CommandOutcome.errorMessage] verbatim; a value above zero bounds
+  /// that text on the wire: a longer message is truncated to exactly this
+  /// many characters (the code and the `ok` shape are never touched). `0`
+  /// (the default) keeps the option off - messages travel whole. A
+  /// negative value throws [ArgumentError] at server construction.
+  final int maxErrorMessageLength;
+
+  /// Binary bodies - when true, `application/octet-stream` joins the
+  /// admitted media types and the raw bytes of such a body are delivered
+  /// to the handler as [TrustedCommand.binaryPayload] (payloads stay
+  /// empty - a binary body is never JSON-parsed), with the command name
+  /// riding the `X-Command` request header into
+  /// [TrustedCommand.headers] and joining the CORS allowed-header list
+  /// while the option is on. The bytes sit under the package's internal
+  /// binary ceiling - a fixed named constant, deliberately not an option;
+  /// a body over it refuses `413 payload_too_large`. `false` (the
+  /// default) keeps the media gate: `octet-stream` refuses `415
+  /// unsupported_media_type` and the allowed-header list never offers
+  /// `X-Command`.
+  final bool acceptBinaryBodies;
 
   /// Per-request timeout (anchored at request arrival, not server start).
   final Duration requestTimeout;
