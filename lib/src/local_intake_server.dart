@@ -979,6 +979,49 @@ class LocalIntakeServer {
     );
   }
 
+  /// Processes one request forwarded from the host's own `dart:io` HTTP
+  /// server, through the full standing protection - the same gates in the
+  /// same order as [start]'s private listener, and the same reply cutting:
+  /// every rejection is written to the detached socket, flushed, and the
+  /// connection is closed (or destroyed, for the documented immediate-cut
+  /// codes) exactly as the private server does. The host keeps its server
+  /// and its routing: only the requests the host forwards here reach the
+  /// bridge, so another route of the host server is never touched by it.
+  ///
+  /// [hostPort] is the port the host's server actually listens on (`its
+  /// `port` value) - the local host authorities are computed from it, so
+  /// the `Host` header of a forwarded request names that port and passes
+  /// the authority gate exactly as it would on the private server.
+  ///
+  /// The one added transport fact is the peer: a host server may be bound
+  /// to `0.0.0.0`, and the bridge must keep its loopback guarantee on its
+  /// own. Every forwarded request whose remote address is not loopback is
+  /// refused with the standing `403 blocked_by_protection` code before any
+  /// other gate - no new wire code is minted for it - counted and logged
+  /// through the same authority-reject path as the Host-authority
+  /// rejection, and cut over the detached socket. An IPv4-mapped IPv6 peer
+  /// (`::ffff:127.0.0.1`, what a dual-stack host bind delivers for an IPv4
+  /// loopback caller) counts as loopback: the mapping is unwrapped and the
+  /// v4 bytes are judged alone. An unreadable peer fact is treated as
+  /// not-loopback - the guard fails closed.
+  ///
+  /// The open-connection cap ([BridgeConfig.maxOpenConnections]) guards the
+  /// bridge's own listener and has no fact to read here - the host owns the
+  /// accept loop - so the seat budget
+  /// ([BridgeConfig.maxConcurrentRequests], per-origin shares, and the
+  /// live-work cap) is the budget that binds on this path. A request held
+  /// mid-flight holds its seat exactly as on the private server, so
+  /// [stop] waits for it inside its drain. The method never touches
+  /// [_server] and works whether or not [start] has been called; the host
+  /// remains responsible for not forwarding new requests after it has
+  /// decided to shut down.
+  Future<void> handleHostRequest(HttpRequest request, {required int hostPort}) {
+    // سلطات Host تُبنى من منفذ خادم المضيف لا من منفذ الجسر الخاص: طلب
+    // الباب المركب يحمل Host بالمنفذ الذي يسمعه المضيف فعلاً
+    final routeAuthorities = computeAuthorities(hostPort, config.extraHosts);
+    return _handle(request, authorities: routeAuthorities, mounted: true);
+  }
+
   /// Starts listening - tries the preferred port, then the fallbacks.
   ///
   /// The returned future rejects with [IntakeBindException] (a plain
@@ -1546,7 +1589,11 @@ class LocalIntakeServer {
         : cleaned;
   }
 
-  Future<void> _handle(HttpRequest request) async {
+  Future<void> _handle(
+    HttpRequest request, {
+    Set<String>? authorities,
+    bool mounted = false,
+  }) async {
     final response = request.response;
     _corsHeaders(response);
     // رد HEAD بلا جسم: الطلب الوحيد الذي يُحظر فيه المحتوى على السلك —
@@ -1727,13 +1774,41 @@ class LocalIntakeServer {
         }
       }
 
+      // حارس الطرف البعيد للتركيب حصرا: خادم المضيف قد يكون مربوطاً على
+      // 0.0.0.0 والجسر ضامنُ loopback على نفسه — الطرف غير loopback يُرفض
+      // 403 بالرمز القائم (لا رمز جديد) قبل كل بوابة أخرى وبنفس مسار سلطة
+      // المضيف: عدّاد وسطر أمني وقطع على المقبس المنتزع. حقيقة الطرف
+      // غير المقروء قرارُ رفض: الحارس يفشل مغلقاً.
+      if (mounted) {
+        final remote = request.connectionInfo?.remoteAddress;
+        if (!_isLoopbackPeer(remote)) {
+          final cid = _sanitizeCorrelationId(
+            _firstHeader(request, 'X-Correlation-Id'),
+          );
+          response.headers.set('X-Correlation-Id', cid);
+          final reason =
+              'Request peer is not loopback — this mounted bridge accepts '
+              'local callers only';
+          admission.noteAuthorityReject(reason);
+          // القطع الفوري الموثق يقرأه من السجل لا من هذا الموضع
+          await _replyRejection(
+            response,
+            code: 'blocked_by_protection',
+            message: reason,
+            bodyFullyRead: false,
+            headOnly: headOnly,
+          );
+          return;
+        }
+      }
       // سلطات المضيف المحلي: الحارس الواحد فوق كل الطرق — يغطي
       // OPTIONS و405 وما بعدهما؛ لا يحجز مقعداً؛ والمنع غير صامت (شرط
-      // صريح): يمر بمسار العدّاد والسجل الأمني نفسه.
+      // صريح): يمر بمسار العدّاد والسجل الأمني نفسه. التركيب يحمل
+      // سلطات منفصلة مبنية من منفذ خادم المضيف.
       final verdict = checkAuthority(
         hostHeader: _firstHeader(request, HttpHeaders.hostHeader),
         requestUriIsAbsolute: request.uri.isAbsolute,
-        authorities: _authorities,
+        authorities: authorities ?? _authorities,
       );
       if (verdict != AuthorityVerdict.allow) {
         // حادثة كاملة: الرفض يحمل معرف ارتباط ككل رد آخر.
@@ -4178,6 +4253,31 @@ class LocalIntakeServer {
     final values = request.headers[name];
     if (values == null || values.isEmpty) return null;
     return values.first;
+  }
+
+  /// حارس طرف التركيب: هل الطرف البعيد loopback؟ قراءة dart:io على
+  /// isLoopback لا تفكّ الصيغة المطبوعة IPv4-mapped IPv6 — الطرف
+  /// ‎::ffff:127.0.0.1 الذي يسلّمه الربطُ الثنائي الطبقة لنداء IPv4
+  /// loopback يقرأ false مقيساً — فتُفكّ الصيغة هنا وتحكم بايتات IPv4
+  /// وحدها بنفس قراءة 127/8 التي يقرأ بها dart:io نفسه. بلا حقيقة طرف
+  /// العبرةُ رفض: الحارس يفشل مغلقاً.
+  bool _isLoopbackPeer(InternetAddress? address) {
+    if (address == null) return false;
+    if (address.isLoopback) return true;
+    final raw = address.rawAddress;
+    if (address.type == InternetAddressType.IPv6 && raw.length == 16) {
+      var mapped = true;
+      for (var i = 0; i < 10; i++) {
+        if (raw[i] != 0) {
+          mapped = false;
+          break;
+        }
+      }
+      if (mapped && raw[10] == 0xff && raw[11] == 0xff) {
+        return raw[12] == 127;
+      }
+    }
+    return false;
   }
 
   /// An incoming correlation id is honored only within the contract: up to 128

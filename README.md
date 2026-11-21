@@ -465,6 +465,48 @@ ws.onopen = () => {
 ws.onmessage = (e) => console.log(JSON.parse(e.data));  // the reply event
 ```
 
+## Mounting the bridge on an existing dart:io server
+
+If the host already runs an HTTP server and wants the bridge on a route
+of it - not on a second port - it forwards the requests the bridge owns
+to `handleHostRequest`. The host keeps its server and its routing: only
+the requests it forwards reach the bridge, so the server's other routes
+are never touched by it. Each forwarded request passes the full
+standing protection - the same gates in the same order as the private
+`start()` listener, the same wire codes - and every reply is written
+and the connection cut over the detached socket exactly as the private
+server does it. The local host authorities are built from the host
+server's own listening port (pass it as `hostPort`), and the bridge
+checks the remote peer itself: a request arriving from a non-loopback
+address is refused `403 blocked_by_protection` before any other gate,
+so binding the host to `0.0.0.0` does not break the package's loopback
+guarantee. An IPv4-mapped IPv6 peer (`::ffff:127.0.0.1`, what a
+dual-stack bind delivers for an IPv4 loopback caller) counts as
+loopback. The open-connection cap (`maxOpenConnections`) guards the
+bridge's own listener and has nothing to read here - the host owns the
+accept loop; the seat budget (`maxConcurrentRequests`,
+`maxSeatsPerOrigin`, the live-work cap) is the budget that binds on
+this path, and a forwarded request mid-flight holds its seat inside
+`stop()`'s drain.
+
+One `dart:io` server splitting its requests between the bridge and an
+existing app built on another server framework - a documentation
+example only, with no dependency on any framework:
+
+```dart
+final bridge = LocalIntakeServer(/* your wiring */);
+final server = await HttpServer.bind(InternetAddress.anyIPv4, 8080);
+server.listen((request) async {
+  if (request.uri.path == '/bridge') {
+    // الجسر يجيب بالحماية الكاملة، وكل ردٍ يكتب ويُقطع على المقبس المنتزع
+    await bridge.handleHostRequest(request, hostPort: server.port);
+  } else {
+    // التطبيق القائم يجيب مساراته بنفسه بإطاره هو؛ الجسر لا يراها
+    await app.handle(request);
+  }
+});
+```
+
 ## Page-side reference (JavaScript)
 
 The wire contract above is the real contract; the snippet below is a

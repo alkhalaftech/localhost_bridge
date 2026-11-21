@@ -314,6 +314,30 @@
   and feeds the same admission step as a platform-verified origin; a
   frame declaring a length over the body cap is refused from the
   header alone and its body is never read.
+- Added: `LocalIntakeServer.handleHostRequest(request, hostPort: ...)`
+  - the mount on an existing `dart:io` server: the host keeps its own
+  `HttpServer` and its routing and forwards the requests the bridge
+  owns to this entry, which processes each one through the full
+  standing protection - the same gates in the same order, the same
+  wire codes, and the reply written and cut over the detached socket
+  exactly as the private listener does - and the local host
+  authorities are computed from the host server's own port
+  (`hostPort`), so a forwarded request's `Host` header passes the
+  authority gate as it would on the private server. The default wire
+  is letter identical to previous releases; the entry is called only
+  where the host chooses to call it.
+- Security: the mounted entry checks the remote peer itself, so a host
+  bound to `0.0.0.0` does not break the package's loopback guarantee -
+  a request whose remote address is not loopback is refused with the
+  standing `403 blocked_by_protection` (no new wire code) before any
+  other gate, counted and logged through the authority-reject path,
+  and cut over the detached socket; an IPv4-mapped IPv6 peer
+  (`::ffff:127.0.0.1`, what a dual-stack host bind delivers for an
+  IPv4 loopback caller) counts as loopback, and an unreadable peer
+  fact refuses. The open-connection cap guards the bridge's own
+  listener and has no fact to read on the mount; the seat budget binds
+  there, and a mounted request mid-flight holds its seat inside
+  `stop`'s drain exactly as on the private server.
 
 ## 0.1.3
 
