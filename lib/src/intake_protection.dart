@@ -21,7 +21,8 @@ class OriginPolicy {
   /// closed shape: an empty `allowed` list with no allow-all and no
   /// discovery callback, a per-origin quota of 30 requests/minute on the
   /// allow-all path, a listed-origin quota of 120 requests/minute, Fetch
-  /// Metadata required, and a 60-second consent-question timeout.
+  /// Metadata required, and a 60-second consent-question timeout with no
+  /// per-parent question budget (the global ceiling alone).
   const OriginPolicy({
     this.allowed = const [],
     this.allowAllHardened = false,
@@ -33,6 +34,7 @@ class OriginPolicy {
     this.requireFetchMetadata = true,
     this.requireOriginWithToken = false,
     this.askTimeout = const Duration(seconds: 60),
+    this.askFiresPerParentPerWindow = 0,
   });
 
   /// Accepted entries - a full origin (https://host) or a bare host, and the
@@ -103,6 +105,20 @@ class OriginPolicy {
   /// closed after this long, freeing its place among the 3 open-question
   /// slots (injectable for tests).
   final Duration askTimeout;
+
+  /// Optional per-parent budget on NEW consent questions: one parent domain
+  /// may open at most this many new questions per 10-minute window, beside
+  /// the global 10-per-10-minutes ceiling. The parent domain is the origin's
+  /// host without its first label (`a.b.example.com` shares
+  /// `b.example.com` with its sibling subdomains); a two-label host or an
+  /// IP literal is its own parent. `0` - the default - keeps the
+  /// global-only ceiling, so the default wire is unchanged; a negative
+  /// value is a configuration mistake and throws at `update()` time. A
+  /// question past this parent's budget still answers `403 origin_pending`
+  /// with the honest `Retry-After`, but it fires nothing and spends
+  /// nothing from the global budget - one site rotating subdomains of a
+  /// single parent can no longer starve another origin's question.
+  final int askFiresPerParentPerWindow;
 }
 
 /// The intake rejection - the code is the developer contract, the message neutral English.
@@ -334,6 +350,7 @@ class _AdmissionDecision {
     this.reportOnlyLine,
     this.pairReplayKey,
     this.pairFailure,
+    this.askParent = '',
   });
 
   final IntakeRejection? rejection;
@@ -400,6 +417,12 @@ class _AdmissionDecision {
   /// token_required alone for every invalid-proof shape.
   final String? pairFailure;
 
+  /// The parent domain the recorded question is budgeted against (empty
+  /// when no parent budget is armed or no question fires) - settle stamps
+  /// the same parent the projection decided with, whatever the policy does
+  /// between the projection and the settle.
+  final String askParent;
+
   /// One-shot guard: a record settles once.
   bool settled = false;
 }
@@ -414,6 +437,11 @@ class _BeyondOutcome {
   bool reachedAskTrim = false;
   bool fireAsk = false;
   String? reportOnlyLine;
+
+  /// The parent domain the recorded question was budgeted against (empty
+  /// when no parent budget is armed or no question fires) - settle stamps
+  /// the same parent the projection decided with.
+  String askParent = '';
 }
 
 /// Optional protection for the local command intake - host-configured.
@@ -437,7 +465,9 @@ class _BeyondOutcome {
 /// session are capped at 1,000 (at the cap the oldest remembered denial
 /// is evicted before any always-allow; a cap with no denial evicts the
 /// oldest entry), one-time grants at 64, consent questions open at once
-/// at 3, and new questions at 10 per 10 minutes.
+/// at 3, and new questions at 10 per 10 minutes - with an optional
+/// per-parent budget ([OriginPolicy.askFiresPerParentPerWindow]) beside
+/// that global ceiling.
 class IntakeProtection {
   /// [nowMs] is an injectable test clock (lock, grant, and quota windows);
   /// the default is an internal monotonic clock owned by the object.
@@ -513,6 +543,13 @@ class IntakeProtection {
   static const _maxAskFiresPerWindow = 10;
   static const _askBudgetWindowMs = 600_000;
   final Queue<int> _askFireStamps = Queue<int>();
+
+  /// Per-parent stamps of the same fires - the parent question budget when
+  /// the policy arms one. Every queue is born from a real fire, and the
+  /// global ceiling bounds fires at 10 per window, so the map itself is
+  /// bounded by that ceiling and its idle queues leave on the same trim
+  /// pass the global stamps take.
+  final Map<String, Queue<int>> _parentAskFires = <String, Queue<int>>{};
 
   /// Cap on discovery decisions kept in the session (without one they grow unbounded).
   static const _maxConsents = 1000;
@@ -1425,6 +1462,13 @@ class IntakeProtection {
             'question instantly',
       );
     }
+    if (policy.askFiresPerParentPerWindow < 0) {
+      throw ArgumentError.value(
+        policy.askFiresPerParentPerWindow,
+        'policy.askFiresPerParentPerWindow',
+        'must not be negative - 0 keeps the global question ceiling alone',
+      );
+    }
   }
 
   /// Apply-only, without the save-time warnings - [updateFromSaved] passes
@@ -2067,6 +2111,7 @@ class IntakeProtection {
       reportOnlyLine: beyond.reportOnlyLine,
       pairReplayKey: pairReplayKey.isEmpty ? null : pairReplayKey,
       pairFailure: pairFailure.isEmpty ? null : pairFailure,
+      askParent: beyond.askParent,
     );
   }
 
@@ -2189,6 +2234,38 @@ class IntakeProtection {
         );
         return;
       }
+      // ميزانية الأب بجانب السقف العام: النطاق الأب هو المضيف بلا أول
+      // مقطع، والمضيف ذو المقطعين أو العنوان أبٌ لنفسه. التطبيع بأدوات
+      // computeAuthorities القائمة (قصّ وتصغير) وعادة Uri نفسها هنا —
+      // بلا دالة تطبيع ثالثة. ما فوق ميزانية أبه يُجاب بلا سؤال وبلا
+      // طابع على أي ميزانية: الكبح حصرٌ على الأب لا استهلاك للسقف العام
+      if (_policy.askFiresPerParentPerWindow > 0) {
+        final host = Uri.tryParse(origin)?.host.trim().toLowerCase() ?? '';
+        var parent = host;
+        if (host.isNotEmpty && !host.contains(':')) {
+          final labels = host.split('.');
+          final addressShaped = labels.every(
+            (label) => int.tryParse(label) != null,
+          );
+          if (labels.length > 2 && !addressShaped) {
+            parent = labels.sublist(1).join('.');
+          }
+        }
+        final parentFires = _liveParentAskFires(parent, now);
+        if (parentFires.length >= _policy.askFiresPerParentPerWindow) {
+          final parentWaitMs =
+              _askBudgetWindowMs - (now - parentFires.first) + 500;
+          out.rejection = IntakeRejection(
+            403,
+            'origin_pending',
+            'Too many consent questions from this site — retry after a '
+                'short wait',
+            retryAfterMs: parentWaitMs < 1000 ? 1000 : parentWaitMs,
+          );
+          return;
+        }
+        out.askParent = parent;
+      }
       // الطلب المقفل لا يفتح سؤال موافقة جديداً
       if (!mayAskConsent) {
         out.rejection = const IntakeRejection(
@@ -2260,9 +2337,17 @@ class IntakeProtection {
           now - _askFireStamps.first > _askBudgetWindowMs) {
         _askFireStamps.removeFirst();
       }
+      // وميزانيات الآباء على المسار نفسه: كل طابور وُلد من إطلاق حقيقي
+      // والسقف العام يقيد الإطلاقات فالخريطة صغيرة، والخاملة تخرج هنا
+      _parentAskFires.removeWhere((_, queue) {
+        while (queue.isNotEmpty && now - queue.first > _askBudgetWindowMs) {
+          queue.removeFirst();
+        }
+        return queue.isEmpty;
+      });
     }
     if (d.fireAsk) {
-      _fireAsk(d.key, origin!);
+      _fireAsk(d.key, origin!, d.askParent);
     }
     final line = d.reportOnlyLine;
     if (line != null) {
@@ -2375,6 +2460,22 @@ class IntakeProtection {
     return live;
   }
 
+  /// Read-only peek at one parent's live ask fires - the same front-trim
+  /// walk the global peek performs, with no map writes and an empty list
+  /// for a parent that never fired.
+  List<int> _liveParentAskFires(String parent, int now) {
+    final queue = _parentAskFires[parent];
+    if (queue == null) return const <int>[];
+    final live = <int>[];
+    var trimming = true;
+    for (final ts in queue) {
+      if (trimming && now - ts > _askBudgetWindowMs) continue;
+      trimming = false;
+      live.add(ts);
+    }
+    return live;
+  }
+
   /// The miss window a token attempt counts against: per-origin for web
   /// requests, the shared originless window for local integrations. The
   /// per-origin map is swept by idle entries at the same pacing as the
@@ -2441,7 +2542,11 @@ class IntakeProtection {
   /// The host callback receives the normalized origin (lowercase scheme and
   /// host, the port if present) - never the raw header value: the window must
   /// read the same canonical form the keys and the list matching use.
-  void _fireAsk(String key, String origin) {
+  /// [parent] is the parent domain the projection budgeted this question
+  /// against (empty when no parent budget is armed): both its stamps land
+  /// where the global stamp lands, so a collapsing callback is charged to
+  /// its parent exactly like a live one.
+  void _fireAsk(String key, String origin, String parent) {
     if (_disposed || _pendingAsks.containsKey(key)) return;
     Future<OriginConsent> ask;
     try {
@@ -2454,6 +2559,9 @@ class IntakeProtection {
       // والإطلاق نفسه يستهلك ميزانية الزمن: نداء معطوب لا يُستدعى بلا
       // نهاية فوق ميزانية الأسئلة السليمة
       _askFireStamps.addLast(_now);
+      if (parent.isNotEmpty) {
+        (_parentAskFires[parent] ??= Queue<int>()).addLast(_now);
+      }
       telemetry?.error(
         'consent callback threw synchronously',
         error: e,
@@ -2488,6 +2596,9 @@ class IntakeProtection {
     // ختم الإطلاق هنا وحده: الالتحاق بنافذة حية أو رد نداء رامٍ لا
     // يستهلك ميزانية الزمن — السؤال الجديد فقط هو المحسوب
     _askFireStamps.addLast(_now);
+    if (parent.isNotEmpty) {
+      (_parentAskFires[parent] ??= Queue<int>()).addLast(_now);
+    }
     ask
         .then((answer) {
           _removeAskIfIdentical(key, ask);
