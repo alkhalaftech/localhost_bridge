@@ -303,6 +303,14 @@
   layer, body limit, payload checks, the live-work budget - applies
   unchanged, and every rejection counts through the same rejection
   counter. The HTTP wire is letter identical to previous releases.
+- Added: `tool/native_messaging_adapter.dart` - a dependency-free
+  reference native-messaging host for browser extensions: four
+  little-endian length bytes then JSON on stdin, and the standing
+  reply contract framed the same way on stdout. The extension origin
+  comes from the adapter's own configuration (never from the message)
+  and feeds the same admission step as a platform-verified origin; a
+  frame declaring a length over the body cap is refused from the
+  header alone and its body is never read.
 
 ## 0.1.3
 
