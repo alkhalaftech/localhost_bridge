@@ -275,6 +275,7 @@ because no legitimate `fetch` caller can ever fail those checks.
 | `listedPerOriginPerMinute` | Per-origin budget on the listed path — 120/minute shipped (two sustained commands a second: a real page fires commands per user action and sits far below it, while a compromised listed origin cannot flood the shared seats). `0` is the explicit opt-out keeping listed origins unquotaed. Over the budget the page reads `429 origin_rate_limited` with the honest `Retry-After`. Watch mode (`reportOnly`) covers this quota like the allow-all one, and a failed token attempt carrying a listed origin also counts against its window. |
 | `requireFetchMetadata` | On by default. The allow-all and discovery paths refuse requests carrying no `Sec-Fetch-Mode: cors` / `Sec-Fetch-Dest: empty` (`cross_site_blocked`) — closing silent sends from browsers without Fetch Metadata. Headerless non-browser clients on the token layer are unaffected; turn it off only if you serve such clients through the browser paths. |
 | `askTimeout` | Max lifetime of a silent consent window (default 60s); the slot frees only on answer or expiry. |
+| `askFiresPerParentPerWindow` | Optional per-parent budget on **new** consent questions (default `0` — off, the global ceiling alone): one parent domain — the origin's host without its first label (`a.b.example.com` shares `b.example.com`; a two-label host or an IP literal is its own parent) — may open at most this many new questions per 10-minute window, beside the global 10-per-10-minutes budget. A question past its parent's budget still answers `origin_pending` with the honest `Retry-After`, but fires nothing and spends nothing from the global budget, so one site rotating subdomains can no longer starve another origin's question. A negative value throws at `update()` time. |
 
 ### Building the consent dialog
 
@@ -293,6 +294,12 @@ security model — four disciplines keep the human decision real:
 - **Close the dialog with your own timer, equal to `askTimeout`, and answer
   `dismissed` when it fires** — that keeps your UI in step with the
   package's window, which expires on the same `askTimeout`.
+- **Or close it from the package's own end-of-question signal** — set
+  `IntakeProtection.onQuestionClosed` and the host is told exactly once
+  when a question window ends (the answer arrived, the host future threw,
+  or `askTimeout` closed it), with the normalized origin. `onUnknownOrigin`'s
+  signature is unchanged; a question the question budget suppressed never
+  opened and never signals, and `dispose()` closes the rest silently.
 
 ## ArrivalGuard — an optional host-side tool
 

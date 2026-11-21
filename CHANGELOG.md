@@ -166,6 +166,22 @@
   token_required`, and the token alone never admits - from an
   unqualified origin it is answered with the origin rejection alone, so
   a wrong-origin sender learns nothing about its token.
+- Security: one site rotating subdomains of a single parent can no
+  longer spend the whole new-question budget -
+  `OriginPolicy.askFiresPerParentPerWindow` (off by default) bounds each
+  parent domain's new questions beside the global 10-per-10-minutes
+  ceiling, its suppressed questions fire nothing and spend nothing from
+  the global budget, so an unrelated origin keeps its question; and at
+  the 1,000-decision cap the oldest remembered deny is now evicted
+  before any always-allow decision, so a session full of denied origins
+  no longer washes out the pages the user approved (a cap with no deny
+  still evicts the oldest entry).
+- Added: `IntakeProtection.onQuestionClosed` - fired exactly once when a
+  consent question window ends (the answer arrived, the host future
+  threw, or the ask timeout closed it) with the normalized origin, so
+  the host dialog closes without racing `askTimeout`;
+  `onUnknownOrigin`'s signature is unchanged, budget-suppressed
+  questions never signal, and `dispose()` closes the rest silently.
 
 ## 0.1.3
 
