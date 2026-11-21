@@ -996,6 +996,31 @@ List<_Scenario> _scenarios() {
     },
   ));
   cases.add((
+    code: 'command_required',
+    preBody: false,
+    run: () async {
+      // الخيار الثنائي مسلح: جسم octet-stream بلا اسم أمره في
+      // X-Command يُرد من مخرج الرفض الواحد بعد قراءة جسمه وحسم سقفه
+      final srv = await _listen(
+        _server(
+          pr: _allowlist(),
+          config: const BridgeConfig(acceptBinaryBodies: true),
+        ),
+      );
+      final link = await _Link.openFull(
+        srv.port,
+        _head(
+          srv.port,
+          origin: 'https://portal.example',
+          contentType: 'application/octet-stream',
+          cl: 4,
+        ),
+        utf8.encode('PING'),
+      );
+      return _Walk(srv, link, () async {}, preBody: false);
+    },
+  ));
+  cases.add((
     code: 'handler_timeout',
     preBody: false,
     run: () async {

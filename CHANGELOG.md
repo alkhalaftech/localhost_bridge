@@ -227,14 +227,19 @@
     CORS allowed-header list while the option is on. The bytes sit under
     an internal named ceiling - 256 KiB, a fixed constant deliberately
     not an option - and a binary body over it answers `413
-    payload_too_large` naming the binary cap; below the ceiling a file
-    (image or PDF) travels with its command. Off, the type refuses `415`
-    and the header list never offers `X-Command`.
+    payload_too_large` naming the binary cap; a binary body without its
+    `X-Command` name - absent, blank, or with an empty body - answers
+    `400 command_required` (the bridge delivers only named binary
+    commands); below the ceiling a named file (image or PDF) travels
+    with its command. Off, the type refuses `415` and the header list
+    never offers `X-Command`.
 - The four new refusal codes (`invalid_payload_item`,
   `malformed_json_shape`, `invalid_json`, `non_json_body`) sit in
   `intakeRejectionRegistry` and the README wire tables, walked on the
   live wire like every other code; the handler-refusal statuses are
-  handler-chosen outcomes and stay outside the registry by its contract.
+  handler-chosen outcomes and stay outside the registry by its contract,
+  and `command_required` (the unnamed binary body) joins the same
+  registry and tables with its own walk.
 
 ## 0.1.3
 

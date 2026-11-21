@@ -59,6 +59,7 @@ const Map<String, IntakeRejectSpec> intakeRejectionRegistry =
     <String, IntakeRejectSpec>{
       // 400 - wire shapes and body facts
       'bad_request': IntakeRejectSpec(400),
+      'command_required': IntakeRejectSpec(400),
       'duplicate_header': IntakeRejectSpec(400),
       'empty_payload': IntakeRejectSpec(400),
       'invalid_json': IntakeRejectSpec(400),

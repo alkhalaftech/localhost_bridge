@@ -607,6 +607,57 @@ void main() {
     );
   });
 
+  test('binary on: an unnamed binary body refuses 400 command_required - '
+      'the empty body included and a blank name alike', () async {
+    final seen = <TrustedCommand>[];
+    server = _server(
+      config: const BridgeConfig(acceptBinaryBodies: true),
+      onCommand: (cmd) async {
+        seen.add(cmd);
+        return const CommandOutcome(ok: true);
+      },
+    );
+    await server.start(preferredPort: 0);
+    // جسم غير فارغ بلا اسم: بايتات لا أحد يعرف لأي أمر أُرسلت فلا تُسلَّم
+    final unnamed = await _post(
+      server,
+      body: <int>[0xFF, 0x00, 0xFE, 0x01],
+      contentType: 'application/octet-stream',
+    );
+    expect(
+      unnamed.status,
+      400,
+      reason: 'an unnamed binary body is a wire-shape refusal',
+    );
+    expect(unnamed.body, contains('"error":"command_required"'));
+    // الجسم الفارغ بلا اسم يحمل القرار نفسه: قاعدة واحدة بلا استثناء
+    // حجم — النص الخام الفارغ أخوته الحزمة تردّه empty_payload، فالثنائي
+    // الفارغ بلا اسم يسلك قرارَ «لا أمر يُسلَّم» ذاته
+    final empty = await _post(
+      server,
+      body: <int>[],
+      contentType: 'application/octet-stream',
+    );
+    expect(
+      empty.status,
+      400,
+      reason:
+          'an empty binary body names no command either - one rule, no '
+          'size carve-out',
+    );
+    expect(empty.body, contains('"error":"command_required"'));
+    // الاسم الأعمى (فراغات حصراً) لا يسمي: قرارُه قرارُ الغياب
+    final blank = await _post(
+      server,
+      body: <int>[0x50, 0x4B],
+      contentType: 'application/octet-stream',
+      headers: {'X-Command': '   '},
+    );
+    expect(blank.status, 400, reason: 'a blank name names nothing');
+    expect(blank.body, contains('"error":"command_required"'));
+    expect(seen, isEmpty, reason: 'no unnamed body reaches the handler');
+  });
+
   test('binary on: a body over the internal ceiling refuses 413 '
       'payload_too_large naming the binary cap, while JSON still serves '
       'and exotic types still refuse 415', () async {

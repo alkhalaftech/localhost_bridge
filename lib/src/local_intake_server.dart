@@ -1648,6 +1648,23 @@ class LocalIntakeServer {
               );
               return;
             }
+            // بوابة اسم الأمر: التسليم الثنائي اسمه في X-Command حصراً —
+            // بلا اسمٍ (أو باسمٍ أعمى من فراغات) لا يوجد أمر يُسلَّم فالجسم
+            // يُرد كيفما كان حجمه، والفارغ بلا اسمٍ على القرار ذاته: قاعدة
+            // واحدة بلا استثناء حجم كما يرد النصُّ الخام الفارغ بـ
+            // empty_payload. الحكم بعد سقف الجسم: سقف الحجم يبقى الحكم
+            // الأول فوق الطلب الثنائي
+            if ((_firstHeader(request, 'X-Command') ?? '').trim().isEmpty) {
+              await _replyRejection(
+                response,
+                code: 'command_required',
+                message:
+                    'A binary body must name its command in the '
+                    'X-Command header',
+                bodyFullyRead: true,
+              );
+              return;
+            }
           } else {
             binaryBytes = null;
             final body = outcome.body!;
