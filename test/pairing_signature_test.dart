@@ -161,7 +161,8 @@ void main() {
     expect(
       fresh.rejection,
       isNull,
-      reason: 'a distinct proof is a distinct command, not a replay '
+      reason:
+          'a distinct proof is a distinct command, not a replay '
           '(got ${fresh.rejection?.code})',
     );
   });
