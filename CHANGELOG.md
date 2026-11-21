@@ -41,6 +41,46 @@
   result and never executes the command twice. The memory is bounded by
   size (`maxEntries` - a full ledger answers `ledger_full` and never
   evicts a live entry) and by time (`ttl`, swept on the next look).
+- Added: an optional `::1` listener - `BridgeConfig.listenIPv6Loopback`
+  (default off) binds a second loopback-IPv6 listener (`::1`, IPv6-only)
+  at the same port, and the local host authorities widen in the same
+  start with the `[::1]:port` and bare `::1` spellings; a host that
+  cannot bind `::1` warns once and stays on `127.0.0.1` alone. Off, the
+  authority set keeps exactly its IPv4 loopback forms.
+- Added: an optional unix-socket listener - `BridgeConfig.unixSocketPath`
+  (default off; Linux and macOS) also serves HTTP on the named
+  filesystem path for local CLI clients. The socket file's owner-only
+  permissions (mode 0600, verified by reading the actual file mode
+  before anything is served) are the transport boundary - a chmod or
+  verification failure fails the whole start, so no unguarded socket
+  ever serves. The request rides the same single admission step with no
+  Origin (token alone; a headerless CLI needs
+  `OriginPolicy.requireFetchMetadata: false`, the standing switch)
+  behind the same Host gate. An occupied path fails the start with
+  `IntakeBindException` (the package never deletes a path it did not
+  create); the socket file the package created is removed at `stop`, so
+  a restart on the same path rebinds cleanly. The open-connection cap
+  counts this listener too.
+- Added: the mobile lifecycle pair - `pause()` closes every bound
+  listener under the same graceful drain `stop()` runs and remembers the
+  bound port; `resume()` rebinds on that exact port with no fallbacks,
+  and when another process took the port meanwhile it refuses with
+  `IntakeBindException` naming the remembered port as taken while the
+  pause state survives for a retry. The instance identity carries
+  across: `BridgeInstanceInfo` (read via `server.instanceInfo`) names
+  the actually bound port, a stable secure-random `instanceId` (32 hex,
+  constant across pause/resume and restarts - the pinning identity),
+  and the `protocolVersion` wire-contract constant
+  (`BridgeInstanceInfo.bridgeProtocolVersion`). `start()` while paused
+  supersedes the pause.
+- Added: the health page - `BridgeConfig.healthPath` (default off) arms
+  a `GET` route that passes the standing gate (origin and Host gates,
+  seat caps, the one admission step with its settle) and answers the
+  accepted origin alone with literally `{"ok":true}` - no version
+  number, no counters, no details, so the page can never be used to
+  fingerprint the host; a non-accepted origin reads the standing
+  refusal with no CORS echo. The page answers on the bridge's own
+  listener only; disarmed, the path keeps its standing `405`.
 - **Breaking: the handler budget is on by default** - `handlerTimeout`
   left at null no longer means "no deadline"; it selects the configured
   default budget (`BridgeConfig.handlerTimeout`, 30 seconds shipped). A

@@ -13,6 +13,9 @@ class BridgeConfig {
     this.maxConcurrentRequests = 16,
     this.maxSeatsPerOrigin = defaultMaxSeatsPerOrigin,
     this.maxOpenConnections = 0,
+    this.listenIPv6Loopback = false,
+    this.unixSocketPath,
+    this.healthPath,
     this.maxJsonElements = 10_000,
     this.maxJsonDepth = 32,
     this.strictPayloadItems = false,
@@ -86,6 +89,55 @@ class BridgeConfig {
   /// alone. A negative value throws [ArgumentError] at server
   /// construction.
   final int maxOpenConnections;
+
+  /// The optional `::1` (loopback IPv6) listener - when true, `start`
+  /// binds a second listener on `InternetAddress.loopbackIPv6` at the same
+  /// port (IPv6-only, never dual-stack: the IPv4 side keeps its own
+  /// listener), and the local host authorities widen in the same start
+  /// with the `[::1]:port` and bare `::1` spellings - a request naming
+  /// them passes the Host gate only while the listener is actually bound,
+  /// and a start on a host that cannot bind `::1` warns once and continues
+  /// on `127.0.0.1` alone. `false` (the default) keeps the listener and
+  /// the authority set exactly as before: nothing listens on `::1`, and a
+  /// request whose Host names it reads `403 blocked_by_protection`.
+  /// [LocalIntakeServer.pause] and `resume` rebind both listeners.
+  final bool listenIPv6Loopback;
+
+  /// The optional unix-domain-socket listener (Linux and macOS only) -
+  /// when non-null, `start` also binds an HTTP listener on this filesystem
+  /// path for local command-line clients: the socket file's owner-only
+  /// permissions (mode 0600, enforced at bind and verified before the
+  /// listener serves) are the transport boundary - there is no IP to
+  /// rebind and no Origin to read, so the request crosses the same single
+  /// admission step origin-less, by its token alone, behind the same Host
+  /// authority gate (an HTTP/1.1 client sends `Host: localhost`). A path
+  /// that is already occupied (any existing file, including a stale socket)
+  /// fails the whole start with [IntakeBindException] - the package never
+  /// deletes a path it did not create - and a successful stop removes the
+  /// socket file the package itself created, so a restart on the same path
+  /// rebinds cleanly. `null` (the default) keeps the option off. A value
+  /// that is empty or carries a NUL byte throws [ArgumentError] at server
+  /// construction, and so does any value at all on Windows - unix domain
+  /// sockets are not part of dart:io there.
+  final String? unixSocketPath;
+
+  /// The health page - when non-null, a `GET` on exactly this path is
+  /// answered `200` with the literal body `{"ok":true}`: no version
+  /// number, no counters, no details, so the page can never be used to
+  /// fingerprint the host. It passes the standing gate like every
+  /// other request - the origin and Host gates, the seat caps, and the
+  /// single admission step with its settle - and only an origin the
+  /// policy accepts reads the answer (the reply echoes its CORS); a
+  /// non-accepted origin reads the standing refusal with no CORS echo,
+  /// so a browser probe reveals nothing. The page answers on the bridge's
+  /// own listener only (a forwarded GET on a mounted door answers `405`
+  /// like any non-POST). `null` - the default - keeps the option off: the
+  /// path answers `405 method_not_allowed` like every GET. The value must
+  /// be a non-empty path starting with `/`, different from the command
+  /// root `/`, the pairing route `/pair`, the WebSocket path, and every
+  /// registered local-page path - a violation throws [ArgumentError] at
+  /// server construction.
+  final String? healthPath;
 
   /// JSON structural element cap - `{`, `[`, and `,` outside strings, counted
   /// in one linear pass before any decoding. A body over it is rejected with

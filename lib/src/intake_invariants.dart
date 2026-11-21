@@ -7,13 +7,22 @@
 library;
 
 /// {127.0.0.1:port, localhost:port, 127.0.0.1, localhost} ∪ extraHosts.
-/// No `[::1]` at birth: the bind is loopback IPv4 only, so it is unreachable.
-Set<String> computeAuthorities(int boundPort, List<String> extraHosts) {
+/// The `[::1]` forms join only when [ipv6Loopback] is true - the optional
+/// `::1` listener is actually bound then, so those spellings name a live
+/// address; with the option off (the default) they stay out and a request
+/// naming them is refused exactly as before, because nothing listens there.
+Set<String> computeAuthorities(
+  int boundPort,
+  List<String> extraHosts, {
+  bool ipv6Loopback = false,
+}) {
   final authorities = <String>{
     '127.0.0.1:$boundPort',
     'localhost:$boundPort',
     '127.0.0.1',
     'localhost',
+    if (ipv6Loopback) '[::1]:$boundPort',
+    if (ipv6Loopback) '::1',
   };
   for (final extra in extraHosts) {
     final cleaned = extra.trim().toLowerCase();

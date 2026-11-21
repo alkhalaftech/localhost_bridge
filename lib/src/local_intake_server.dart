@@ -1,5 +1,6 @@
 import 'dart:async';
 import 'dart:convert';
+import 'dart:math' show Random;
 import 'dart:typed_data' show BytesBuilder, Uint8List;
 
 import 'dart:io';
@@ -276,12 +277,45 @@ class _WarnThrottle {
   }
 }
 
+/// What a host pins its clients against - the read-only identity of one
+/// bridge instance: the port actually bound, the stable random instance id
+/// ([LocalIntakeServer.instanceId] - constant across pause and resume), and
+/// the protocol version this package speaks on its wire.
+class BridgeInstanceInfo {
+  /// Builds the identity snapshot.
+  const BridgeInstanceInfo({
+    required this.port,
+    required this.instanceId,
+    required this.protocolVersion,
+  });
+
+  /// The port the listener is actually bound on - the corrected value when
+  /// the host asked for a random port, never the requested one.
+  final int port;
+
+  /// The instance id the host pins its paired clients against - 32 hex
+  /// characters of secure random, generated once at server construction and
+  /// stable across pause/resume and across restarts of the same object.
+  final String instanceId;
+
+  /// The protocol version this instance speaks.
+  final String protocolVersion;
+
+  /// The wire-contract version this package speaks: the reply contract
+  /// (`{"ok": ...}` with the standing error codes) and its admission
+  /// shape. It names the wire contract, not the package release - it moves
+  /// only when the wire contract itself does.
+  static const String bridgeProtocolVersion = '0.2.0';
+}
+
 /// A local HTTP intake server for external portals.
 ///
-/// Listens on 127.0.0.1 only (no network exposure) on a configurable port
-/// with fallbacks when busy, and answers with CORS headers for the origins it
-/// allowed, so portal https pages can send commands straight from the
-/// browser. Errors always come back with clear messages - no silent failure.
+/// Listens on loopback only (127.0.0.1 by default, with the optional `::1`
+/// and unix-socket listeners each armed explicitly and off by default) on a
+/// configurable port with fallbacks when busy, and answers with CORS headers
+/// for the origins it allowed, so portal https pages can send commands
+/// straight from the browser. Errors always come back with clear messages -
+/// no silent failure.
 ///
 /// Resource limits (body cap / timeout / seat cap) apply in every protection
 /// mode - even allow-all - because they are what makes accepting any site memory-safe.
@@ -474,6 +508,65 @@ class LocalIntakeServer {
           'config.wsPath',
           'collides with a registered local page path - choose another '
               'path so both registered routes stay unambiguous',
+        );
+      }
+    }
+    // صفحة الصحة: null هو الإيقاف حصراً - القيمة المسلحة مسار واضح لا يصطدم
+    // بأي مسار مسجل، والصدم يُقال صاخباً عند البناء قبل أي طلب على السلك
+    final health = config.healthPath;
+    if (health != null) {
+      if (health.isEmpty || !health.startsWith('/') || health == '/') {
+        throw ArgumentError.value(
+          health,
+          'config.healthPath',
+          'must be a non-empty path starting with "/" and different from '
+              'the command root "/" (null is the off value)',
+        );
+      }
+      if (health == _pairingPath) {
+        throw ArgumentError.value(
+          health,
+          'config.healthPath',
+          'collides with the pairing route "/pair" - choose another '
+              'path so both registered routes stay unambiguous',
+        );
+      }
+      if (wsPath != null && health == wsPath) {
+        throw ArgumentError.value(
+          health,
+          'config.healthPath',
+          'collides with the WebSocket channel path - choose another '
+              'path so both registered routes stay unambiguous',
+        );
+      }
+      if (pages != null && pages.any((page) => page.path == health)) {
+        throw ArgumentError.value(
+          health,
+          'config.healthPath',
+          'collides with a registered local page path - choose another '
+              'path so both registered routes stay unambiguous',
+        );
+      }
+    }
+    // مقبس يونكس: خيار لينكس وماك حصرا - على Windows لا مقابس يونكس في
+    // dart:io أصلا فالقيمة المسلحة خطأ إعداد يُرمى عند البناء، والمسار
+    // الفارغ (أو بحرف NUL) كذلك في كل المنصات
+    final unixPath = config.unixSocketPath;
+    if (unixPath != null) {
+      if (unixPath.isEmpty || unixPath.contains('\x00')) {
+        throw ArgumentError.value(
+          unixPath,
+          'config.unixSocketPath',
+          'must be a non-empty filesystem path without a NUL byte '
+              '(null is the off value)',
+        );
+      }
+      if (Platform.isWindows) {
+        throw ArgumentError.value(
+          unixPath,
+          'config.unixSocketPath',
+          'is a Linux/macOS option - unix domain sockets are not part of '
+              'dart:io on Windows; leave it at null',
         );
       }
     }
@@ -698,6 +791,65 @@ class LocalIntakeServer {
 
   HttpServer? _server;
   int _port = 0;
+
+  /// The optional `::1` listener - bound only while
+  /// [BridgeConfig.listenIPv6Loopback] is armed and the bind succeeded.
+  HttpServer? _serverV6;
+
+  /// The optional unix-socket listener - bound only while
+  /// [BridgeConfig.unixSocketPath] is armed and the bind and its
+  /// owner-only permission guard both succeeded.
+  HttpServer? _serverUnix;
+
+  /// The filesystem path of the socket this instance actually created -
+  /// the only path a stop may unlink, and only while it still names a
+  /// unix domain socket.
+  String? _unixSocketPath;
+
+  /// The port a [pause] remembered for its [resume] - null when the server
+  /// is not paused. A successful resume or a fresh [start] clears it; a
+  /// failed resume keeps it so the host can retry when the port frees.
+  int? _pausedPort;
+
+  /// The pinning identity of this instance - generated once at
+  /// construction from secure random, stable across pause/resume and
+  /// across stop/start generations of the same object.
+  final String _instanceId = _generateInstanceId();
+
+  /// 32 hex characters of secure random - 128 bits, no counter and no
+  /// timestamp inside, so the id carries no structure to mine.
+  static String _generateInstanceId() {
+    final rng = Random.secure();
+    return List<String>.generate(
+      16,
+      (_) => rng.nextInt(256).toRadixString(16).padLeft(2, '0'),
+    ).join();
+  }
+
+  /// The pinning identity of this bridge instance - stable across
+  /// [pause]/[resume] and across stop/start generations (it is the
+  /// instance's, not a generation's). Generated from secure random at
+  /// construction.
+  String get instanceId => _instanceId;
+
+  /// The read-only identity snapshot: the actual bound port, the stable
+  /// instance id, and the protocol version. Available while a listener is
+  /// bound - the actual port is a bound fact, so a paused or stopped
+  /// server throws [StateError] here ([instanceId] stays readable at
+  /// every moment).
+  BridgeInstanceInfo get instanceInfo {
+    if (_port == 0) {
+      throw StateError(
+        'instanceInfo needs a bound listener - the actual port reads only '
+        'while the server is listening; instanceId stays readable',
+      );
+    }
+    return BridgeInstanceInfo(
+      port: _port,
+      instanceId: _instanceId,
+      protocolVersion: BridgeInstanceInfo.bridgeProtocolVersion,
+    );
+  }
 
   /// The bound port while listening, and `0` when not - including after a
   /// `start()` that failed on a post-bind step: a stale bound number would
@@ -1096,114 +1248,91 @@ class LocalIntakeServer {
   /// returned future - none is thrown synchronously - so
   /// `start(...).catchError(...)`, `start(...).then(..., onError: ...)`
   /// and `await start(...)` inside a `try/catch` all observe the same
-  /// contract on every path.
+  /// contract on every path. A start issued while paused succeeds and
+  /// supersedes the pause: the remembered port is forgotten (a new
+  /// generation binds its own address), and [resume] afterwards reads
+  /// `not paused`.
   Future<int> start({
     required int preferredPort,
     List<int> fallbacks = const [],
   }) {
-    if (_server != null || _starting) {
+    final pending = _bindPrecondition();
+    if (pending != null) {
       // The rejection travels through the returned future, never thrown
       // synchronously: a synchronous throw escapes a caller's
       // .catchError/.then(onError) on the result - there is no result to
       // attach them to. The StateError contract is identical on every path.
+      return Future<int>.error(pending, StackTrace.current);
+    }
+    return _runBind(
+      () => _bindGeneration(
+        preferredPort: preferredPort,
+        fallbacks: fallbacks,
+        resuming: false,
+      ),
+    );
+  }
+
+  /// Reopens the listeners a [pause] closed - on the remembered port, with
+  /// no fallbacks: a resume that moved ports silently would break every
+  /// client pinned to the address, so the same port is the contract. When
+  /// another process took the remembered port meanwhile, the future
+  /// rejects with [IntakeBindException] whose message names the fact (the
+  /// remembered port and `taken`) - the pause state survives the failed
+  /// resume, so the host can retry once the port frees. The optional
+  /// listeners rebind too, exactly as their options arm them: a `::1`
+  /// bind failure warns and continues on `127.0.0.1` alone (the same rule
+  /// as [start]), and a unix-socket bind or permission-guard failure fails
+  /// the whole resume. The instance id and every other server state carry
+  /// across untouched - resume is a new generation of the same instance.
+  /// The error contract mirrors [start]: [StateError] through the returned
+  /// future when the server is listening, mid-start, or not paused at all.
+  Future<int> resume() {
+    final pausedPort = _pausedPort;
+    if (pausedPort == null) {
       return Future<int>.error(
         StateError(
-          _server != null
-              ? 'intake server already listening on port $_port'
-              : 'intake server start already in progress',
+          'intake server is not paused - resume follows pause; call start '
+          'for a fresh generation',
         ),
         StackTrace.current,
       );
     }
+    final pending = _bindPrecondition();
+    if (pending != null) {
+      return Future<int>.error(pending, StackTrace.current);
+    }
+    return _runBind(
+      () => _bindGeneration(
+        preferredPort: pausedPort,
+        fallbacks: const [],
+        resuming: true,
+      ),
+    );
+  }
+
+  /// The shared StateError precondition for [start] and [resume] - null
+  /// when a bind may proceed, the standing error when already listening or
+  /// mid-start (the same two facts for both entry points).
+  StateError? _bindPrecondition() {
+    if (_server != null || _starting) {
+      return StateError(
+        _server != null
+            ? 'intake server already listening on port $_port'
+            : 'intake server start already in progress',
+      );
+    }
+    return null;
+  }
+
+  /// The shared bind tail of [start] and [resume]: guards the starting
+  /// flag across the measure boundary so a synchronous telemetry failure
+  /// never strands the gate (the same guard start has always kept).
+  Future<int> _runBind(Future<int> Function() bind) {
     _starting = true;
     Future<int> started;
     try {
-      started = telemetry.measure<int>('intake.start', () async {
-        // فراغ جارٍ: البدء ينتظر تخلّي الجيل القديم كاملاً (مقاعده
-        // ويتاماه) قبل الربط — جيلان يتشاركان عدّاد المقاعد يجعلان
-        // طلبات الجيل الجديد تُرد 503 بلا انشغال حقيقي. بلا ميزانية
-        // معالج ومعالج لا يكمل لا يتحرر المقعد أبداً فيعلق البدء هنا
-        // إلى الأبد — والانتظار بنمط _startingFuture الذي ينتظر به
-        // stop البدءَ الجاري.
-        final draining = _stoppingFuture;
-        if (draining != null) {
-          await draining;
-        }
-        final candidates = [preferredPort, ...fallbacks];
-        Object? lastError;
-        for (final candidate in candidates) {
-          try {
-            _server = await HttpServer.bind(
-              InternetAddress.loopbackIPv4,
-              candidate,
-            );
-            // المنفذ الفعلي المُسند (يُصحّح عيب إعادة 0 عند طلب منفذ عشوائي
-            // — والطلب الصريح يساوي الفعلي فلا فرق سلكياً)
-            _port = _server!.port;
-            _authorities = computeAuthorities(_port, config.extraHosts);
-            _warnExtraHosts(config.extraHosts);
-            // تسليح أصول الصفحة المحلية عند الربط حصراً: المجموعة من
-            // المنفذ الفعلي المُسند (لا المطلوب)، وإحلالٌ عند كل ربط
-            // فيقرأ البدءُ الجديد مجموعتَه لا أصل ربطٍ سابق
-            protection.armBridgeServedOrigins(
-              config.localPages == null
-                  ? const <String>{}
-                  : bridgeServedOrigins(_port),
-            );
-            // سجل الحماية الصامت: حماية ممررة بلا مرصد تبتلع تحذيرات
-            // الأمن (allow-all وأسطر الرفض) في null — الخادم يقولها مرة
-            // واحدة بمرصده هو مع طريق الوصل، أما الافتراضية فبُنيت
-            // بمرصد الخادم نفسه فلا تحذير عليها.
-            if (protection.telemetry == null) {
-              telemetry.warn(
-                'intake protection carries no telemetry — its security log '
-                'is muted; pass the same telemetry to '
-                'IntakeProtection(telemetry: ...) that you gave the server',
-                category: BridgeCategory.security,
-              );
-            }
-            // الاتصالات بلا طلب نشط (keep-alive صامتة أو توقف المرسل قبل
-            // اكتمال الترويسات) تُغلق بعد المهلة بدل حجزها إلى الأبد؛
-            // جسم طلب نشط تحرسه [requestTimeout] أعلى
-            _server!.idleTimeout = config.idleTimeout;
-            _server!.listen(
-              _handle,
-              onError: (Object error) => telemetry.error(
-                'intake server error',
-                error: error,
-                category: BridgeCategory.network,
-              ),
-            );
-            telemetry.info(
-              'intake listening on 127.0.0.1:$_port'
-              '${candidate != preferredPort ? " (fallback)" : ""}',
-              category: BridgeCategory.network,
-            );
-            return _port;
-          } catch (e) {
-            lastError = e;
-            // المستمع اليتيم: الربط نجح ثم رمت خطوة إقلاع لاحقة (تحذير
-            // الحماية أو listen أو سطر الإقلاع) — المقبس يبقى يستمع بلا
-            // مرجع بعد إحلال المرشح التالي، وإن فشل كل المرشحين بقي
-            // _server غير صفري فيصطدم الإقلاع التالي بـStateError. أغلق
-            // المربوط وأصفّر الحالة قبل المرشح التالي.
-            final orphan = _server;
-            if (orphan != null) {
-              _server = null;
-              // والمنفذ يتبع الخادم إلى الصفر: رقم قديم فوق خادم لم
-              // يعد موجوداً كذبة يستند إليها المستدعي (عقد port)
-              _port = 0;
-              await orphan.close(force: true);
-            }
-            telemetry.warn(
-              'port $candidate unavailable (${e.runtimeType}), '
-              'trying fallback',
-              category: BridgeCategory.network,
-            );
-          }
-        }
-        throw IntakeBindException('failed to bind any listen port: $lastError');
-      });
+      started = bind();
     } catch (_) {
       // measure نفسها رمت متزامنة (تنفيذ مضيف معطوب) — لا نحبس الحارس
       _starting = false;
@@ -1214,6 +1343,258 @@ class LocalIntakeServer {
       _starting = false;
       _startingFuture = null;
     });
+  }
+
+  /// The generation bind itself: waits out a draining stop, tries the
+  /// candidate ports, arms the optional listeners, and wires every bound
+  /// listener to the same handler. `resuming` only shapes the failure
+  /// message - the remembered port is named as taken, so the host reads
+  /// the exact fact and can decide to retry.
+  Future<int> _bindGeneration({
+    required int preferredPort,
+    required List<int> fallbacks,
+    required bool resuming,
+  }) {
+    return telemetry.measure<int>('intake.start', () async {
+      // فراغ جارٍ: البدء ينتظر تخلّي الجيل القديم كاملاً (مقاعده
+      // ويتاماه) قبل الربط — جيلان يتشاركان عدّاد المقاعد يجعلان
+      // طلبات الجيل الجديد تُرد 503 بلا انشغال حقيقي. بلا ميزانية
+      // معالج ومعالج لا يكمل لا يتحرر المقعد أبداً فيعلق البدء هنا
+      // إلى الأبد — والانتظار بنمط _startingFuture الذي ينتظر به
+      // stop البدءَ الجاري.
+      final draining = _stoppingFuture;
+      if (draining != null) {
+        await draining;
+      }
+      final candidates = [preferredPort, ...fallbacks];
+      Object? lastError;
+      for (final candidate in candidates) {
+        try {
+          _server = await HttpServer.bind(
+            InternetAddress.loopbackIPv4,
+            candidate,
+          );
+          // المنفذ الفعلي المُسند (يُصحّح عيب إعادة 0 عند طلب منفذ عشوائي
+          // — والطلب الصريح يساوي الفعلي فلا فرق سلكياً)
+          _port = _server!.port;
+          await _armListenersAtBind();
+          // أي ربط ناجح ينسى المنفذ المعلق: البدء الجديد جيل يملك
+          // عنوانه هو — والاستئناف الناجح يُنهي حالة الإيقاف بحسمها
+          if (_pausedPort != null) {
+            _pausedPort = null;
+          }
+          telemetry.info(
+            'intake listening on 127.0.0.1:$_port'
+            '${_serverV6 != null ? ' and [::1]:$_port' : ''}'
+            '${_serverUnix != null ? ' and unix socket '
+                      '$_unixSocketPath' : ''}'
+            '${candidate != preferredPort ? ' (fallback)' : ''}',
+            category: BridgeCategory.network,
+          );
+          return _port;
+        } catch (e) {
+          lastError = e;
+          // المستمع اليتيم: الربط نجح ثم رمت خطوة إقلاع لاحقة (ربط
+          // الـ::1 الاختياري الفاشل بعنف، أو مقبس يونكس فشل حارس
+          // صلاحياته، أو تحذير الحماية أو listen أو سطر الإقلاع) —
+          // المقبس يبقى يستمع بلا مرجع بعد إحلال المرشح التالي، وإن
+          // فشل كل المرشحين بقي _server غير صفري فيصطدم الإقلاع
+          // التالي بـStateError. أغلق كل المربوط وأصفّر الحالة قبل
+          // المرشح التالي.
+          final orphan = _server;
+          if (orphan != null) {
+            _server = null;
+            // والمنفذ يتبع الخادم إلى الصفر: رقم قديم فوق خادم لم
+            // يعد موجوداً كذبة يستند إليها المستدعي (عقد port)
+            _port = 0;
+            await orphan.close(force: true);
+          }
+          final orphanV6 = _serverV6;
+          if (orphanV6 != null) {
+            _serverV6 = null;
+            await orphanV6.close(force: true);
+          }
+          final orphanUnix = _serverUnix;
+          if (orphanUnix != null) {
+            _serverUnix = null;
+            await _removeUnixSocketFile();
+            await orphanUnix.close(force: true);
+          }
+          telemetry.warn(
+            'port $candidate unavailable (${e.runtimeType}), '
+            'trying fallback',
+            category: BridgeCategory.network,
+          );
+        }
+      }
+      throw IntakeBindException(
+        resuming
+            ? 'failed to resume: the remembered port $preferredPort is '
+                  'taken - another listener holds it, or the bind failed '
+                  '($lastError)'
+            : 'failed to bind any listen port: $lastError',
+      );
+    });
+  }
+
+  /// The post-bind arming shared by [start] and [resume] - the whole
+  /// listener set derives from the port actually bound: the host
+  /// authorities (widened with the `::1` spellings only when that optional
+  /// listener actually bound), the armed local pages, and the listener
+  /// wiring for every bound transport. The optional `::1` listener fails
+  /// softly (a loud warning, the service stays on `127.0.0.1` alone -
+  /// the primary listener's contract stands); the optional unix listener
+  /// fails hard (no unguarded socket ever serves - a bind or
+  /// permission-guard failure throws and the generation bind fails).
+  Future<void> _armListenersAtBind() async {
+    _authorities = computeAuthorities(_port, config.extraHosts);
+    if (config.listenIPv6Loopback) {
+      try {
+        final v6 = await HttpServer.bind(
+          InternetAddress.loopbackIPv6,
+          _port,
+          v6Only: true,
+        );
+        _serverV6 = v6;
+        // توسعة السلطات في الربط نفسه: صيغتا الـ::1 اسمتما عنواناً حياً
+        // حصراً والمستمع مربوط فعلاً — ومطفأً تبقى المجموعة حرفاً كما هي
+        _authorities = computeAuthorities(
+          _port,
+          config.extraHosts,
+          ipv6Loopback: true,
+        );
+      } catch (e) {
+        telemetry.warn(
+          'the optional ::1 listener failed to bind ($_port): '
+          '${e.runtimeType} — continuing on 127.0.0.1 alone',
+          category: BridgeCategory.network,
+        );
+      }
+    }
+    final unixPath = config.unixSocketPath;
+    if (unixPath != null) {
+      final unix = await HttpServer.bind(
+        InternetAddress(unixPath, type: InternetAddressType.unix),
+        0,
+      );
+      final guarded = await _enforceUnixOwnerOnly(unixPath);
+      if (!guarded) {
+        await unix.close(force: true);
+        await _removeUnixSocketFile();
+        // الفشل مغلقاً: مقبس بلا حاجز صلاحياته لا يخدم أبداً — البدء
+        // كله يفشل صاخباً بدل نصف مستمع مكشوف
+        throw IntakeBindException(
+          'failed to guard the unix socket "$unixPath" with owner-only '
+          'permissions - the listener refuses to serve unguarded',
+        );
+      }
+      _serverUnix = unix;
+      _unixSocketPath = unixPath;
+    }
+    _warnExtraHosts(config.extraHosts);
+    // تسليح أصول الصفحة المحلية عند الربط حصراً: المجموعة من
+    // المنفذ الفعلي المُسند (لا المطلوب)، وإحلالٌ عند كل ربط
+    // فيقرأ البدءُ الجديد مجموعتَه لا أصل ربطٍ سابق
+    protection.armBridgeServedOrigins(
+      config.localPages == null ? const <String>{} : bridgeServedOrigins(_port),
+    );
+    // سجل الحماية الصامت: حماية ممررة بلا مرصد تبتلع تحذيرات
+    // الأمن (allow-all وأسطر الرفض) في null — الخادم يقولها مرة
+    // واحدة بمرصده هو مع طريق الوصل، أما الافتراضية فبُنيت
+    // بمرصد الخادم نفسه فلا تحذير عليها.
+    if (protection.telemetry == null) {
+      telemetry.warn(
+        'intake protection carries no telemetry — its security log '
+        'is muted; pass the same telemetry to '
+        'IntakeProtection(telemetry: ...) that you gave the server',
+        category: BridgeCategory.security,
+      );
+    }
+    // الاتصالات بلا طلب نشط (keep-alive صامتة أو توقف المرسل قبل
+    // اكتمال الترويسات) تُغلق بعد المهلة بدل حجزها إلى الأبد؛
+    // جسم طلب نشط تحرسه [requestTimeout] أعلى — وعلى كل مستمع
+    // مربوط: النقل الثلاثة كلها تخدم نفس المعالج ونفس الحواجز
+    for (final listener in [_server!, ?_serverV6, ?_serverUnix]) {
+      listener.idleTimeout = config.idleTimeout;
+      listener.listen(
+        _handle,
+        onError: (Object error) => telemetry.error(
+          'intake server error',
+          error: error,
+          category: BridgeCategory.network,
+        ),
+      );
+    }
+  }
+
+  /// حاجز المقبس اليونكس: chmod 0600 ثم التحقق بقراءة الصلاحيات الفعلية
+  /// من الملف - الرجوع false في كل عائق (أداة chmod غائبة عن PATH، أو
+  /// رمي الأداة، أو قراءة صلاحيات غير مقنعة) فيفشل الربط مغلقاً ولا
+  /// يخدم الجسر مقبساً مفتوحاً على غير المالك. نداء واحد عند كل ربط.
+  Future<bool> _enforceUnixOwnerOnly(String path) async {
+    try {
+      final result = await Process.run('chmod', <String>['600', path]);
+      if (result.exitCode != 0) {
+        return false;
+      }
+      final stat = File(path).statSync();
+      if (stat.type != FileSystemEntityType.unixDomainSock) {
+        return false;
+      }
+      // ‏0x3F = بتات المجموعة والآخرون - المالك وحده يملك المقبس
+      return (stat.mode & 0x3F) == 0;
+    } on Object {
+      return false;
+    }
+  }
+
+  /// رفع ملف المقبس اليونكس الذي أنشأته هذه الحالة حصراً - المسار
+  /// يُحذف فقط ما دام مقبس مجال يونكس؛ ملفاً استُبدل به (أي نوع آخر) لا
+  /// تمسّه الحزمة أبداً (لا تحذف الحزمة ما لم تنشئه). الفشل محتوى: مسار
+  /// غائب أو مرفوع سابقاً لا يكسر الإيقاف.
+  Future<void> _removeUnixSocketFile() async {
+    final path = _unixSocketPath;
+    if (path == null) {
+      return;
+    }
+    _unixSocketPath = null;
+    try {
+      final stat = File(path).statSync();
+      if (stat.type == FileSystemEntityType.unixDomainSock) {
+        await File(path).delete();
+      }
+    } on Object {
+      // المسار غائب أو استُبدل: لا حذف ولا فشل إيقاف
+    }
+  }
+
+  /// Pauses the listeners the way a mobile app backgrounds: the remembered
+  /// port and the instance identity stay inside the server, every bound
+  /// listener closes under the same graceful drain a [stop] runs (in-flight
+  /// replies finish, seats are awaited, orphans get their budget), and
+  /// [resume] reopens on the same port with the same instance id. The
+  /// error contract mirrors [stop]'s siblings: [StateError] through the
+  /// returned future when the server is already paused or nothing is
+  /// bound (and a start still in flight is awaited first, exactly as
+  /// [stop] awaits it).
+  Future<void> pause() async {
+    if (_pausedPort != null) {
+      throw StateError('intake server is already paused - resume reopens it');
+    }
+    final pendingStart = _startingFuture;
+    if (pendingStart != null) {
+      try {
+        await pendingStart;
+      } catch (_) {
+        // فشل البدء: لا مستمع لإيقافه — الحسم وحده مقصود
+      }
+    }
+    if (_server == null && _serverV6 == null && _serverUnix == null) {
+      throw StateError('intake server is not listening - nothing to pause');
+    }
+    final rememberedPort = _port;
+    await stop();
+    _pausedPort = rememberedPort;
   }
 
   /// Stops listening - a graceful close, not an amputation: listening stops
@@ -1279,8 +1660,15 @@ class LocalIntakeServer {
     final deadlineMs = timeout == null ? null : _now + timeout.inMilliseconds;
     try {
       final server = _server;
+      final serverV6 = _serverV6;
+      final serverUnix = _serverUnix;
       _server = null;
+      _serverV6 = null;
+      _serverUnix = null;
       _port = 0;
+      // الإيقاف الكامل ينسى المنفذ المعلق: بعده لا استئناف يملك عنواناً
+      // — والبدء الجديد يربط جيلاً جديداً من الصفر
+      _pausedPort = null;
       if (server != null && deadlineMs != null) {
         try {
           await server.close().timeout(_remaining(deadlineMs));
@@ -1294,6 +1682,16 @@ class LocalIntakeServer {
         }
       } else {
         await server?.close();
+      }
+      // المستمعان الاختياريان بنمط الرشيق نفسه: إغلاق رشيق تحت المهلة
+      // (أو كاملاً بلا مهلة) وقسوة قسرية عند التعليق — طلب حي على
+      // الـ::1 أو مقبس يونكس يمسك مقعده فينتظره الفراغ كالـIPv4
+      await _closeListener(serverV6, deadlineMs);
+      await _closeListener(serverUnix, deadlineMs);
+      if (serverUnix != null) {
+        // ملف المقبس الذي أنشأته الحالة هذه يُرفع بعد الإغلاق: بداية
+        // تالية على المسار نفسه تعيد الربط نظيفة بلا ملف عالق
+        await _removeUnixSocketFile();
       }
       // قناة الويب سوكيت الحية: كل مقبس مفتوح يمسك مقعداً كطلب حي —
       // الإغلاق الرشيق بحالتها الخاصة (going away) يحسم مستقبل مسار
@@ -1386,6 +1784,26 @@ class LocalIntakeServer {
     seatsStillActive: _activeRequests,
     orphanHandlersStillRunning: _activeOrphans + _retiredOrphans,
   );
+
+  /// إغلاق مستمع اختياري بنمط الرشيق نفسه الذي يسلكه المستمع الأساسي:
+  /// إغلاق رشيق تحت المهلة الكلية إن وُجدت (وقسوة قسرية عند تعليقه)،
+  /// وكامل بلا مهلة في غير ذلك. null يعني غير مربوط فلا شيء.
+  Future<void> _closeListener(HttpServer? listener, int? deadlineMs) async {
+    if (listener == null) {
+      return;
+    }
+    if (deadlineMs != null) {
+      try {
+        await listener.close().timeout(_remaining(deadlineMs));
+      } on TimeoutException {
+        unawaited(
+          listener.close(force: true).catchError((Object _, StackTrace _) {}),
+        );
+      }
+      return;
+    }
+    await listener.close();
+  }
 
   /// Milliseconds left before [deadlineMs], floored at zero -
   /// `Future.timeout(Duration.zero)` fires at once, which is exactly the
@@ -1937,10 +2355,15 @@ class LocalIntakeServer {
       // (سقف الاتصالات المفتوحة — خياري) dart:io لا يحدّ المقابس
       // المقبولة (الخاملة منها أيضا)، وفوق الخيار يُرد الفائض فورا
       // ويُخدم الطلب بعد هبوط العدد. الصفر مطفأ فالسلك بلا الخيار
-      // حرفا كما هو، والعد يشمل الاتصال الحامل للطلب نفسه
+      // حرفاً كما هو، والعد يشمل الاتصال الحامل للطلب نفسه — وعلى
+      // كل المستمعين المربوطين (الـ::1 ومقبس يونكس الاختياريان
+      // يحسبان في السقف ذاته فلا باب جانبي يحصّنه)
       final openConnectionCap = config.maxOpenConnections;
       if (openConnectionCap > 0) {
-        final openNow = _server?.connectionsInfo().total ?? 0;
+        final openNow =
+            (_server?.connectionsInfo().total ?? 0) +
+            (_serverV6?.connectionsInfo().total ?? 0) +
+            (_serverUnix?.connectionsInfo().total ?? 0);
         if (openNow > openConnectionCap) {
           // كبح السطر بنمط بقية أسطر السعة: سطر واحد في الثانية على
           // الأكثر بالساعة المحقونة، والسطر التالي يحمل عدد المكتوم
@@ -2158,6 +2581,15 @@ class LocalIntakeServer {
               await _replyPage(response, page);
               return;
             }
+            // صفحة الصحة: GET على المسار المسلح حصراً وعلى مستمع الجسر
+            // نفسه (405 على التركيب كأي GET) - تمر بالبوابة نفسها
+            // بتسويتها كاملة فتقرأ القرار لا الصمت، وتجيب الأصل المقبول
+            // وحده: بلا رقم إصدار ولا تفاصيل كي لا تصير قناة بصمات
+            final healthPath = config.healthPath;
+            if (healthPath != null && request.uri.path == healthPath) {
+              await _handleHealthPage(request, response, admission);
+              return;
+            }
           }
           if (request.method != 'POST') {
             // قطع بعد الرد: الطريقة المخالفة قد تحمل جسما معلنا وغير
@@ -2207,50 +2639,10 @@ class LocalIntakeServer {
           // تجريه check القديمة (طوابع النوافذ، استهلاك المنحة، السؤال،
           // تحذيرات المراقبة، وعدّ الرفض وسطره الأمني). كل من رُفض قبله
           // — المهيّأ والطريقة المخالفة والمنشغل ومرفوض المضيف — لم
-          // يُسوِّ فلم يخلف شيئاً
+          // يُسوِّ فلم يخلف شيئاً. وفرع الرفض نفسه مشترك مع صفحة
+          // الصحة (مساعد واحد لا نسخة ثانية)
           admission.settle();
-          final rejection = admission.rejection;
-          if (rejection != null) {
-            // الرأس الصادق: بقايا النافذة التي رفضت الطلب كما قاسها
-            // الحماية؛ الثابت 2 يبقى للسؤال المفتوح وحده (المستخدم قد
-            // يجيب فورا فلا يُستعار له رأس دقائق)
-            final waitMs =
-                rejection.retryAfterMs ??
-                (rejection.code == 'origin_pending' ? 2000 : null);
-            if (waitMs != null) {
-              response.headers.set('Retry-After', '${(waitMs / 1000).ceil()}');
-            }
-            // The page must read the code and the honest Retry-After to
-            // retry: the consent question always echoes (its own ask fired
-            // the request), and every rejection carrying a wait budget
-            // (per-origin quota or token lockout) echoes when the origin
-            // qualifies for one - without ACAO the browser hides both from
-            // the retrying page and Retry-After loses its meaning.
-            // token_required وpair_signature_replay ينضمان لعموم القراءة:
-            // هما سؤال القبول نفسه الموجه لصفحة الأصل المؤهل (أعِد
-            // بالإثبات / وقّع طلباً جديداً) — وبوابة التأهيل (الصدى الخام
-            // المسجل) تبقي الأجنبي أعمى عنهما
-            final echoesCors =
-                rejection.code == 'origin_pending' ||
-                (rejection.retryAfterMs != null && admission.echoesCors) ||
-                ((rejection.code == 'token_required' ||
-                        rejection.code == 'pair_signature_replay') &&
-                    admission.echoesCors);
-            if (echoesCors) {
-              _echoCors(response, origin, admitted: true);
-            }
-            // الرد على المقبس الخام لا الرد المُدار: الجسم لم يُقرأ بعد،
-            // وإغلاق الرد المُدار فوقه يعلق close() على مرسل لا يكمل فيحجز
-            // المقعد، أو يهدم الاتصال فيبتلع الرد الذي يجب أن تقرأه الصفحة
-            // (origin_pending وحملة Retry-After ذات صدى CORS). الترويسات
-            // المضبوطة أعلاه (Retry-After وصدى CORS ومعرف الارتباط) تُنسخ
-            // كما هي، والقطع بعد غسل الرد بتفريغ محدود بلا حجز مقعد.
-            await _replyRejection(
-              response,
-              code: rejection.code,
-              message: rejection.message,
-              bodyFullyRead: false,
-            );
+          if (await _answerGateRejection(response, admission, origin)) {
             return;
           }
           // الصدى بعد القبول للمؤهل وحده — قراءة من السجل: التوكن
@@ -2803,6 +3195,86 @@ class LocalIntakeServer {
       // ليصله مسار الشبكة الأماني (500 ثابت وسجل انهيار).
       throw error;
     }
+  }
+
+  /// فرع رفض بوابة القبول - مسار واحد مشترك بين الرد الواحد (الأوامر)
+  /// وصفحة الصحة كي لا يتشعب شكل الرفض: الرأس الصادق Retry-After بقاعدة
+  /// الثابت 2 للسؤال المفتوح حصراً، وصدى CORS المؤهل (السؤال دوماً؛
+  /// وكل رفض ذي ميزانية انتظار للواصل؛ وtoken_required
+  /// وpair_signature_replay لعموم القراءة المؤهلة)، والرد على المقبس
+  /// الخام بنمط بقية الرفض المبكر (الجسم غير مقروء فالرد أولاً ثم
+  /// التفريغ المحدود بلا حجز مقعد). false يعني لا رفض فالمسار يكمل.
+  Future<bool> _answerGateRejection(
+    HttpResponse response,
+    IntakeAdmission admission,
+    String? origin, {
+    bool headOnly = false,
+  }) async {
+    final rejection = admission.rejection;
+    if (rejection == null) {
+      return false;
+    }
+    // الرأس الصادق: بقايا النافذة التي رفضت الطلب كما قاسها
+    // الحماية؛ الثابت 2 يبقى للسؤال المفتوح وحده (المستخدم قد
+    // يجيب فورا فلا يُستعار له رأس دقائق)
+    final waitMs =
+        rejection.retryAfterMs ??
+        (rejection.code == 'origin_pending' ? 2000 : null);
+    if (waitMs != null) {
+      response.headers.set('Retry-After', '${(waitMs / 1000).ceil()}');
+    }
+    // The page must read the code and the honest Retry-After to
+    // retry: the consent question always echoes (its own ask fired
+    // the request), and every rejection carrying a wait budget
+    // (per-origin quota or token lockout) echoes when the origin
+    // qualifies for one - without ACAO the browser hides both from
+    // the retrying page and Retry-After loses its meaning.
+    // token_required وpair_signature_replay ينضمان لعموم القراءة:
+    // هما سؤال القبول نفسه الموجه لصفحة الأصل المؤهل (أعِد
+    // بالإثبات / وقّع طلباً جديداً) — وبوابة التأهيل (الصدى الخام
+    // المسجل) تبقي الأجنبي أعمى عنهما
+    final echoesCors =
+        rejection.code == 'origin_pending' ||
+        (rejection.retryAfterMs != null && admission.echoesCors) ||
+        ((rejection.code == 'token_required' ||
+                rejection.code == 'pair_signature_replay') &&
+            admission.echoesCors);
+    if (echoesCors) {
+      _echoCors(response, origin, admitted: true);
+    }
+    await _replyRejection(
+      response,
+      code: rejection.code,
+      message: rejection.message,
+      bodyFullyRead: false,
+      headOnly: headOnly,
+    );
+    return true;
+  }
+
+  /// صفحة الصحة المسلحة: التسوية الكاملة لبسطة القبول نفسها (الأثر يهبط
+  /// كما يهبط لأي طلب — طوابع الحصص والسؤال وعدّ الرفض) ثم الرد: المقبول
+  /// وحده يقرأ `{"ok":true}` حرفاً — بلا رقم إصدار ولا عدّادات ولا
+  /// تفاصيل، فالصفحة فحص حياة لا قناة بصمات — وغير المقبول يقرأ رفض
+  /// البوابة بلا صدى فيخفيه المتصفح كله. جسم GET لا يُقرأ على هذا المسار
+  /// فيمر الرد على المقبس المنتزع بنمط بقية الردود المبكرة.
+  Future<void> _handleHealthPage(
+    HttpRequest request,
+    HttpResponse response,
+    IntakeAdmission admission,
+  ) async {
+    final origin = _firstHeader(request, 'Origin');
+    admission.settle();
+    if (await _answerGateRejection(response, admission, origin)) {
+      return;
+    }
+    _echoCors(response, origin, admitted: admission.echoesCors);
+    await _reply(
+      response,
+      status: HttpStatus.ok,
+      json: const {'ok': true},
+      bodyFullyRead: false,
+    );
   }
 
   /// The pairing route handler: reads the bounded body, hands the code to

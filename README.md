@@ -365,7 +365,7 @@ Stable error codes:
 | 400 | `invalid_utf8` / `empty_payload` / `unsupported_payload_shape` | Body not UTF-8 / no valid command payload / JSON object without any of the known command keys. A body that fails JSON decoding altogether is **not** a 400 — it falls through as a raw text command (the tested non-JSON contract); a JSON number, boolean, or `null` body takes the same raw path. Inside a JSON array, non-string and empty-string elements drop without notice. |
 | 400 | `invalid_payload_item` / `malformed_json_shape` / `invalid_json` / `non_json_body` | The payload-contract options — each **off by default**, so the default wire never answers these: `strictPayloadItems` refuses a JSON list carrying a non-string or empty element (the default drops it silently) / `requireValidJsonShape` refuses a container-shaped body that scans structurally incomplete — an unclosed bracket or string (the default falls through as raw text) / `rejectInvalidJson` refuses a body sent as `application/json` that fails JSON decoding / `requireJsonBodies` (JSON-only mode) refuses the raw-text path whole — raw command text and scalar JSON bodies alike. All four answer before your handler runs. |
 | 400 | `command_required` | With `BridgeConfig.acceptBinaryBodies` on: an `application/octet-stream` body that carries no `X-Command` name — absent, blank, or with an empty body: one rule, no size carve-out (the raw-text path refuses its empty body `empty_payload` the same way). The bridge delivers only named binary commands; with the option off, `octet-stream` never passes the media gate at all (`415`). |
-| 405 | `method_not_allowed` | Only `POST` (and `OPTIONS` preflight) are accepted - every `GET` included, except on the registered local-page paths while `BridgeConfig.localPages` is armed (those answer the page). |
+| 405 | `method_not_allowed` | Only `POST` (and `OPTIONS` preflight) are accepted - every `GET` included, except on the registered local-page paths while `BridgeConfig.localPages` is armed (those answer the page), and on the armed health page (`BridgeConfig.healthPath`, which answers `{"ok":true}` to an accepted origin). |
 | 403 | `origin_not_listed` / `origin_declined` / `origin_unknown` / `origin_blocked` / `origin_pending` | Origin policy rejection (not listed / consent declined / not confirmable / allow-all hardening / consent window open — retry after `Retry-After`). |
 | 403 | `token_required` | The origin qualified, but `OriginPolicy.requireOriginWithToken` is on and the request carried no valid token (the shared token, or a paired origin-bound signature) — the readable refusal a paired page retries from. |
 | 403 | `pair_code_invalid` / `pair_code_expired` | On `POST /pair` (pairing armed): an unknown or already-used one-time code / a code past its 120-second life. The reply always echoes CORS — the pairing door is readable by design (the code is the gate, not the origin). |
@@ -562,6 +562,71 @@ final bridge = LocalIntakeServer(
 );
 ```
 
+## The listeners, the lifecycle, and the health page
+
+Three options extend where and how the bridge listens, plus the mobile
+lifecycle pair and the instance identity. Each option is off by default:
+the disarmed wire is letter identical to previous releases.
+
+**The optional `::1` listener** — `BridgeConfig.listenIPv6Loopback: true`
+binds a second listener on `::1` (loopback IPv6, IPv6-only — never
+dual-stack) at the same port, and the local host authorities widen in the
+same start with the `[::1]:port` and bare `::1` spellings: a request
+naming them passes the Host gate only while that listener is actually
+bound. A host that cannot bind `::1` (IPv6 disabled) warns once and
+keeps serving on `127.0.0.1` alone.
+
+**The optional unix-socket listener** (Linux and macOS only) —
+`BridgeConfig.unixSocketPath: "/run/myapp/bridge.sock"` also serves HTTP
+on this filesystem path for local CLI clients. The socket file's
+owner-only permissions (mode 0600, enforced at bind and verified by
+reading the file's actual mode before anything is served) are the
+transport boundary — a chmod or verification failure fails the whole
+start, so no unguarded socket ever serves. The request rides the same
+single admission step with no Origin (cross by the token alone; a CLI
+that sends no fetch metadata needs `OriginPolicy.requireFetchMetadata:
+false`, the standing headerless switch) behind the same Host gate (an
+HTTP/1.1 client sends `Host: localhost`). A path that is already
+occupied (any existing file, stale socket included) fails the start with
+`IntakeBindException` — the package never deletes a path it did not
+create — and the socket file the package itself created is removed at
+`stop`, so a restart on the same path rebinds cleanly. The
+open-connection cap counts this listener too.
+
+**`pause()` and `resume()`** — the mobile lifecycle pair: `pause()`
+closes every bound listener under the same graceful drain `stop()` runs
+(in-flight replies finish, seats are awaited, orphans get their budget)
+and remembers the bound port; `resume()` rebinds on that exact port with
+no fallbacks — a silent port move would break every client pinned to the
+address. If another process took the port meanwhile, resume refuses with
+`IntakeBindException` naming the remembered port as taken, and the pause
+state survives so the host can retry once the port frees. The instance
+identity carries across untouched; `start()` while paused supersedes it
+(the remembered port is forgotten, and `resume()` afterwards reads `not
+paused`). The errors are `StateError`s through the returned future,
+mirroring `start()`.
+
+**`BridgeInstanceInfo`** — `server.instanceInfo` reads the pinning
+identity while a listener is bound: `port` (the actually bound port,
+never the requested one), `instanceId` (32 hex characters of secure
+random, generated once per server object, stable across pause/resume and
+across stop/start generations), and `protocolVersion`
+(`BridgeInstanceInfo.bridgeProtocolVersion` — the wire-contract version,
+not the package release). `instanceId` stays readable while paused; the
+full snapshot throws `StateError` until a listener is bound again.
+
+**The health page** — `BridgeConfig.healthPath: '/health'` arms a `GET`
+route on exactly that path. It passes the standing gate like every
+request — the origin and Host gates, the seat caps, and the one
+admission step with its settle — and answers the accepted origin alone:
+the body is literally `{"ok":true}`. No version number, no counters, no
+details, so the page can never be used to fingerprint the host. A
+non-accepted origin reads the standing refusal with no CORS echo, so a
+browser probe reveals nothing. The page answers on the bridge's own
+listener only (a forwarded `GET` on a mounted door answers `405` like
+any non-POST). Disarmed (the default), the path answers `405
+method_not_allowed` like every `GET`.
+
 ## Page-side reference (JavaScript)
 
 The wire contract above is the real contract; the snippet below is a
@@ -741,6 +806,89 @@ applies wherever the request arrives.
 | Android | shipped — an in-app loopback server; run the host app foregrounded or behind a foreground service, or the system may stop it. Chrome and Firefox reach it after the user grants Local Network Access. On Android 17, loopback traffic between two profiles (work and personal) is blocked by default for every app regardless of targetSdk; loopback within one profile is unaffected. On Android, any installed app can reach the port and send any `Origin`, so the origin+token requirement with pairing is the real barrier there: the page pairs with a displayed one-time code and proves possession with HMAC signatures - an installed app can present the same listed origin but cannot sign. Native clients on the device send the shared token. With the requirement off (the default), a browser page presents the token only where its preflight is echoed: a listed origin, or any valid https origin not yet refused under the discovery and allow-all modes - and an installed app can present that same listed origin. The emulator side of the pairing story is runnable with `dart run tool/emulator_pairing_lab.dart` (adb reverse commands and the page URL are printed; the verdicts are read from the page's report collector). | 2026-11-18 | [Android: local network permission](https://developer.android.com/privacy-and-security/local-network-permission) · [Android 17 behavior changes](https://developer.android.com/about/versions/17/behavior-changes-all) |
 | iOS | untested here — no browser path: WebKit blocks `http://127.0.0.1` from `https` pages (mixed content), and iOS suspends in-app sockets when the host app backgrounds | 2026-11-15 | [WebKit bug 171934](https://bugs.webkit.org/show_bug.cgi?id=171934) |
 
+### The mobile host (Android and iOS) — verified 2026-11-21
+
+Every line below was verified against the vendor's official
+documentation on 2026-11-21 (a live read of each linked page that day);
+the source and that date ride the line. Lines that name no vendor fact
+(such as the wiring guidance) say so.
+
+**Android**
+
+- Keep the host app foregrounded, or run the server behind a foreground
+  service: the foreground service is the platform's form for work that
+  is noticeable to the user while they are not directly interacting
+  with the app, and it carries a status-bar notification. The official
+  guidance: "Only use a foreground service when your app needs to
+  perform a task that is noticeable by the user, even when they're not
+  directly interacting with the app." Verified 2026-11-21 —
+  [Android: Foreground services overview](https://developer.android.com/develop/background-work/services/fgs)
+- Pair `pause()` with the background lifecycle callback and `resume()`
+  on the foreground return — the same port and the same instance id come
+  back (see the listeners and lifecycle section above). Wiring guidance,
+  not a vendor fact.
+- Chrome (desktop and Android) reaches a loopback server after the user
+  grants the Local Network Access prompt: the permission's scope
+  explicitly covers loopback destinations (`127.0.0.0/8` and `::1/128`),
+  and the prompt launched in Chrome 142. Verified 2026-11-21 —
+  [Chrome: New permission prompt for Local Network Access](https://developer.chrome.com/blog/local-network-access)
+- Firefox ships the same model: release 153.0 (July 21, 2026) enabled
+  Local Network Access restrictions by default for all users —
+  websites must request permission before connecting to devices on the
+  local network or to apps and services on your device. Verified
+  2026-11-21 —
+  [Firefox 153.0 release notes](https://www.firefox.com/en-US/firefox/153.0/releasenotes/)
+- The Android 17 local-network permission: starting with Android 17
+  (API level 37), local-network protections are enforced for apps
+  targeting SDK 37 or higher behind the `ACCESS_LOCAL_NETWORK` runtime
+  permission (in the `NEARBY_DEVICES` group); accepting an incoming TCP
+  connection on a local-network address is among the gated facts, and
+  WebView traffic inherits the host app's permission state. The
+  official local-network definition lists link-local, CGNAT, and
+  RFC1918 ranges plus multicast/broadcast and does not mention loopback
+  — the bridge's `127.0.0.1` listener is not in that scope. Verified
+  2026-11-21 —
+  [Android: Local network permission](https://developer.android.com/privacy-and-security/local-network-permission) ·
+  [Android: local network definition](https://developer.android.com/privacy-and-security/local-network-definition)
+- Cross-profile loopback: beginning with Android 17, cross-profile
+  loopback traffic is no longer permitted by default, for every app
+  running on Android 17 or higher regardless of target API level;
+  loopback traffic within the same profile is not affected. Verified
+  2026-11-21 —
+  [Android 17 behavior changes](https://developer.android.com/about/versions/17/behavior-changes-all)
+- Play declaration: apps that request `ACCESS_LOCAL_NETWORK` must
+  submit a Play Console declaration to justify access and explain why
+  the device pickers are not sufficient, and the permission is
+  restricted to apps that need it for core functionality. Verified
+  2026-11-21 —
+  [Play: Permissions and APIs policy](https://support.google.com/googleplay/android-developer/answer/16909972)
+- The emulator side of the lifecycle story is runnable with
+  `dart run tool/emulator_pause_resume_lab.dart --pause-after-ms 8000
+  --resume-after-ms 8000` — the tool prints the `adb reverse` commands
+  and the page URL up front, then prints the `KEYCODE_HOME` command at
+  the pause moment and the foreground command at the resume moment, and
+  reads the page's three marks (open:OK, paused:FAIL, resumed:OK on the
+  same port) for its PASS/INCOMPLETE verdict. A tool, not a vendor fact.
+
+**iOS**
+
+- There is no server in the background: when the app moves to the
+  background the system gives `applicationDidEnterBackground(_:)` five
+  seconds and "shortly after that method returns, the system puts your
+  app into the suspended state" — a loopback listener does not survive
+  suspension. Extended runtime exists only through
+  `beginBackgroundTask` (bounded, and the system terminates the app if
+  tasks are not ended in time), so the honest shape is the same pair:
+  `pause()` on the background callback, `resume()` on the foreground
+  return. Verified 2026-11-21 —
+  [Apple: Extending your app's background execution time](https://developer.apple.com/documentation/uikit/extending-your-app-s-background-execution-time)
+- There is no browser path to a loopback HTTP server on iOS (the
+  browser-support table above). The iOS host integration is the
+  in-process feed (`acceptHostFeed` behind a `WKScriptMessage`
+  callback) instead of a network listener — this is this project's own
+  integration choice, not a vendor-documented fact, so no source line
+  claims it.
+
 ### When this package fits
 
 The bridge is built for pages driving local commands where a silent or
@@ -764,14 +912,20 @@ repeat and carries no consequence is fine on a plain local HTTP server — the
 bridge's walls exist for the commands that must not run twice or from
 the wrong page.
 
-Addressing: the server binds IPv4 only, so page code should use
-`127.0.0.1` — a `localhost` name can resolve to `::1` (IPv6), where
-nothing listens in this release, and another local program can listen on
-`::1` at the same port number while the bridge is running.
+Addressing: the server binds `127.0.0.1` by default, so page code should
+use `127.0.0.1` — a `localhost` name can resolve to `::1` (IPv6), where
+nothing listens unless `BridgeConfig.listenIPv6Loopback` is armed, and
+another local program can listen on `::1` at the same port number while
+the bridge is running. The optional unix-socket listener
+(`BridgeConfig.unixSocketPath`) adds a filesystem transport for local
+CLI clients on Linux and macOS.
 
 ## Limits (by design)
 
-- Loopback IPv4 only (`127.0.0.1`); no IPv6 binding in this release.
+- Loopback only: `127.0.0.1` by default; the optional `::1` listener
+  (`BridgeConfig.listenIPv6Loopback`) and the optional unix-socket
+  listener (`BridgeConfig.unixSocketPath`, Linux/macOS) join only when
+  armed — never a non-loopback or network-facing address.
 - JSON nesting is capped in the same pre-decode pass (`maxJsonDepth`,
   default 32) — deeper bodies get the same `413 payload_too_complex`
   before `jsonDecode` runs.
