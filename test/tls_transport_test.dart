@@ -1,14 +1,17 @@
-// نقل TLS على الحلقة الراجعة: المستمع نفسه يُربط bindSecure حين
-// يمرر المضيف securityContext جاهزاً — الحزمة لا تولّد شهادة ولا تثبتها
-// ولا تكتب ملفاً. الشهادة هنا نصاب ذاتي الاعتماد مضمّن ثابتين (يحمي لا
-// شيء، حلقي 127.0.0.1 و::1 وlocalhost فقط) ويقبلها عميل TLS بعلم
-// badCertificate — لا توليد وقت تشغيل ولا اعتماديات.
+// نقل TLS على الحلقة الراجعة: المستمع الآمن يُربط عبر التلقيمة حين
+// يمرر المضيف securityContext جاهزاً — تلقيمة أول سجل تلف المستمع الخام
+// وتغذي HttpServer.listenOn، والحزمة لا تولّد شهادة ولا تثبتها ولا
+// تكتب ملفاً. الشهادة في test/support/tls_cert.dart ثابتان مضمنان
+// (يحميان لا شيء، حلقي 127.0.0.1 و::1 وlocalhost فقط) ويقبلها عميل
+// TLS بعلم badCertificate — لا توليد وقت تشغيل ولا اعتماديات.
 //
 // الشواهد: طقم السلك الزوجي كامل (باب عادي مقابل باب آمن على المصنع
-// نفسه — الحالة والحالة)، وعائلة الميزانيات الزوجية، ومصافحة TLS لا
-// تكتمل لا تحجز مقعداً ولا تصل إلى الخادم أصلاً، والمرسل الميت يفرغ
-// مقعده، وصفحة الجسر المُخدمة تجاوز أصلها https لا http، والقناة
-// wss، والإطفاء الافتراضي حرفاً ورفض توليفة مقبس اليونكس عند البناء.
+// نفسه — الحالة والحالة) عبر التلقيمة على البابين، وزوجي ثانٍ على
+// ::1 حيث يتوفر، وعائلة الميزانيات الزوجية، ومصافحة TLS لا تكتمل لا
+// تحجز مقعداً ولا تصل إلى الخادم أصلاً وتُقطع على السلك عند مهلة أول
+// سجل، والمرسل الميت يفرغ مقعده، وصفحة الجسر المُخدمة تجاوز أصلها
+// https لا http، والقناة wss، والإطفاء الافتراضي حرفاً ورفض توليفة
+// مقبس اليونكس عند البناء.
 import 'dart:async';
 import 'dart:convert';
 import 'dart:io';
@@ -17,39 +20,12 @@ import 'dart:typed_data' show BytesBuilder;
 import 'package:test/test.dart';
 import 'package:localhost_bridge/localhost_bridge.dart';
 
+import 'support/tls_cert.dart';
+
 const _timeout = Duration(milliseconds: 700);
 const _t64 = 'a3f1c52e94b7d068f5e2a9c4b1d7e8036f9a2c5e8b1d7f04a6c9e2d5f8b3a1c7';
 
-// نصاب TLS للشهود حصراً: P-256 ذاتي الاعتماد، CN=localhost_bridge-tls-transport-lab،
-// ‏SAN‏: ‏IP:127.0.0.1 + IP:::1 + DNS:localhost، صلاحية إلى 2036-11-20 —
-// يحمي لا شيء (ولود محلياً مرة واحدة وقت كتابة الملف، ليس وقت التشغيل).
-const _certPem = '''
------BEGIN CERTIFICATE-----
-MIIB3zCCAYSgAwIBAgIUfCbVoVwn4WVVULR2IhRc6rxVOsQwCgYIKoZIzj0EAwIw
-LTErMCkGA1UEAwwibG9jYWxob3N0X2JyaWRnZS10bHMtdHJhbnNwb3J0LWxhYjAe
-Fw0yNjExMjEyMzA3MzhaFw0zNjExMjAyMzA3MzhaMC0xKzApBgNVBAMMImxvY2Fs
-aG9zdF9icmlkZ2UtdGxzLXRyYW5zcG9ydC1sYWIwWTATBgcqhkjOPQIBBggqhkjO
-PQMBBwNCAATPQHygs36xdVlXESz2jhx5eyoi50uvnyN6J0xydgxOrxy1JT5BQLMW
-qzPwCl/wMlLzbHNJYEeVpakUB7XNfMeho4GBMH8wHQYDVR0OBBYEFHgaXlPCQz8W
-0dtH1Hhj+VIL0uKJMB8GA1UdIwQYMBaAFHgaXlPCQz8W0dtH1Hhj+VIL0uKJMA8G
-A1UdEwEB/wQFMAMBAf8wLAYDVR0RBCUwI4cEfwAAAYcQAAAAAAAAAAAAAAAAAAAA
-AYIJbG9jYWxob3N0MAoGCCqGSM49BAMCA0kAMEYCIQCJQY2T3zOP7pdUNCqK28T4
-CI8Doo3bwh+wQC2R9CXL4gIhAPiTYGZSEZsj8ljXYaoxipEb3eJYP47KR/rsHCQY
-GOUV
------END CERTIFICATE-----''';
-
-const _keyPem = '''
------BEGIN PRIVATE KEY-----
-MIGHAgEAMBMGByqGSM49AgEGCCqGSM49AwEHBG0wawIBAQQgpVY43QY5bcNL7dFw
-599lgDp5x38JRWoBJcXOzvkNalyhRANCAATPQHygs36xdVlXESz2jhx5eyoi50uv
-nyN6J0xydgxOrxy1JT5BQLMWqzPwCl/wMlLzbHNJYEeVpakUB7XNfMeh
------END PRIVATE KEY-----''';
-
-/// سياق TLS جاهز من الثابتين المضمّنين حصراً — بلا ملفات وبلا توليد:
-/// هذا عقد الخيار نفسه (المضيف يمرر سياقاً جاهزاً).
-SecurityContext _tlsContext() => SecurityContext()
-  ..useCertificateChainBytes(utf8.encode(_certPem))
-  ..usePrivateKeyBytes(utf8.encode(_keyPem));
+SecurityContext _tlsContext() => tlsContext();
 
 class _Rec extends BridgeTelemetry {
   final warns = <String>[];
@@ -313,346 +289,366 @@ void _expectSameWire(
 }
 
 void main() {
-  test(
-    'the whole wire corpus passes through the TLS listener with the '
-    'same status, body, and echo headers the plain listener answers',
-    () async {
-      final small = jsonEncode({
-        'data': ['SIZE 3', 'CLS', 'TEXT 10,10,3,1,1,1,hello', 'PRINT 1,1'],
-      });
-      final over = 'x' * (1024 * 1024 + 1);
-      const wrapper = 13;
-      final at = '{"data":["${'x' * (1024 * 1024 - wrapper)}"]}';
-      final malformedOrigin = 'https://portal.example/path';
-      final longOrigin = 'https://${'a' * 600}.example';
+  // الطقم الزوجي الكامل: باب عادي مقابل باب آمن على المصنع نفسه —
+  // الحالة والحالة — عبر التلقيمة على الباب الرابعي، أو عبر مستمع
+  // الـ::1 الاختياري حين overV6. صيغة المضيف في الترويسات وعنوان
+  // الاتصال يتبعان الباب.
+  Future<void> runCorpusPair({required bool overV6}) async {
+    final plainDoor = overV6 ? '::1' : '127.0.0.1';
+    String doorHost(int port) => overV6 ? '[::1]:$port' : '127.0.0.1:$port';
+    final small = jsonEncode({
+      'data': ['SIZE 3', 'CLS', 'TEXT 10,10,3,1,1,1,hello', 'PRINT 1,1'],
+    });
+    final over = 'x' * (1024 * 1024 + 1);
+    const wrapper = 13;
+    final at = '{"data":["${'x' * (1024 * 1024 - wrapper)}"]}';
+    final malformedOrigin = 'https://portal.example/path';
+    final longOrigin = 'https://${'a' * 600}.example';
 
-      for (final mode in ['allowAll', 'allowlist', 'token']) {
-        final recA = _Rec();
-        final recB = _Rec();
-        final plain = _make(rec: recA, pr: _protection(mode, recA));
-        final tls = _make(
-          rec: recB,
-          pr: _protection(mode, recB),
-          config: BridgeConfig(
-            maxSeatsPerOrigin: 16,
-            securityContext: _tlsContext(),
-          ),
-        );
-        await plain.start(preferredPort: 0);
-        await tls.start(preferredPort: 0);
-        final pa = plain.port;
-        final pb = tls.port;
+    for (final mode in ['allowAll', 'allowlist', 'token']) {
+      final recA = _Rec();
+      final recB = _Rec();
+      final plain = _make(
+        rec: recA,
+        pr: _protection(mode, recA),
+        config: BridgeConfig(maxSeatsPerOrigin: 16, listenIPv6Loopback: overV6),
+      );
+      final tls = _make(
+        rec: recB,
+        pr: _protection(mode, recB),
+        config: BridgeConfig(
+          maxSeatsPerOrigin: 16,
+          listenIPv6Loopback: overV6,
+          securityContext: _tlsContext(),
+        ),
+      );
+      await plain.start(preferredPort: 0);
+      await tls.start(preferredPort: 0);
+      final pa = plain.port;
+      final pb = tls.port;
 
-        Future<void> cap(
-          String name,
-          String requestForPlain,
-          String requestForTls,
-        ) async {
-          final a = await _exchange('127.0.0.1', pa, requestForPlain);
-          final b = await _exchangeTls('127.0.0.1', pb, requestForTls);
-          _expectSameWire(a, b, '[$mode] $name');
-          expect(b['status'], isNot(-2), reason: '[$mode] $name must answer');
-        }
-
-        await cap(
-          '01_valid_small',
-          _post(
-            '127.0.0.1:$pa',
-            small,
-            origin: 'https://portal.example',
-            token: _t64,
-          ),
-          _post(
-            '127.0.0.1:$pb',
-            small,
-            origin: 'https://portal.example',
-            token: _t64,
-          ),
-        );
-        await cap(
-          '02_get_method',
-          'GET / HTTP/1.1\r\nHost: 127.0.0.1:$pa\r\n\r\n',
-          'GET / HTTP/1.1\r\nHost: 127.0.0.1:$pb\r\n\r\n',
-        );
-        await cap(
-          '03_options',
-          'OPTIONS / HTTP/1.1\r\nHost: 127.0.0.1:$pa\r\n'
-              'Origin: https://portal.example\r\n'
-              'Access-Control-Request-Method: POST\r\n\r\n',
-          'OPTIONS / HTTP/1.1\r\nHost: 127.0.0.1:$pb\r\n'
-              'Origin: https://portal.example\r\n'
-              'Access-Control-Request-Method: POST\r\n\r\n',
-        );
-        await cap(
-          '04_over_limit',
-          _post(
-            '127.0.0.1:$pa',
-            over,
-            origin: 'https://portal.example',
-            token: _t64,
-          ),
-          _post(
-            '127.0.0.1:$pb',
-            over,
-            origin: 'https://portal.example',
-            token: _t64,
-          ),
-        );
-        await cap(
-          '05_at_limit',
-          _post(
-            '127.0.0.1:$pa',
-            at,
-            origin: 'https://portal.example',
-            token: _t64,
-          ),
-          _post(
-            '127.0.0.1:$pb',
-            at,
-            origin: 'https://portal.example',
-            token: _t64,
-          ),
-        );
-        await cap(
-          '06_silence_timeout',
-          'POST / HTTP/1.1\r\nHost: 127.0.0.1:$pa\r\nContent-Length: 500\r\n'
-              'Origin: https://portal.example\r\nX-Bridge-Token: $_t64\r\n\r\n',
-          'POST / HTTP/1.1\r\nHost: 127.0.0.1:$pb\r\nContent-Length: 500\r\n'
-              'Origin: https://portal.example\r\nX-Bridge-Token: $_t64\r\n\r\n',
-        );
-        await cap(
-          '08_origin_rejected',
-          _post(
-            '127.0.0.1:$pa',
-            small,
-            origin: 'https://evil.com',
-            token: _t64,
-          ),
-          _post(
-            '127.0.0.1:$pb',
-            small,
-            origin: 'https://evil.com',
-            token: _t64,
-          ),
-        );
-        await cap(
-          '09_token_wrong',
-          _post(
-            '127.0.0.1:$pa',
-            small,
-            origin: 'https://portal.example',
-            token: 'WRONG',
-          ),
-          _post(
-            '127.0.0.1:$pb',
-            small,
-            origin: 'https://portal.example',
-            token: 'WRONG',
-          ),
-        );
-        await cap(
-          '10_token_correct_no_origin',
-          _post('127.0.0.1:$pa', small, token: _t64),
-          _post('127.0.0.1:$pb', small, token: _t64),
-        );
-        await cap(
-          '12_host_evil',
-          _post(
-            'evil.com',
-            small,
-            origin: 'https://portal.example',
-            token: _t64,
-          ),
-          _post(
-            'evil.com',
-            small,
-            origin: 'https://portal.example',
-            token: _t64,
-          ),
-        );
-        await cap(
-          '13_absolute_form',
-          'POST http://evil.com/ HTTP/1.1\r\nHost: 127.0.0.1:$pa\r\n'
-              'Content-Type: application/json\r\n'
-              'Content-Length: ${utf8.encode(small).length}\r\n'
-              'Origin: https://portal.example\r\nX-Bridge-Token: $_t64\r\n\r\n'
-              '$small',
-          'POST http://evil.com/ HTTP/1.1\r\nHost: 127.0.0.1:$pb\r\n'
-              'Content-Type: application/json\r\n'
-              'Content-Length: ${utf8.encode(small).length}\r\n'
-              'Origin: https://portal.example\r\nX-Bridge-Token: $_t64\r\n\r\n'
-              '$small',
-        );
-        await cap(
-          '14_duplicate_host',
-          'POST / HTTP/1.1\r\nHost: first.com\r\nHost: 127.0.0.1:$pa\r\n'
-              'Content-Type: application/json\r\n'
-              'Content-Length: ${utf8.encode(small).length}\r\n'
-              'Origin: https://portal.example\r\nX-Bridge-Token: $_t64\r\n\r\n'
-              '$small',
-          'POST / HTTP/1.1\r\nHost: first.com\r\nHost: 127.0.0.1:$pb\r\n'
-              'Content-Type: application/json\r\n'
-              'Content-Length: ${utf8.encode(small).length}\r\n'
-              'Origin: https://portal.example\r\nX-Bridge-Token: $_t64\r\n\r\n'
-              '$small',
-        );
-        await cap(
-          '15_duplicate_origin_header',
-          'POST / HTTP/1.1\r\nHost: 127.0.0.1:$pa\r\n'
-              'Origin: https://portal.example\r\n'
-              'Origin: https://portal.example\r\n'
-              'Content-Type: application/json\r\n'
-              'Content-Length: ${utf8.encode(small).length}\r\n\r\n$small',
-          'POST / HTTP/1.1\r\nHost: 127.0.0.1:$pb\r\n'
-              'Origin: https://portal.example\r\n'
-              'Origin: https://portal.example\r\n'
-              'Content-Type: application/json\r\n'
-              'Content-Length: ${utf8.encode(small).length}\r\n\r\n$small',
-        );
-        await cap(
-          '16_origin_malformed',
-          _post('127.0.0.1:$pa', small, origin: malformedOrigin, token: _t64),
-          _post('127.0.0.1:$pb', small, origin: malformedOrigin, token: _t64),
-        );
-        await cap(
-          '17_origin_too_long',
-          _post('127.0.0.1:$pa', small, origin: longOrigin, token: _t64),
-          _post('127.0.0.1:$pb', small, origin: longOrigin, token: _t64),
-        );
-        await cap(
-          '18_token_too_long',
-          _post(
-            '127.0.0.1:$pa',
-            small,
-            origin: 'https://portal.example',
-            token: 'x' * 1100,
-          ),
-          _post(
-            '127.0.0.1:$pb',
-            small,
-            origin: 'https://portal.example',
-            token: 'x' * 1100,
-          ),
-        );
-        await cap(
-          '19_legacy_token_header_alone',
-          _post(
-            '127.0.0.1:$pa',
-            small,
-            origin: 'https://portal.example',
-            extra: {'X-Portal-Token': _t64},
-          ),
-          _post(
-            '127.0.0.1:$pb',
-            small,
-            origin: 'https://portal.example',
-            extra: {'X-Portal-Token': _t64},
-          ),
-        );
-        await cap(
-          '20_empty_payload',
-          _post(
-            '127.0.0.1:$pa',
-            '{}',
-            origin: 'https://portal.example',
-            token: _t64,
-          ),
-          _post(
-            '127.0.0.1:$pb',
-            '{}',
-            origin: 'https://portal.example',
-            token: _t64,
-          ),
-        );
-        await cap(
-          '21_invalid_json',
-          _post(
-            '127.0.0.1:$pa',
-            'not json at all',
-            origin: 'https://portal.example',
-            token: _t64,
-          ),
-          _post(
-            '127.0.0.1:$pb',
-            'not json at all',
-            origin: 'https://portal.example',
-            token: _t64,
-          ),
-        );
-        await cap(
-          '22_unsupported_media_type',
-          _post(
-            '127.0.0.1:$pa',
-            small,
-            origin: 'https://portal.example',
-            token: _t64,
-            contentType: 'text/plain',
-          ),
-          _post(
-            '127.0.0.1:$pb',
-            small,
-            origin: 'https://portal.example',
-            token: _t64,
-            contentType: 'text/plain',
-          ),
-        );
-        await cap(
-          '23_head_reply',
-          'HEAD / HTTP/1.1\r\nHost: 127.0.0.1:$pa\r\n\r\n',
-          'HEAD / HTTP/1.1\r\nHost: 127.0.0.1:$pb\r\n\r\n',
-        );
-        await cap(
-          '24_non_root_path_still_reaches_the_handler',
-          _post(
-            '127.0.0.1:$pa',
-            small,
-            origin: 'https://portal.example',
-            token: _t64,
-            path: '/sub/x',
-          ),
-          _post(
-            '127.0.0.1:$pb',
-            small,
-            origin: 'https://portal.example',
-            token: _t64,
-            path: '/sub/x',
-          ),
-        );
-
-        // مسمار الخضرة على الباب الآمن: الحالة السليمة تعبر وترد 200
-        final ok = await _exchangeTls(
-          '127.0.0.1',
-          pb,
-          _post(
-            '127.0.0.1:$pb',
-            small,
-            origin: 'https://portal.example',
-            token: _t64,
-            extra: const {'X-Correlation-Id': 'tls-echo-witness'},
-          ),
-        );
-        expect(
-          ok['status'],
-          200,
-          reason: '[$mode] the healthy one crosses TLS',
-        );
-        final okBody = jsonDecode(ok['body'] as String) as Map<String, Object?>;
-        expect(okBody['ok'], true);
-
-        // مقارنة أسطر المرصد: البابان يقولان الشيء نفسه
-        final warnA = recA.warns.where((w) => w.contains('non-root path'));
-        final warnB = recB.warns.where((w) => w.contains('non-root path'));
-        expect(
-          warnB.length,
-          warnA.length,
-          reason: '[$mode] the same observer lines land on both doors',
-        );
-
-        await plain.stop();
-        await tls.stop();
+      Future<void> cap(
+        String name,
+        String requestForPlain,
+        String requestForTls,
+      ) async {
+        final a = await _exchange(plainDoor, pa, requestForPlain);
+        final b = await _exchangeTls(plainDoor, pb, requestForTls);
+        _expectSameWire(a, b, '[$mode] $name');
+        expect(b['status'], isNot(-2), reason: '[$mode] $name must answer');
       }
-    },
+
+      await cap(
+        '01_valid_small',
+        _post(
+          doorHost(pa),
+          small,
+          origin: 'https://portal.example',
+          token: _t64,
+        ),
+        _post(
+          doorHost(pb),
+          small,
+          origin: 'https://portal.example',
+          token: _t64,
+        ),
+      );
+      await cap(
+        '02_get_method',
+        'GET / HTTP/1.1\r\nHost: ${doorHost(pa)}\r\n\r\n',
+        'GET / HTTP/1.1\r\nHost: ${doorHost(pb)}\r\n\r\n',
+      );
+      await cap(
+        '03_options',
+        'OPTIONS / HTTP/1.1\r\nHost: ${doorHost(pa)}\r\n'
+            'Origin: https://portal.example\r\n'
+            'Access-Control-Request-Method: POST\r\n\r\n',
+        'OPTIONS / HTTP/1.1\r\nHost: ${doorHost(pb)}\r\n'
+            'Origin: https://portal.example\r\n'
+            'Access-Control-Request-Method: POST\r\n\r\n',
+      );
+      await cap(
+        '04_over_limit',
+        _post(
+          doorHost(pa),
+          over,
+          origin: 'https://portal.example',
+          token: _t64,
+        ),
+        _post(
+          doorHost(pb),
+          over,
+          origin: 'https://portal.example',
+          token: _t64,
+        ),
+      );
+      await cap(
+        '05_at_limit',
+        _post(doorHost(pa), at, origin: 'https://portal.example', token: _t64),
+        _post(doorHost(pb), at, origin: 'https://portal.example', token: _t64),
+      );
+      await cap(
+        '06_silence_timeout',
+        'POST / HTTP/1.1\r\nHost: ${doorHost(pa)}\r\nContent-Length: 500\r\n'
+            'Origin: https://portal.example\r\nX-Bridge-Token: $_t64\r\n\r\n',
+        'POST / HTTP/1.1\r\nHost: ${doorHost(pb)}\r\nContent-Length: 500\r\n'
+            'Origin: https://portal.example\r\nX-Bridge-Token: $_t64\r\n\r\n',
+      );
+      await cap(
+        '08_origin_rejected',
+        _post(doorHost(pa), small, origin: 'https://evil.com', token: _t64),
+        _post(doorHost(pb), small, origin: 'https://evil.com', token: _t64),
+      );
+      await cap(
+        '09_token_wrong',
+        _post(
+          doorHost(pa),
+          small,
+          origin: 'https://portal.example',
+          token: 'WRONG',
+        ),
+        _post(
+          doorHost(pb),
+          small,
+          origin: 'https://portal.example',
+          token: 'WRONG',
+        ),
+      );
+      await cap(
+        '10_token_correct_no_origin',
+        _post(doorHost(pa), small, token: _t64),
+        _post(doorHost(pb), small, token: _t64),
+      );
+      await cap(
+        '12_host_evil',
+        _post('evil.com', small, origin: 'https://portal.example', token: _t64),
+        _post('evil.com', small, origin: 'https://portal.example', token: _t64),
+      );
+      await cap(
+        '13_absolute_form',
+        'POST http://evil.com/ HTTP/1.1\r\nHost: ${doorHost(pa)}\r\n'
+            'Content-Type: application/json\r\n'
+            'Content-Length: ${utf8.encode(small).length}\r\n'
+            'Origin: https://portal.example\r\nX-Bridge-Token: $_t64\r\n\r\n'
+            '$small',
+        'POST http://evil.com/ HTTP/1.1\r\nHost: ${doorHost(pb)}\r\n'
+            'Content-Type: application/json\r\n'
+            'Content-Length: ${utf8.encode(small).length}\r\n'
+            'Origin: https://portal.example\r\nX-Bridge-Token: $_t64\r\n\r\n'
+            '$small',
+      );
+      await cap(
+        '14_duplicate_host',
+        'POST / HTTP/1.1\r\nHost: first.com\r\nHost: ${doorHost(pa)}\r\n'
+            'Content-Type: application/json\r\n'
+            'Content-Length: ${utf8.encode(small).length}\r\n'
+            'Origin: https://portal.example\r\nX-Bridge-Token: $_t64\r\n\r\n'
+            '$small',
+        'POST / HTTP/1.1\r\nHost: first.com\r\nHost: ${doorHost(pb)}\r\n'
+            'Content-Type: application/json\r\n'
+            'Content-Length: ${utf8.encode(small).length}\r\n'
+            'Origin: https://portal.example\r\nX-Bridge-Token: $_t64\r\n\r\n'
+            '$small',
+      );
+      await cap(
+        '15_duplicate_origin_header',
+        'POST / HTTP/1.1\r\nHost: ${doorHost(pa)}\r\n'
+            'Origin: https://portal.example\r\n'
+            'Origin: https://portal.example\r\n'
+            'Content-Type: application/json\r\n'
+            'Content-Length: ${utf8.encode(small).length}\r\n\r\n$small',
+        'POST / HTTP/1.1\r\nHost: ${doorHost(pb)}\r\n'
+            'Origin: https://portal.example\r\n'
+            'Origin: https://portal.example\r\n'
+            'Content-Type: application/json\r\n'
+            'Content-Length: ${utf8.encode(small).length}\r\n\r\n$small',
+      );
+      await cap(
+        '16_origin_malformed',
+        _post(doorHost(pa), small, origin: malformedOrigin, token: _t64),
+        _post(doorHost(pb), small, origin: malformedOrigin, token: _t64),
+      );
+      await cap(
+        '17_origin_too_long',
+        _post(doorHost(pa), small, origin: longOrigin, token: _t64),
+        _post(doorHost(pb), small, origin: longOrigin, token: _t64),
+      );
+      await cap(
+        '18_token_too_long',
+        _post(
+          doorHost(pa),
+          small,
+          origin: 'https://portal.example',
+          token: 'x' * 1100,
+        ),
+        _post(
+          doorHost(pb),
+          small,
+          origin: 'https://portal.example',
+          token: 'x' * 1100,
+        ),
+      );
+      await cap(
+        '19_legacy_token_header_alone',
+        _post(
+          doorHost(pa),
+          small,
+          origin: 'https://portal.example',
+          extra: {'X-Portal-Token': _t64},
+        ),
+        _post(
+          doorHost(pb),
+          small,
+          origin: 'https://portal.example',
+          extra: {'X-Portal-Token': _t64},
+        ),
+      );
+      await cap(
+        '20_empty_payload',
+        _post(
+          doorHost(pa),
+          '{}',
+          origin: 'https://portal.example',
+          token: _t64,
+        ),
+        _post(
+          doorHost(pb),
+          '{}',
+          origin: 'https://portal.example',
+          token: _t64,
+        ),
+      );
+      await cap(
+        '21_invalid_json',
+        _post(
+          doorHost(pa),
+          'not json at all',
+          origin: 'https://portal.example',
+          token: _t64,
+        ),
+        _post(
+          doorHost(pb),
+          'not json at all',
+          origin: 'https://portal.example',
+          token: _t64,
+        ),
+      );
+      await cap(
+        '22_unsupported_media_type',
+        _post(
+          doorHost(pa),
+          small,
+          origin: 'https://portal.example',
+          token: _t64,
+          contentType: 'text/plain',
+        ),
+        _post(
+          doorHost(pb),
+          small,
+          origin: 'https://portal.example',
+          token: _t64,
+          contentType: 'text/plain',
+        ),
+      );
+      await cap(
+        '23_head_reply',
+        'HEAD / HTTP/1.1\r\nHost: ${doorHost(pa)}\r\n\r\n',
+        'HEAD / HTTP/1.1\r\nHost: ${doorHost(pb)}\r\n\r\n',
+      );
+      await cap(
+        '24_non_root_path_still_reaches_the_handler',
+        _post(
+          doorHost(pa),
+          small,
+          origin: 'https://portal.example',
+          token: _t64,
+          path: '/sub/x',
+        ),
+        _post(
+          doorHost(pb),
+          small,
+          origin: 'https://portal.example',
+          token: _t64,
+          path: '/sub/x',
+        ),
+      );
+
+      // مسمار الخضرة على الباب الآمن: الحالة السليمة تعبر وترد 200
+      final ok = await _exchangeTls(
+        plainDoor,
+        pb,
+        _post(
+          doorHost(pb),
+          small,
+          origin: 'https://portal.example',
+          token: _t64,
+          extra: const {'X-Correlation-Id': 'tls-echo-witness'},
+        ),
+      );
+      expect(ok['status'], 200, reason: '[$mode] the healthy one crosses TLS');
+      final okBody = jsonDecode(ok['body'] as String) as Map<String, Object?>;
+      expect(okBody['ok'], true);
+
+      // مقارنة أسطر المرصد: البابان يقولان الشيء نفسه
+      final warnA = recA.warns.where((w) => w.contains('non-root path'));
+      final warnB = recB.warns.where((w) => w.contains('non-root path'));
+      expect(
+        warnB.length,
+        warnA.length,
+        reason: '[$mode] the same observer lines land on both doors',
+      );
+
+      // إثبات خدمة التلقيمة: مصافحات مكتملة سُلّمت عبر التلقيمة للخادم
+      // الآمن حصراً — والباب العادي بلا تلقيمة فلا عدّ مصافحات له
+      expect(
+        tls.counters.tlsHandshakesDelivered,
+        greaterThan(0),
+        reason:
+            '[$mode] the TLS door rode the handshake feed: completed '
+            'handshakes were delivered through it',
+      );
+      expect(
+        plain.counters.tlsHandshakesDelivered,
+        0,
+        reason: '[$mode] the plain door has no feed - no handshake tally',
+      );
+      // إيقاف نظيف: بلا عالق بعد التسليح فلا سطر إعلان العالقين
+      expect(
+        recB.warns.where((w) => w.contains('TLS handshake')),
+        isEmpty,
+        reason: '[$mode] a clean stop announces no stuck handshakes',
+      );
+
+      await plain.stop();
+      await tls.stop();
+    }
+  }
+
+  test(
+    'the whole wire corpus passes through the TLS feed with the same '
+    'status, body, and echo headers the plain listener answers',
+    () => runCorpusPair(overV6: false),
   );
+
+  test('the whole wire corpus rides the TLS feed on the optional ::1 '
+      'listener too, with the same pair verdicts', () async {
+    // ::1 حيث يتوفر حصراً: التخطي صادق مسمّى حيث لا يتوفر
+    final bindable =
+        await ServerSocket.bind(InternetAddress.loopbackIPv6, 0, v6Only: true)
+            .then<bool>((s) {
+              s.close();
+              return true;
+            })
+            .catchError((Object _) => false);
+    if (!bindable) {
+      markTestSkipped(
+        '::1 is not available on this host - the second paired run is '
+        'genuinely impossible here',
+      );
+      return;
+    }
+    await runCorpusPair(overV6: true);
+  });
 
   test(
     'the budget family answers identically through the TLS listener',
@@ -779,19 +775,20 @@ void main() {
   );
 
   test('sixteen clients whose TLS handshake never completes hold no seat '
-      'and never reach the intake: the next real request is served and '
-      'stop stays bounded', () async {
-    // حقيقة dart:io المقاسة بسجل الخام (r7-j13-sdk-tls-probe): المقابس
-    // التي لا تمصافحة لا تصل إلى طبقة HTTP أصلاً فلا مقعد ولا عدّ
-    // اتصالات — والحد الزمني لطرد هذه المقابس من طبقة النقل لا يملكه
-    // الحزمة (لا توجد واجهة dart:io عامة لمهلة مصافحة الخادم)؛
-    // المصرَّح به هنا هو ضمانة الحزمة: لا مقعد، لا وصول، لا توقف الخدمة.
+      'and are cut on the wire by the first-record timeout: the next real '
+      'request is served and stop stays bounded', () async {
+    // الحقيقة الجديدة بعد التلقيمة: ما قبل التسليح مملوك للحزمة — الصامت
+    // (بلا أي بايت) يُقطع على السلك عند مهلة أول سجل والتدمير يبلغه،
+    // ولا مقعد ولا عدّ اتصالات لحظه الحي كله. وما بعد التسليح يبقى خارج
+    // اليد (لا مهلة مصافحة ولا وسيلة قتل في dart:io بعد التسليح) —
+    // حده السقف وسطر الإعلان عند stop، والبقية موثقة في SECURITY.md
     final rec = _Rec();
     final srv = _make(
       rec: rec,
       pr: _protection('token', rec),
       config: BridgeConfig(
         maxSeatsPerOrigin: 16,
+        tlsFirstRecordTimeout: const Duration(seconds: 1),
         securityContext: _tlsContext(),
       ),
     );
@@ -807,7 +804,7 @@ void main() {
       0,
       reason: 'a stalled handshake never holds a seat',
     );
-    // الطلب الحقيقي يعبر وسط العالقين كأنه وحده
+    // الطلب الحقيقي يعبر وسط الصامتين كأنه وحده
     final port = srv.port;
     final ok = await _exchangeTls(
       '127.0.0.1',
@@ -820,10 +817,20 @@ void main() {
       ),
     );
     expect(ok['status'], 200, reason: 'the real request is served');
+    // مهلة أول سجل تفني الصامتين: القطع على السلك يبلغ العميل
+    await Future<void>.delayed(const Duration(milliseconds: 800));
+    final probe = await wireProbe(stalls.first);
+    expect(
+      probe,
+      startsWith('DEAD'),
+      reason:
+          'the silent client is destroyed on the wire when the '
+          'first-record timeout expires - the cut reaches the peer',
+    );
     for (final s in stalls) {
       s.destroy();
     }
-    // والتوقف محدود رغم بقاء المقابس العالقة في طبقة النقل
+    // والتوقف محدود: ما قبل التسليح محصود فوراً في الإيقاف
     final report = await srv.stop().timeout(const Duration(seconds: 3));
     expect(report, isNotNull);
   });

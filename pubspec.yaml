@@ -12,14 +12,13 @@ topics:
   - security
   - local-network
 
-# The browser lab's and the TLS transport witness's throwaway TLS keys:
-# self-signed loopback-only fixtures (127.0.0.1, ::1, localhost; guard
-# nothing) embedded so they run without an openssl dependency at test
-# time. Declared here as intentional false positives for the secret
-# scanner.
+# The browser lab's and the TLS witnesses' throwaway TLS keys: self-signed
+# loopback-only fixtures (127.0.0.1, ::1, localhost; guard nothing)
+# embedded so they run without an openssl dependency at test time.
+# Declared here as intentional false positives for the secret scanner.
 false_secrets:
   - test/browser_lab_test.dart
-  - test/tls_transport_test.dart
+  - test/support/tls_cert.dart
 
 environment:
   sdk: ^3.8.0
