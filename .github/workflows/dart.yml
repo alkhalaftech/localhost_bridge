@@ -39,6 +39,13 @@ jobs:
           # Floor of the declared constraint sdk: ^3.8.0.
           - os: ubuntu-latest
             sdk: 3.8.0
+          # The channel floor: the WebSocket channel's payload cap
+          # (maxPayloadLength) exists exactly from 3.13, and arming the
+          # channel below it refuses at construction - a job on this SDK
+          # proves the minimum the channel guard assumes, running the
+          # full suite with the channel tests active.
+          - os: ubuntu-latest
+            sdk: 3.13.0
     runs-on: ${{ matrix.os }}
     timeout-minutes: 15
     steps:
