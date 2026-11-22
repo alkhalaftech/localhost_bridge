@@ -671,7 +671,13 @@ the file is born with the process's permissions and tightens a moment
 later, so the socket is only ever created where no other user can
 traverse - a permissive parent fails the whole start naming the
 directory, and a chmod or verification failure fails it, so no
-unguarded socket ever serves. The request rides the same
+unguarded socket ever serves. Two honest limits of that boundary: the
+parent check reads the directory's permission **mode** only - `dart:io`
+exposes no owner identity - so on a host running as root (where every
+path is traversable and the mode bits are the only fact checked) the
+mode is the sole guarantee; and on a system without `/bin/chmod` at
+its fixed path the start fails closed with the failure message naming
+the tool. The request rides the same
 single admission step with no Origin (cross by the token alone; a CLI
 that sends no fetch metadata needs `OriginPolicy.requireFetchMetadata:
 false`, the standing headerless switch) behind the same Host gate (an

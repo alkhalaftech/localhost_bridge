@@ -194,6 +194,57 @@ These are stated plainly so no host builds on a false assumption:
   name (e.g. a `tasklist` prefix match) is forgeable by any process that
   picks the same name. Identity needs a full path plus a digital
   signature check — a host responsibility, not a bridge one.
+- **An unverified owner on the unix-socket boundary.** The
+  parent-directory check reads the directory's permission mode and
+  cannot know its owner — `dart:io` exposes no owner identity. For a
+  normal user the OS already constrains who owns what; the gap matters
+  only when the host runs as **root**, where every path is traversable
+  and the mode bits are the sole fact being checked. And on a system
+  without `/bin/chmod` at its fixed path the listener refuses to arm at
+  all — the whole start fails closed, and the failure message names
+  `/bin/chmod` so the missing requirement is never a mystery.
+- **The pairing signature covers the request line, not the body.** The
+  HMAC canonical string binds the pairing id, the stamp, the method,
+  the path, and the correlation id — the request body is not part of
+  the proof. Two different bodies sent with the same method, path, and
+  correlation id carry the same proof; the replay cache keys the full
+  proof, so an identical proof is refused as a replay, but a different
+  body under the same signature facts is accepted as a new request.
+  What a body may ask stays host-side: validate the payload language in
+  the handler.
+- **The pairing-code budget is shared across all live sessions.** One
+  wrong code attempt counts against every armed session at once — that
+  is what makes a guess hostile, since the guesser cannot know which
+  session it targets. The readable consequence: on a path that echoes
+  preflights to arbitrary https origins (allow-all, discovery), any web
+  page can send five wrong codes and exhaust the budget of the code
+  currently displayed on the screen, so the legitimate user reads `429
+  pair_budget_exceeded` until that session expires (its 120-second
+  life). Pairing is a mobile-host control, not a defense against a
+  hostile page the origin policy already admits.
+- **`POST /pair` answers a CORS echo for any origin.** The pairing door
+  is deliberately readable — the code is the gate, not the origin — so
+  the reply echoes `Access-Control-Allow-Origin` whatever origin asks.
+  Any web page can therefore probe the door and learn whether pairing
+  is armed on this port: a small fingerprint, and one more reason a
+  host disarms pairing when no page needs it.
+- **Channel commands always carry a generated correlation id.** A
+  WebSocket cannot carry `X-Correlation-Id` headers, so the bridge
+  generates a fresh id for every command delivered over the channel.
+  Consequence: `idempotentCommand` — keyed by source and correlation id
+  — can never recognize a channel repeat; a page re-sending the same
+  command over the channel presents a new id every time and the ledger
+  replays nothing. Exactly-once over the channel needs the page's own
+  discipline; the ledger covers the HTTP path, where the page sends the
+  header itself.
+- **Originless token clients share one ledger source.** A command
+  without an `Origin` header carries the source marker `unknown-origin`,
+  and the dedup ledger keys on (source, correlation id). Two different
+  local programs sending tokens without an origin therefore share one
+  key space: the same correlation id from both makes one's registered
+  command or stored reply the other's duplicate verdict. Local CLI
+  clients should generate unique correlation ids — or send distinct
+  origins — whenever a dedup ledger is wired.
 
 ### Availability
 
