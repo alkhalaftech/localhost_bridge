@@ -152,7 +152,7 @@ void main() {
         token: _t64,
         origins: ['https://portal.example'],
       );
-      // السياسة الناتجة حرفاً: قائمة المضيف + الشرط المشترك من ج3،
+      // السياسة الناتجة حرفاً: قائمة المضيف + الشرط المشترك (الأصل والتوكن معاً)،
       // والاقتران مسلح
       expect(p.policy.allowed, ['https://portal.example']);
       expect(p.policy.requireOriginWithToken, isTrue);
