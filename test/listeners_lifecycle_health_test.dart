@@ -403,6 +403,101 @@ void main() {
     expect(json['ok'], isTrue);
   });
 
+  test('a missing /bin/chmod fails the start closed and the failure '
+      'message names /bin/chmod', () async {
+    if (!_isPosix) {
+      return; // unix sockets are a Linux/macOS fact; the live witness runs there
+    }
+    // شاهد الأداة الغائبة: حين يتعذر تنفيذ /bin/chmod يفشل البدء كله
+    // فشلاً مغلقاً والرسالة تسمّي الأداة نفسها كي يعرف المضيف الدواء —
+    // لا مقبس بلا حاجز يخدم. البيئة التي يثبت فيها الشاهد هي التي قنّعت
+    // الأداة فوق مسارها الثابت؛ وحيث تعمل الأداة لا سبيل لإفشال الحارس
+    // فيُقال الصمت بصدق لا توهم إثباتاً
+    final probeDir = await Directory.systemTemp.createTemp('lb-chmod-probe-');
+    addTearDown(() async {
+      try {
+        await probeDir.delete(recursive: true);
+      } on Object {
+        // cleanup best-effort
+      }
+    });
+    final probeFile = File('${probeDir.path}/probe');
+    probeFile.writeAsStringSync('x');
+    var chmodWorks = false;
+    try {
+      final probe = await Process.run('/bin/chmod', <String>[
+        '600',
+        probeFile.path,
+      ]);
+      chmodWorks = probe.exitCode == 0;
+    } on Object {
+      chmodWorks = false;
+    }
+    if (chmodWorks) {
+      markTestSkipped(
+        '/bin/chmod works here - the missing-tool refusal is proven only '
+        'where the tool is masked above its fixed path',
+      );
+      return;
+    }
+    // تمهيد المقبس في مجلد ضيق سلفاً: الفحص الأب يقرأ الصلاحيات لا هوية
+    // المالك، ومجلد المنزل في هذه البيئة ولد owner-only فيعبر الحاجز
+    // الأول ويبلغ الحاجز الثاني حيث الأداة الغائبة هي الحكم
+    Directory? parent;
+    final homePath = Platform.environment['HOME'];
+    if (homePath != null) {
+      try {
+        final home = Directory(homePath);
+        final stat = home.statSync();
+        if (stat.type == FileSystemEntityType.directory &&
+            (stat.mode & 0x3F) == 0) {
+          parent = home;
+        }
+      } on Object {
+        parent = null;
+      }
+    }
+    if (parent == null) {
+      markTestSkipped(
+        'no owner-only directory to stage the socket in - the '
+        'missing-tool refusal cannot be staged here',
+      );
+      return;
+    }
+    final sockPath =
+        '${parent.path}/lb-chmod-missing-${DateTime.now().microsecondsSinceEpoch}.sock';
+    addTearDown(() async {
+      try {
+        await File(sockPath).delete();
+      } on Object {
+        // cleanup best-effort
+      }
+    });
+    final srv = LocalIntakeServer(
+      onCommand: (_) async => const CommandOutcome(ok: true),
+      telemetry: const SilentTelemetry(),
+      correlationIdGenerator: () => 'chmod-missing',
+      protection: IntakeProtection(telemetry: const SilentTelemetry())
+        ..update(token: _t64),
+      config: BridgeConfig(unixSocketPath: sockPath),
+    );
+    await expectLater(
+      srv.start(preferredPort: 0),
+      throwsA(
+        isA<IntakeBindException>().having(
+          (e) => e.message,
+          'message',
+          contains('/bin/chmod'),
+        ),
+      ),
+    );
+    expect(
+      srv.isListening,
+      isFalse,
+      reason: 'the unguardable socket never serves',
+    );
+  });
+
   // ── شاهد pause/resume: المنفذ نفسه ومعرّف المثيل نفسه، أو رمز واضح ──
   test('resume rebinds the remembered port with the same instance id and '
       'serves again', () async {

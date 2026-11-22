@@ -1565,10 +1565,12 @@ class LocalIntakeServer {
         await unix.close(force: true);
         await _removeUnixSocketFile();
         // الفشل مغلقاً: مقبس بلا حاجز صلاحياته لا يخدم أبداً — البدء
-        // كله يفشل صاخباً بدل نصف مستمع مكشوف
+        // كله يفشل صاخباً بدل نصف مستمع مكشوف، والرسالة تسمّي الأداة
+        // بالمسار الذي يناديها الحارس كي يعرف المضيف أين الدواء
         throw IntakeBindException(
           'failed to guard the unix socket "$unixPath" with owner-only '
-          'permissions - the listener refuses to serve unguarded',
+          'permissions - /bin/chmod is missing or refused, and the '
+          'listener does not serve an unguarded socket',
         );
       }
       _serverUnix = unix;
