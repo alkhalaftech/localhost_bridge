@@ -184,7 +184,7 @@ void main() {
     expect(
       a.acceptedPath,
       isNull,
-      reason: 'المنحة واحدة ولا تخدم توأمين - الثاني يسأل من جديد',
+      reason: 'a one-time grant serves one twin only - the second asks fresh',
     );
     expect(a.rejection?.code, 'origin_pending');
   });
@@ -221,7 +221,7 @@ void main() {
     expect(
       a.acceptedPath,
       isNull,
-      reason: 'الإثبات الواحد يمر مرة واحدة - الثاني إعادة معلنة',
+      reason: 'one proof passes once - the second is a declared replay',
     );
     expect(a.rejection?.code, 'pair_signature_replay');
   });
@@ -244,7 +244,8 @@ void main() {
     expect(
       b.acceptedPath,
       isNull,
-      reason: 'الحصة واحدة ولا تخدم ختمين متزامنين على مقعدين',
+      reason:
+          'one quota seat does not serve two concurrent settles on two seats',
     );
     expect(b.rejection?.code, 'origin_rate_limited');
     expect(a.acceptedPath, IntakeAdmissionPath.listed);
@@ -312,10 +313,13 @@ void main() {
     final r1 = await f1;
     final r2 = await f2;
     final statuses = [r1['status'] as int, r2['status'] as int]..sort();
-    expect(statuses, [
-      200,
-      403,
-    ], reason: 'منحة سماح-مرة واحدة تخدم طلباً واحداً مهما تأخر القياس');
+    expect(
+      statuses,
+      [200, 403],
+      reason:
+          'a one-time allow grant serves exactly one request no matter '
+          'how long the measure is held',
+    );
     final refused = r1['status'] == 403 ? r1 : r2;
     expect((refused['body'] as Map)['error'], 'origin_pending');
   });
@@ -365,10 +369,13 @@ void main() {
     final r1 = await f1;
     final r2 = await f2;
     final statuses = [r1['status'] as int, r2['status'] as int]..sort();
-    expect(statuses, [
-      200,
-      403,
-    ], reason: 'إثبات اقتران واحد يمر مرة واحدة مهما تأخر القياس');
+    expect(
+      statuses,
+      [200, 403],
+      reason:
+          'one pairing proof passes exactly once no matter how long '
+          'the measure is held',
+    );
     final refused = r1['status'] == 403 ? r1 : r2;
     expect((refused['body'] as Map)['error'], 'pair_signature_replay');
   });
