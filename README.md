@@ -670,8 +670,9 @@ the socket's parent directory must already be owner-only (mode 0700):
 the file is born with the process's permissions and tightens a moment
 later, so the socket is only ever created where no other user can
 traverse - a permissive parent fails the whole start naming the
-directory, and a chmod or verification failure fails it, so no
-unguarded socket ever serves. Two honest limits of that boundary: the
+directory (judged once, before any port is tried), and a chmod or
+verification failure fails it, so no unguarded socket ever serves. Two
+honest limits of that boundary: the
 parent check reads the directory's permission **mode** only - `dart:io`
 exposes no owner identity - so on a host running as root (where every
 path is traversable and the mode bits are the only fact checked) the
@@ -685,7 +686,8 @@ HTTP/1.1 client sends `Host: localhost`). A path that is already
 occupied (any existing file, stale socket included) fails the start with
 `IntakeBindException` — the package never deletes a path it did not
 create — and the socket file the package itself created is removed at
-`stop`, so a restart on the same path rebinds cleanly. The
+`stop` - and when its bind fails the owner-only guard - so a restart
+on the same path rebinds cleanly. The
 open-connection cap counts this listener too.
 
 **The TLS listener** — `BridgeConfig.securityContext` (a ready

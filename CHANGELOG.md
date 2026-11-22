@@ -54,17 +54,19 @@
   full path and verified by reading the actual file mode before
   anything is served) are the transport boundary, and the socket's
   parent directory must already be owner-only (mode 0700) - a
-  permissive parent fails the whole start naming the directory, so the
-  socket is only ever created where no other user can traverse; a
-  chmod or verification failure fails the start - the failure message
-  names `/bin/chmod` at its fixed path - so no unguarded socket ever
-  serves. The request rides the same single admission step with no
+  permissive parent fails the whole start naming the directory (judged
+  once, before any port is tried), so the socket is only ever created
+  where no other user can traverse; a chmod or verification failure
+  fails the start - the failure message names `/bin/chmod` at its
+  fixed path - so no unguarded socket ever serves. The request rides
+  the same single admission step with no
   Origin (token alone; a headerless CLI needs
   `OriginPolicy.requireFetchMetadata: false`, the standing switch)
   behind the same Host gate. An occupied path fails the start with
   `IntakeBindException` (the package never deletes a path it did not
-  create); the socket file the package created is removed at `stop`, so
-  a restart on the same path rebinds cleanly. The open-connection cap
+  create); the socket file the package created is removed at `stop` -
+  and when its bind fails the guard - so a restart on the same path
+  rebinds cleanly. The open-connection cap
   counts this listener too.
 - Added: an optional TLS transport - `BridgeConfig.securityContext`
   (default off) binds the bridge's TCP listeners through

@@ -498,6 +498,157 @@ void main() {
     );
   });
 
+  test('a chmod-guard failure lifts the socket file it just created - '
+      'the next start on the same path binds clean', () async {
+    if (!_isPosix) {
+      return; // unix sockets are a Linux/macOS fact; the live witness runs there
+    }
+    // نمط الشاهد الصادق: حيث تعمل الأداة لا سبيل لإفشال الحارس فيُقال
+    // التخطي بصدق — والإثبات الحي في الحاوية التي قنّعت الأداة فوق
+    // مسارها الثابت
+    final probeDir = await Directory.systemTemp.createTemp('lb-chmod-probe-');
+    addTearDown(() async {
+      try {
+        await probeDir.delete(recursive: true);
+      } on Object {
+        // cleanup best-effort
+      }
+    });
+    final probeFile = File('${probeDir.path}/probe');
+    probeFile.writeAsStringSync('x');
+    var chmodWorks = false;
+    try {
+      final probe = await Process.run('/bin/chmod', <String>[
+        '600',
+        probeFile.path,
+      ]);
+      chmodWorks = probe.exitCode == 0;
+    } on Object {
+      chmodWorks = false;
+    }
+    if (chmodWorks) {
+      markTestSkipped(
+        '/bin/chmod works here - the guard failure is staged only where '
+        'the tool is masked above its fixed path',
+      );
+      return;
+    }
+    // تمهيد المقبس في مجلد ضيق سلفاً: بوابة المجلد تمرّ فيبقى فشل
+    // الأداة الغائبة هو الحكم حيث المقبس وُلد فعلاً ثم رُفض حارسه
+    Directory? parent;
+    final homePath = Platform.environment['HOME'];
+    if (homePath != null) {
+      try {
+        final home = Directory(homePath);
+        final stat = home.statSync();
+        if (stat.type == FileSystemEntityType.directory &&
+            (stat.mode & 0x3F) == 0) {
+          parent = home;
+        }
+      } on Object {
+        parent = null;
+      }
+    }
+    if (parent == null) {
+      markTestSkipped(
+        'no owner-only directory to stage the socket in - the guard '
+        'failure cannot be staged here',
+      );
+      return;
+    }
+    final sockPath =
+        '${parent.path}/lb-guard-left-${DateTime.now().microsecondsSinceEpoch}.sock';
+    addTearDown(() async {
+      try {
+        await File(sockPath).delete();
+      } on Object {
+        // cleanup best-effort
+      }
+    });
+    final srv = LocalIntakeServer(
+      onCommand: (_) async => const CommandOutcome(ok: true),
+      telemetry: const SilentTelemetry(),
+      correlationIdGenerator: () => 'guard-leftover',
+      protection: IntakeProtection(telemetry: const SilentTelemetry())
+        ..update(token: _t64),
+      config: BridgeConfig(unixSocketPath: sockPath),
+    );
+    await expectLater(
+      srv.start(preferredPort: 0),
+      throwsA(
+        isA<IntakeBindException>().having(
+          (e) => e.message,
+          'message',
+          contains('/bin/chmod'),
+        ),
+      ),
+    );
+    expect(
+      srv.isListening,
+      isFalse,
+      reason: 'the unguardable socket never serves',
+    );
+    expect(
+      File(sockPath).statSync().type,
+      FileSystemEntityType.notFound,
+      reason:
+          'the failed bind lifts the socket file it just created - a '
+          'leftover socket would hold the path and fail every later '
+          'start on it',
+    );
+  });
+
+  test('a permissive unix parent refuses the start at once with the '
+      'folder-naming message - no port-unavailable wrap around it', () async {
+    if (!_isPosix) {
+      return; // unix sockets are a Linux/macOS fact; the live witness runs there
+    }
+    final (sockPath, dir) = await _unixPaths();
+    addTearDown(() async {
+      try {
+        await dir.delete(recursive: true);
+      } on Object {
+        // cleanup best-effort
+      }
+    });
+    await Process.run('/bin/chmod', <String>['755', dir.path]);
+    expect(dir.statSync().mode & 0x3F, isNot(0));
+    final refused = Rig();
+    refused.protection = IntakeProtection(telemetry: const SilentTelemetry())
+      ..update(token: _t64);
+    refused.srv = LocalIntakeServer(
+      onCommand: (_) async => const CommandOutcome(ok: true),
+      telemetry: const SilentTelemetry(),
+      correlationIdGenerator: () => 'parent-early',
+      protection: refused.protection,
+      config: BridgeConfig(unixSocketPath: sockPath),
+    );
+    await expectLater(
+      refused.srv.start(preferredPort: 0, fallbacks: const [0, 0]),
+      throwsA(
+        isA<IntakeBindException>().having(
+          (e) => e.message,
+          'message',
+          startsWith('the unix socket parent directory'),
+        ),
+      ),
+      reason:
+          'the folder verdict answers the start directly - the '
+          'port-unavailable wrap would burn every fallback for a '
+          'failure no port caused',
+    );
+    expect(
+      refused.srv.isListening,
+      isFalse,
+      reason: 'the permissive parent closes the whole start',
+    );
+    expect(
+      File(sockPath).statSync().type,
+      FileSystemEntityType.notFound,
+      reason: 'the refusal precedes any bind - no socket file exists',
+    );
+  });
+
   // ── شاهد pause/resume: المنفذ نفسه ومعرّف المثيل نفسه، أو رمز واضح ──
   test('resume rebinds the remembered port with the same instance id and '
       'serves again', () async {

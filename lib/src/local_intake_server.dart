@@ -1418,6 +1418,14 @@ class LocalIntakeServer {
       if (draining != null) {
         await draining;
       }
+      // فحص مجلد مقبس اليونكس مرة واحدة قبل حلقة المرشحين: حكمه لا
+      // يعتمد على المنفذ فيجيب البدء فوراً برسالة تسمي المجلد — لا
+      // عائقُ منفذٍ يحرق المرشحين مرشحاً مرشحاً ولا خلاصة «فشل ربط كل
+      // المنافذ» تخفي حقيقة المجلد
+      final unixPath = config.unixSocketPath;
+      if (unixPath != null) {
+        _refusePermissiveUnixParent(unixPath);
+      }
       final candidates = [preferredPort, ...fallbacks];
       Object? lastError;
       final tls = config.securityContext;
@@ -1542,20 +1550,6 @@ class LocalIntakeServer {
     }
     final unixPath = config.unixSocketPath;
     if (unixPath != null) {
-      // حاجز المجلد الأب قبل الربط: المقبس يولد بصلاحيات العملية ثم
-      // يضاق إلى المالك وحده في اللحظة التالية — والنافذة بين الولادة
-      // والتضييق تسدّ بأن يولد المقبس حصراً في مجلد لا يعبره سوى
-      // المالك. مجلد متساهل (للمجموعة أو الآخرين ركن فيه) يفشل البدء
-      // كله فشلاً مغلقاً والرسالة تسمي المجلد
-      final parentDir = File(unixPath).parent.path;
-      if (!_unixDirOwnerOnly(parentDir)) {
-        throw IntakeBindException(
-          'the unix socket parent directory "$parentDir" carries group or '
-          'other permissions - tighten it to owner-only (mode 0700) so '
-          'the socket is unreachable between its creation and its own '
-          'restriction',
-        );
-      }
       final unix = await HttpServer.bind(
         InternetAddress(unixPath, type: InternetAddressType.unix),
         0,
@@ -1563,7 +1557,12 @@ class LocalIntakeServer {
       final guarded = await _enforceUnixOwnerOnly(unixPath);
       if (!guarded) {
         await unix.close(force: true);
-        await _removeUnixSocketFile();
+        // ملف المقبس الذي وُلد هنا يُرفع بالمسار الفعلي لا بحقل الحالة:
+        // الحقل لا يُضبط إلا بعد نجاح الحارس فنداؤه بحقه كان سيترك
+        // الملف يحتل المسار فيعجز كل بدء تالٍ عنه. والعقد الآمن نفسه:
+        // لا يُمس إلا ما كان مقبس مجال يونكس — والرفع الصريح يجعل
+        // نظافة المسار عقداً تملكه الحزمة لا سلوكاً يوفره غيرها صامتاً
+        await _deleteUnixSocketFileAt(unixPath);
         // الفشل مغلقاً: مقبس بلا حاجز صلاحياته لا يخدم أبداً — البدء
         // كله يفشل صاخباً بدل نصف مستمع مكشوف، والرسالة تسمّي الأداة
         // بالمسار الذي يناديها الحارس كي يعرف المضيف أين الدواء
@@ -1615,6 +1614,25 @@ class LocalIntakeServer {
     }
   }
 
+  /// بوابة مجلد المقبس الأب: حكمٌ لا يعتمد على المنفذ يُصدر مرة واحدة
+  /// قبل حلقة مرشحي المنافذ — المجلد المتساهل (للمجموعة أو الآخرين ركن
+  /// فيه) يجيب البدء فوراً برسالة تسمي المجلد ومطلوب التضييق؛ والمقبس
+  /// يولد بصلاحيات العملية ثم يضاق إلى المالك وحده في اللحظة التالية
+  /// فالنافذة بين الولادة والتضييق تسدّ بأن يولد حصراً في مجلد لا
+  /// يعبره سوى المالك. والمضبوط يمرّ بلا مسّ
+  void _refusePermissiveUnixParent(String unixPath) {
+    final parentDir = File(unixPath).parent.path;
+    if (_unixDirOwnerOnly(parentDir)) {
+      return;
+    }
+    throw IntakeBindException(
+      'the unix socket parent directory "$parentDir" carries group or '
+      'other permissions - tighten it to owner-only (mode 0700) so '
+      'the socket is unreachable between its creation and its own '
+      'restriction',
+    );
+  }
+
   /// قراءة صلاحيات المجلد الحامل للمقبس قبل الربط: المالك وحده يعبره —
   /// الرجوع false في كل عائق (المجلد غائب، أو ليس مجلداً، أو القراءة
   /// غير مقنعة) فيفشل الربط مغلقاً. نداء واحد قبل كل ربط.
@@ -1664,6 +1682,13 @@ class LocalIntakeServer {
       return;
     }
     _unixSocketPath = null;
+    await _deleteUnixSocketFileAt(path);
+  }
+
+  /// الرفع الآمن بمسار صريح — العقد نفسه: مقبس مجال يونكس وحده يُرفع،
+  /// وغيره لا يُمس، والغائب أو المستبدل لا يكسر شيئاً. يُنادى بمسار
+  /// الربط الفعلي في مسار فشل الحارس حيث حقل الحالة ما يزال فارغاً
+  Future<void> _deleteUnixSocketFileAt(String path) async {
     try {
       final stat = File(path).statSync();
       if (stat.type == FileSystemEntityType.unixDomainSock) {
