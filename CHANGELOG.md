@@ -232,6 +232,14 @@
   verification compares constant-time, the
   origin binding is checked before any token verdict, and an unqualified
   origin never learns whether its proof was valid.
+- Changed: the pairing entrances refuse a disposed protection -
+  `startPairing` and `pair` throw `StateError` after `dispose` (matching
+  the admission path's `protection_disposed` refusal) instead of minting
+  a code or judging one against a disposed object; and
+  `restorePairedOrigin` throws `ArgumentError` for a remainder above the
+  paired-token age (24 hours) - a pairing never outlives the token age
+  it was issued with, so a bigger remainder is a corrupt host timestamp
+  rather than a binding; the exact age still restores.
 - Deprecated: the per-question protection probes (`check`,
   `echoesCorsFor`, `verboseErrorsFor`, `noteRejection`, `logRejection`,
   and `normalize`) in favor of the admission record; removal is planned

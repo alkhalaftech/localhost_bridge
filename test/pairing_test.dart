@@ -88,6 +88,49 @@ void main() {
     },
   );
 
+  test('a disposed protection refuses the pairing entrances loudly: '
+      'startPairing and pair throw instead of minting or judging', () {
+    final pr = _listed();
+    expect(pr.pairingEnabled, isTrue);
+    pr.dispose();
+    expect(
+      () => pr.startPairing(),
+      throwsStateError,
+      reason:
+          'a disposed object mints no pairing codes - the admit path '
+          'refuses with protection_disposed and the entrances match it',
+    );
+    expect(
+      () => pr.pair(origin: 'https://portal.example', code: '123456'),
+      throwsStateError,
+      reason: 'pairing against a disposed object never judges a code',
+    );
+  });
+
+  test('restorePairedOrigin refuses a remainder beyond the paired-token '
+      'age and accepts the exact age', () {
+    final pr = _listed();
+    expect(
+      () => pr.restorePairedOrigin(
+        origin: 'https://portal.example',
+        token: _t64,
+        remainingMs: 24 * 60 * 60 * 1000 + 1,
+      ),
+      throwsArgumentError,
+      reason:
+          'a paired token lives at most 24 hours - a restore past '
+          'the exported age is a corrupt host timestamp, never a binding',
+    );
+    // والحد نفسه مقبول حرفاً: عمر التوكن المصدر لا أكثر منه
+    final id = pr.restorePairedOrigin(
+      origin: 'https://portal.example',
+      token: _t64,
+      remainingMs: 24 * 60 * 60 * 1000,
+    );
+    expect(id, isNotEmpty);
+    expect(pr.pairedCount, 1);
+  });
+
   test('a correct code yields an origin-bound token with an honest expiry, '
       'and onPaired names the origin', () async {
     final paired = <PairingInfo>[];

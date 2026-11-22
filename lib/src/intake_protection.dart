@@ -835,8 +835,14 @@ class IntakeProtection {
 
   /// Creates a new one-time code for the host to display. No origin
   /// involved here - the qualification gate lives in [pair], where the
-  /// page's origin arrives.
+  /// page's origin arrives. After [dispose] it throws [StateError]: the
+  /// admission path refuses with `protection_disposed`, and an entrance
+  /// that still minted codes against a disposed object would read as a
+  /// working gate.
   PairingOffer startPairing() {
+    if (_disposed) {
+      throw StateError('the protection object is disposed - create a new one');
+    }
     if (!_pairingArmed) {
       throw StateError('pairing is not enabled - call enablePairing first');
     }
@@ -858,8 +864,13 @@ class IntakeProtection {
   /// one-time; the issued token is bound to this origin, expires in 24
   /// hours, and is revocable and rotatable by the host. Rejections here
   /// count and log through the same throttled path as every other
-  /// rejection - denial is never silent.
+  /// rejection - denial is never silent. After [dispose] it throws
+  /// [StateError] - a disposed object judges no codes, matching the
+  /// admission path's `protection_disposed` refusal.
   PairingOutcome pair({String? origin, required String code}) {
+    if (_disposed) {
+      throw StateError('the protection object is disposed - create a new one');
+    }
     if (!_pairingArmed) {
       throw StateError('pairing is not enabled - call enablePairing first');
     }
@@ -1041,9 +1052,13 @@ class IntakeProtection {
 
   /// Re-arms a persisted binding after a host restart: same token, same
   /// derived pairing id, whatever lifetime the host's own timestamps say
-  /// is left. Returns the derived pairing id (identical to the one the
-  /// original pairing issued - it is a function of the token alone). A
-  /// non-positive remainder or a token below the length floor throws
+  /// is left - bounded by the exported paired-token age: a remainder
+  /// above 24 hours throws [ArgumentError], because a pairing never
+  /// outlives the token age it was issued with and a bigger remainder is
+  /// a corrupt host timestamp, not a binding. Returns the derived pairing
+  /// id (identical to the one the original pairing issued - it is a
+  /// function of the token alone). A non-positive remainder, a remainder
+  /// past the token age, or a token below the length floor throws
   /// [ArgumentError] - a loud setup error, never a silent entry.
   String restorePairedOrigin({
     required String origin,
@@ -1059,6 +1074,15 @@ class IntakeProtection {
         remainingMs,
         'remainingMs',
         'must be positive - an expired binding is not restored',
+      );
+    }
+    if (remainingMs > _pairedTokenTtlMs) {
+      throw ArgumentError.value(
+        remainingMs,
+        'remainingMs',
+        'exceeds the paired-token age ($_pairedTokenTtlMs ms - 24 hours): '
+            'a pairing never outlives the token age it was issued with, '
+            'so a bigger remainder is a corrupt host timestamp',
       );
     }
     if (bytes < _minTokenBytes) {
