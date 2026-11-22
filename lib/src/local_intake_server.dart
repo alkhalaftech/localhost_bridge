@@ -471,6 +471,23 @@ class LocalIntakeServer {
             'silently plain under a TLS option; pass one or the other',
       );
     }
+    // القناة بلا سقف نقل لا تُسلَّح: معلمة الطول المعلن على ترقية
+    // WebSocketTransformer دخلت dart:io في 3.13 حصراً، وعلى SDK أقدم
+    // لا حد للذاكرة على الإطارات فتسليح القناة رفضٌ صاخب وقت البناء —
+    // لا ترقية بلا سقف ولا مسار رجوع، والبدء يفشل عند البناء قبل أي
+    // مستمع أو طلب
+    if (config.wsPath != null && !wsTransportCeilingSupported) {
+      throw ArgumentError.value(
+        config.wsPath,
+        'config.wsPath',
+        'needs dart:io 3.13+ - WebSocketTransformer.upgrade gained its '
+            'maxPayloadLength transport ceiling in Dart 3.13, and this '
+            'SDK ("${Platform.version}") has no frame length ceiling, so '
+            'the channel refuses to arm without a memory limit; upgrade '
+            'the SDK or leave wsPath null (every non-channel path works '
+            'unchanged)',
+      );
+    }
     // الصفحات المحلية: null هو الإيقاف حصراً - القائمة الفارغة ليست وضع
     // إيقاف بل خطأ إعداد يُقال صاخباً عند البناء قبل أي طلب على السلك
     final pages = config.localPages;
@@ -1954,45 +1971,40 @@ class LocalIntakeServer {
   /// الضيق هو العقد الذي يحمل إطاره الإفصاحي على السلك.
   static const int _wsTransportFrameCeiling = 2 * 1024 * 1024;
 
-  /// هل سقف النقل فعّال على هذا الـSDK؟ معلمة الطول المعلن للترقية
-  /// (`maxPayloadLength`) ليست في dart:io ‏3.8 (أرضية الحزمة المعلنة)
-  /// فاستُعمل استدعاء ديناميكي: حيث وُجدت المعلمة يمرَّر السقف ويحرس
-  /// الذاكرة قبل تخزين أي بايت، وحيث غابت تُشتق الترقية بلا سقف
-  /// نقل وفحص التسليم (256KiB) يظل يرفض الرسالة الفعلية بعد تجميعها.
-  /// الشهود يقرؤون هذا العلم فيتفرعون على حقيقة الـSDK الجارية.
-  static bool get wsTransportCeilingActive => _wsCeilingSeen;
+  /// هل يعرف dart:io الجاري معلمة سقف النقل للترقية؟ المعلمة
+  /// (`maxPayloadLength`) على `WebSocketTransformer.upgrade` دخلت
+  /// dart:io في 3.13 حصراً — والإصدار يُقرأ من `Platform.version` ويُقارن
+  /// بالحد، ونسخة غير مقروءة تعني عدم الدعم (فشل مغلقاً). حارس البناء
+  /// يقرأ هذا العلم: قناة بلا سقف نقل لا تُسلَّح أصلاً، فلا يعمل الجسر
+  /// قناةً بلا حد للذاكرة ولا مسارَ رجوع لها.
+  static bool get wsTransportCeilingSupported => _wsCeilingSupported;
 
-  static bool _wsCeilingSeen = false;
+  static final bool _wsCeilingSupported = _detectWsTransportCeiling();
 
-  /// ترقية القناة: `Function.apply` لا معلمة مسماة ثابتة في النص،
-  /// فيقبلها المحول البرمجي على كل الأصدارات — والـSDK الذي لا يعرف
-  /// الاسم يرمي وقت الاستدعاء فنسقط إلى ترقية بلا سقف نقل (فحص
-  /// التسليم يظل الحارس المرئي).
-  static Future<WebSocket> _upgradeChannel(HttpRequest request) async {
-    try {
-      final ws =
-          await Function.apply(
-                WebSocketTransformer.upgrade,
-                [request],
-                const <Symbol, Object>{
-                  #compression: CompressionOptions.compressionOff,
-                  #maxPayloadLength: _wsTransportFrameCeiling,
-                },
-              )
-              as WebSocket;
-      _wsCeilingSeen = true;
-      return ws;
-    } on ArgumentError {
-      return WebSocketTransformer.upgrade(
-        request,
-        compression: CompressionOptions.compressionOff,
-      );
-    } on NoSuchMethodError {
-      return WebSocketTransformer.upgrade(
-        request,
-        compression: CompressionOptions.compressionOff,
-      );
+  static bool _detectWsTransportCeiling() {
+    final match = RegExp(r'^(\d+)\.(\d+)').firstMatch(Platform.version);
+    if (match == null) {
+      return false;
     }
+    final major = int.parse(match.group(1)!);
+    final minor = int.parse(match.group(2)!);
+    return major > 3 || (major == 3 && minor >= 13);
+  }
+
+  /// ترقية القناة بالسقف المعلن: `Function.apply` لا معلمة مسماة ثابتة
+  /// في النص كي تترجم الحزمة على أرضية 3.8 المعلنة — وحارس البناء يضمن
+  /// أن القناة لا تُسلَّح إلا حيث تعرف dart:io المعلمة، فلا مسار رجوع
+  /// هنا إطلاقاً: كل فشل ترقية يمر للموضع المنادي كرفض سلكي حرفي.
+  static Future<WebSocket> _upgradeChannel(HttpRequest request) {
+    return Function.apply(
+          WebSocketTransformer.upgrade,
+          [request],
+          const <Symbol, Object>{
+            #compression: CompressionOptions.compressionOff,
+            #maxPayloadLength: _wsTransportFrameCeiling,
+          },
+        )
+        as Future<WebSocket>;
   }
 
   /// مهلة انتظار أول رسالة اعتماد على القناة — ثابت داخلي لا خيار:

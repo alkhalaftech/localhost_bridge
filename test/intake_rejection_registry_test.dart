@@ -1324,6 +1324,15 @@ void main() {
   test('walks the channel codes on their own wire: the literal code rides '
       'the final frame the peer reads and the channel dies with the close '
       '- no HTTP status line exists on this wire', () async {
+    // على SDK لا تعرف dart:io معلمة سقف النقل لا تُسلَّح القناة أصلاً
+    // (الرفض عند البناء شاهده ws_channel_test) فلا سلك لهذه الرموز هنا
+    if (!LocalIntakeServer.wsTransportCeilingSupported) {
+      markTestSkipped(
+        'the channel refuses to arm without a transport ceiling on this '
+        'SDK - its codes have no wire to walk here',
+      );
+      return;
+    }
     final pending = Map<String, IntakeRejectSpec>.of(intakeRejectionRegistry);
     expect(
       pending.keys.toSet().containsAll(_channelWalkCodes),

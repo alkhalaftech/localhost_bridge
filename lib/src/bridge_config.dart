@@ -294,6 +294,12 @@ class BridgeConfig {
   /// (`405 method_not_allowed`), and the wire never upgrades. The value
   /// must be non-empty, start with `/`, and differ from the pairing route
   /// `/pair` - a violation throws [ArgumentError] at server construction.
+  /// The channel also refuses to arm on a dart:io older than 3.13 (the
+  /// first release whose `WebSocketTransformer.upgrade` carries the
+  /// `maxPayloadLength` transport ceiling): arming the channel without a
+  /// frame memory limit never happens, so an older SDK throws
+  /// [ArgumentError] at server construction and every non-channel path
+  /// works unchanged.
   /// An open connection holds one concurrency seat - the same seat budget
   /// the HTTP commands hold - for its whole lifetime, so the seat caps
   /// bound the live connections per origin exactly like they bound the

@@ -32,8 +32,15 @@ final (String?, String?, int?) _labBrowser = _discoverBrowser();
 /// مسار المتصفح المكتشف، أو null إن لم يوجد — حينها كل الاختبارات تتخطى
 final String? _browserPath = _labBrowser.$1;
 
-/// سبب التخطي الصادق، أو null إن وُجد متصفح فيعمل الاختبار فعلاً
-final String? _skipReason = _labBrowser.$2;
+/// سبب التخطي الصادق، أو null إن وُجد متصفح فيعمل الاختبار فعلاً —
+/// وعلى SDK لا تعرف dart:io معلمة سقف النقل لا تُسلَّح القناة أصلاً
+/// (الرفض عند البناء) وسلك المختبر كله يركب القناة فلا مشهد له هنا
+final String? _skipReason =
+    _labBrowser.$2 ??
+    (LocalIntakeServer.wsTransportCeilingSupported
+        ? null
+        : 'the channel refuses to arm without a transport ceiling below '
+              'Dart 3.13 - every lab scene rides the channel');
 
 /// رقم الإصدار الأكبر للمتصفح المكتشف إن قرأ — سيناريو Local Network
 /// Access يحتاج علم محاكاة الفضاء الذي وُلد بعد M146

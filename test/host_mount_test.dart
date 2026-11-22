@@ -1177,6 +1177,15 @@ void main() {
       'runs the command', () async {
     const wsToken =
         'b3f1c52e94b7d068f5e2a9c4b1d7e8036f9a2c5e8b1d7f04a6c9e2d5f8b3a1c9';
+    // على SDK لا تعرف dart:io معلمة سقف النقل لا تُسلَّح القناة أصلاً
+    // (الرفض عند البناء) فلا قصة قناة على التركيب هنا
+    if (!LocalIntakeServer.wsTransportCeilingSupported) {
+      markTestSkipped(
+        'the channel refuses to arm without a transport ceiling on this '
+        'SDK - no channel story on the mount here',
+      );
+      return;
+    }
     LocalIntakeServer channel(_Rec rec) => LocalIntakeServer(
       telemetry: rec,
       correlationIdGenerator: _counterId,

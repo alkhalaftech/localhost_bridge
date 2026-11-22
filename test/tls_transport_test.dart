@@ -942,6 +942,15 @@ void main() {
 
   test('the WebSocket channel rides the TLS transport: wss:// without a '
       'credential in the deadline is closed ws_auth_timeout', () async {
+    // على SDK لا تعرف dart:io معلمة سقف النقل لا تُسلَّح القناة أصلاً
+    // (الرفض عند البناء) فلا قصة wss هنا
+    if (!LocalIntakeServer.wsTransportCeilingSupported) {
+      markTestSkipped(
+        'the channel refuses to arm without a transport ceiling on this '
+        'SDK - no wss story here',
+      );
+      return;
+    }
     final rec = _Rec();
     final pr = IntakeProtection(telemetry: rec)
       ..update(

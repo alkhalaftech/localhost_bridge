@@ -145,6 +145,15 @@
   alone, and the token length cap (`400 token_too_long`) and the
   single-value header gate now guard the new name. See
   MIGRATION-0.2.0.md for the three renames and the migration paths.
+- **Breaking: the WebSocket channel refuses to arm below Dart 3.13** -
+  `WebSocketTransformer.upgrade` carries the `maxPayloadLength`
+  transport ceiling from Dart 3.13 onward, and the channel never runs
+  without it: arming `BridgeConfig.wsPath` on an older SDK throws
+  `ArgumentError` at server construction with the reason named (the
+  package's declared 3.8 floor still compiles, and every non-channel
+  path works unchanged there - the message says so). On Dart 3.13+ the
+  channel works exactly as before, with the ceiling enforced at the
+  upgrade and no fallback upgrade without a memory limit.
 - Changed: the token failure window is a signal about wrong guesses,
   never a refusal of the verified sender - the correct token is compared
   and accepted whatever the failure history, from any sender, with or
@@ -327,10 +336,7 @@
   (256 KiB) and transport ceiling (2 MiB) are fixed named constants:
   a message between them reads `ws_message_too_large` in a refusal
   frame, a frame over the ceiling is refused by `dart:io`'s own
-  transformer before any payload byte buffers (where the SDK's
-  transformer takes the length parameter - on the 3.8 floor the
-  delivery cap refuses the buffered message with the same frame);
-  silence past
+  transformer before any payload byte buffers; silence past
   `BridgeConfig.idleTimeout` closes `ws_idle_timeout`; a heartbeat
   keeps NAT paths alive and cuts dead peers. One open connection
   holds one concurrency seat - the seat caps bound the live

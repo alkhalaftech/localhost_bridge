@@ -156,6 +156,35 @@ Future<(int status, String body)> rawHandshake(
 }
 
 void main() {
+  // على SDK لا يعرف dart:io معلمة سقف النقل (تحت 3.13) لا تُسلَّح القناة
+  // أصلاً: رفضٌ عند البناء هو العقد كله هنا، وبقية المشاهد تحتاج القناة
+  // نفسها فلا وجود لها على هذا الـSDK — والشاهد الكاملة فوق 3.13 أدناه
+  if (!LocalIntakeServer.wsTransportCeilingSupported) {
+    test('below Dart 3.13 arming the channel throws at construction - '
+        'the channel never runs without its transport ceiling', () {
+      // التسليح يرمي ArgumentErrors واضحاً: الرسالة تسمّي الحد المفقود
+      // والنسخة المطلوبة، والبناء بلا wsPath يبقى سالماً
+      try {
+        LocalIntakeServer(
+          onCommand: (_) async => const CommandOutcome(ok: true),
+          telemetry: const SilentTelemetry(),
+          config: const BridgeConfig(wsPath: '/ws'),
+        );
+        fail('arming the channel must throw below Dart 3.13');
+      } on ArgumentError catch (e) {
+        expect(e.message, contains('3.13'));
+        expect(e.message, contains('maxPayloadLength'));
+        expect(e.name, 'config.wsPath');
+      }
+      // والقناة مطفأةً يبني الخادم كما هو: فشل البناء للقناة حصراً
+      final srv = LocalIntakeServer(
+        onCommand: (_) async => const CommandOutcome(ok: true),
+        telemetry: const SilentTelemetry(),
+      );
+      expect(srv.config.wsPath, isNull);
+    });
+    return;
+  }
   test('the handshake upgrades through the single admission, the first '
       'message carries the token, and the command message reads its '
       'reply event', () async {
@@ -298,46 +327,32 @@ void main() {
     // نفسه يرفض الطول المعلن ويغلق النقل بخطأ بروتوكول (1002) قبل
     // أي بايت حمولة وقبل أي إطار إفصاح — فالذاكرة محروسة والقناة
     // ميتة، والرفض المعدود المقروء (الإطار الحرفي + العدّ الواحد)
-    // يعيش عند سقف التسليم تحته. وعلى SDK لا يعرف معلمة سقف الطول
-    // (أرضية 3.8) تُشتق الترقية بلا سقف نقل، فيبلغ فحصُ التسليم
-    // الرسالةَ بعد تجميعها ويرفضها بالإطار المعدود نفسه — والعلم
-    // العام يفصح حقيقة الـSDK الجارية فيتفرع الشاهد بصدق
+    // يعيش عند سقف التسليم تحته. والقناة لا تُسلَّح أصلاً حيث لا
+    // تعرف dart:io معلمة السقف (تحت 3.13) فلا فرعَ بلا سقف نقل
     final c = await start();
     try {
       final ws = await openChannel(c.srv.port);
       ws.add('x' * (3 * 1024 * 1024));
       final (replies, closeCode) = await awaitClosed(ws);
-      if (LocalIntakeServer.wsTransportCeilingActive) {
-        // قراءة رمز الإغلاق نفسها سباقُ معالجةِ إطار الإغلاق تحت الحمل:
-        // النقل يقتل ب1002 لكن العميل قد يقرأ 1006 (إغلاق شاذ) قبل أن
-        // يبلغه الإطار — فالحكم على القتل بمآلاته (لا إطار إفصاح ولا
-        // عدّ) والرمز المرصود أحد الأمرين الصادقين
-        expect(closeCode, anyOf(1002, 1006));
-        expect(
-          replies.where((r) => r.contains('ws_message_too_large')),
-          isEmpty,
-          reason:
-              'the transport kills the connection itself - no '
-              'disclosure frame rides a dead transport',
-        );
-        expect(
-          c.srv.counters.rejectionsByCode['ws_message_too_large'],
-          isNull,
-          reason:
-              'the delivery cap under the ceiling owns the counted, '
-              'readable refusal',
-        );
-      } else {
-        expect(
-          replies.where((r) => r.contains('ws_message_too_large')),
-          isNotEmpty,
-          reason:
-              'without the transport hook the delivery cap refuses '
-              'the buffered message with the counted frame',
-        );
-        expect(c.srv.counters.rejectionsByCode['ws_message_too_large'], 1);
-        expect(closeCode, isNotNull);
-      }
+      // قراءة رمز الإغلاق نفسها سباقُ معالجةِ إطار الإغلاق تحت الحمل:
+      // النقل يقتل ب1002 لكن العميل قد يقرأ 1006 (إغلاق شاذ) قبل أن
+      // يبلغه الإطار — فالحكم على القتل بمآلاته (لا إطار إفصاح ولا
+      // عدّ) والرمز المرصود أحد الأمرين الصادقين
+      expect(closeCode, anyOf(1002, 1006));
+      expect(
+        replies.where((r) => r.contains('ws_message_too_large')),
+        isEmpty,
+        reason:
+            'the transport kills the connection itself - no '
+            'disclosure frame rides a dead transport',
+      );
+      expect(
+        c.srv.counters.rejectionsByCode['ws_message_too_large'],
+        isNull,
+        reason:
+            'the delivery cap under the ceiling owns the counted, '
+            'readable refusal',
+      );
     } finally {
       c.protection.dispose();
       await c.srv.stop();
