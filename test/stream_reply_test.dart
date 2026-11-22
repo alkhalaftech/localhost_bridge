@@ -63,6 +63,70 @@ void main() {
     return (ctype, text);
   }
 
+  /// الرد الواحد للطلب نفسه: الترويسات عينها بلا ترويسة التدفق
+  Future<(String ctype, String text)> plainPost(int port) async {
+    final client = HttpClient();
+    final req = await client.open('POST', '127.0.0.1', port, '/');
+    req.headers.set('Content-Type', 'application/json');
+    req.headers.set('Origin', 'https://portal.example');
+    req.headers.set('Sec-Fetch-Mode', 'cors');
+    req.headers.set('Sec-Fetch-Dest', 'empty');
+    req.add(utf8.encode('["LONG-JOB"]'));
+    final res = await req.close();
+    final text = await res.transform(utf8.decoder).join();
+    final ctype = res.headers.value(HttpHeaders.contentTypeHeader) ?? '';
+    client.close(force: true);
+    return (ctype, text);
+  }
+
+  test('the streamed command carries the same admission record the '
+      'single-reply path delivers for the same request', () async {
+    final captured = <TrustedCommand>[];
+    final (srv, protection) = await server(
+      config: const BridgeConfig(allowStreamingReplies: true),
+      onCommand: (cmd) async {
+        captured.add(cmd);
+        return const CommandOutcome(ok: true);
+      },
+    );
+    try {
+      final (sctype, stext) = await streamPost(srv.port);
+      expect(sctype, contains('text/event-stream'));
+      expect(framesOf(stext).last.$1, 'result');
+      final (pctype, ptext) = await plainPost(srv.port);
+      expect(pctype, contains('application/json'));
+      expect(ptext, contains('"ok":true'));
+      expect(captured, hasLength(2));
+      final streamed = captured[0].admission;
+      final single = captured[1].admission;
+      expect(
+        identical(streamed, IntakeAdmission.unrecorded),
+        isFalse,
+        reason:
+            'the streamed command carries a real admission record, '
+            'not the hand-built placeholder',
+      );
+      expect(
+        streamed.acceptedPath,
+        single.acceptedPath,
+        reason:
+            'the accepted route is the same request fact on both '
+            'delivery paths',
+      );
+      expect(
+        streamed.originTrust,
+        single.originTrust,
+        reason:
+            'the origin trust grade is the same request fact on both '
+            'delivery paths',
+      );
+      expect(streamed.acceptedPath, IntakeAdmissionPath.listed);
+    } finally {
+      protection.dispose();
+      await srv.stop();
+    }
+  });
+
   test('a POST opting in with X-Bridge-Stream reads a streaming reply: '
       'three progress frames then the result frame, in order', () async {
     final (srv, protection) = await server(

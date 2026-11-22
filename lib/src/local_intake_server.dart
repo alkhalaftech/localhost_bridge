@@ -3077,6 +3077,9 @@ class LocalIntakeServer {
               request: request,
               response: response,
               cancelSignal: cancelSignal,
+              // سجل القبول نفسه يخيط الأمر كما في الرد الواحد — مسار
+              // التسليم لا يغيّر حقيقة الطلب المسجلة
+              admission: admission,
               payloads: payloads,
               binaryBytes: binaryBytes,
               source: source,
@@ -4424,6 +4427,7 @@ class LocalIntakeServer {
     required HttpRequest request,
     required HttpResponse response,
     required CommandCancelSignal cancelSignal,
+    required IntakeAdmission admission,
     required List<String> payloads,
     required Uint8List? binaryBytes,
     required String source,
@@ -4558,6 +4562,9 @@ class LocalIntakeServer {
           'x-correlation-id': correlationId,
         },
         correlationId: correlationId,
+        // سجل القبول الواحد: المسار المتدفق يسلّم ما سلّمه الرد
+        // الواحد — المسار المقبول ودرجة ترويسة الأصل حقيقتا الطلب
+        admission: admission,
         cancellation: cancelSignal,
         binaryPayload: binaryBytes,
         progress: sink,

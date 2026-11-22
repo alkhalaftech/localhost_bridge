@@ -495,6 +495,10 @@
   `non_json_body` from the JSON path, and `server_busy`) used to rise
   by two per refusal; every channel refusal now reads one increment,
   the same contract the HTTP replies always had.
+- Changed: a streamed command carries the same admission record the
+  single-reply path delivers - `TrustedCommand.admission` on a
+  streaming command used to be the unrecorded placeholder, so a
+  streaming handler read no accepted route and no origin trust grade.
 
 ## 0.1.3
 
