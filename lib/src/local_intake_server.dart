@@ -3934,7 +3934,7 @@ class LocalIntakeServer {
     try {
       payloads = _extractPayloads(body, declaredJson: false);
     } on _UnsupportedPayloadShapeException {
-      _noteRejection('unsupported_payload_shape');
+      // والعدّ من _wsReplyOnce وحده — لا عدّ مزدوج هنا كما في empty_payload
       return _wsReplyOnce(
         ws,
         'unsupported_payload_shape',
@@ -3942,7 +3942,7 @@ class LocalIntakeServer {
             'known command keys)',
       );
     } on _StrictPayloadItemException {
-      _noteRejection('invalid_payload_item');
+      // والعدّ من _wsReplyOnce وحده
       return _wsReplyOnce(
         ws,
         'invalid_payload_item',
@@ -3951,11 +3951,10 @@ class LocalIntakeServer {
       );
     } on _InvalidJsonException {
       // بلا نوع معلن المسار الخام هو أصلاً حكم الرسالة — غير قابل
-      // للوصول هنا، والتصيد البنيوي باقٍ
-      _noteRejection('invalid_json');
+      // للوصول هنا، والتصيد البنيوي باقٍ. والعدّ من _wsReplyOnce وحده
       return _wsReplyOnce(ws, 'invalid_json', 'The message is not valid JSON');
     } on _NonJsonBodyException {
-      _noteRejection('non_json_body');
+      // والعدّ من _wsReplyOnce وحده
       return _wsReplyOnce(
         ws,
         'non_json_body',
@@ -3973,7 +3972,7 @@ class LocalIntakeServer {
     // سقف العمل الحي: نفس بوابته في الرد الواحد — اليتامى والمقاعد
     // ميزانية واحدة، وفوقها الرفض برمزه والقناة تبقى حية لأمرٍ تالٍ
     if (_activeRequests + _activeOrphans > config.maxConcurrentRequests) {
-      _noteRejection('server_busy');
+      // والعدّ من _wsReplyOnce وحده
       final line = _orphanBusyWarnThrottle.admit(
         'intake busy: $_activeOrphans orphan handler(s) still running — '
         'rejecting before invoking another',

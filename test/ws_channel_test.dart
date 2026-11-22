@@ -713,4 +713,131 @@ void main() {
       await c.srv.stop();
     }
   });
+
+  test(
+    'the unsupported-shape refusal on the channel counts exactly once',
+    () async {
+      final c = await start();
+      try {
+        final ws = await openChannel(c.srv.port);
+        ws.add(jsonEncode({'nope': 'x'}));
+        final (replies, _) = await readUntil(ws, 1);
+        expect(replies.single, contains('"unsupported_payload_shape"'));
+        await ws.close();
+        expect(
+          c.srv.counters.rejectionsByCode['unsupported_payload_shape'],
+          1,
+          reason:
+              'one refusal reads one increment - the reply writer is '
+              'the only counter',
+        );
+      } finally {
+        c.protection.dispose();
+        await c.srv.stop();
+      }
+    },
+  );
+
+  test('the strict-item refusal on the channel counts exactly once', () async {
+    final c = await start(
+      config: BridgeConfig(
+        wsPath: '/ws',
+        idleTimeout: const Duration(milliseconds: 400),
+        strictPayloadItems: true,
+      ),
+    );
+    try {
+      final ws = await openChannel(c.srv.port);
+      ws.add(jsonEncode([42]));
+      final (replies, _) = await readUntil(ws, 1);
+      expect(replies.single, contains('"invalid_payload_item"'));
+      await ws.close();
+      expect(
+        c.srv.counters.rejectionsByCode['invalid_payload_item'],
+        1,
+        reason:
+            'one refusal reads one increment - the reply writer is '
+            'the only counter',
+      );
+    } finally {
+      c.protection.dispose();
+      await c.srv.stop();
+    }
+  });
+
+  test('the json-only refusal on the channel counts exactly once', () async {
+    final c = await start(
+      config: BridgeConfig(
+        wsPath: '/ws',
+        idleTimeout: const Duration(milliseconds: 400),
+        requireJsonBodies: true,
+      ),
+    );
+    try {
+      final ws = await openChannel(c.srv.port);
+      ws.add('PRINT LABEL'); // نص خام: وضع JSON فقط هو الحكم
+      final (replies, _) = await readUntil(ws, 1);
+      expect(replies.single, contains('"non_json_body"'));
+      await ws.close();
+      expect(
+        c.srv.counters.rejectionsByCode['non_json_body'],
+        1,
+        reason:
+            'one refusal reads one increment - the reply writer is '
+            'the only counter',
+      );
+    } finally {
+      c.protection.dispose();
+      await c.srv.stop();
+    }
+  });
+
+  test('the busy refusal on the channel counts exactly once', () async {
+    final release = Completer<void>();
+    final c = await start(
+      config: BridgeConfig(
+        wsPath: '/ws',
+        idleTimeout: const Duration(milliseconds: 400),
+        handlerTimeout: const Duration(milliseconds: 150),
+        maxConcurrentRequests: 1,
+      ),
+      onCommand: (cmd) async {
+        await release.future; // المعالج الأول معلق فيصير يتيماً بعد مهلته
+        return const CommandOutcome(ok: true);
+      },
+    );
+    try {
+      final ws = await openChannel(c.srv.port);
+      // مشترك واحد يجمع الإطارين — القناة دفق اشتراكٍ وحيد
+      final first = Completer<String>();
+      final second = Completer<String>();
+      late final StreamSubscription<Object?> sub;
+      sub = ws.listen((m) {
+        if (!first.isCompleted) {
+          first.complete(m as String);
+        } else if (!second.isCompleted) {
+          second.complete(m as String);
+        }
+      });
+      ws.add(jsonEncode(['FIRST']));
+      expect(await first.future, contains('"handler_timeout"'));
+      // اليتيم حي الآن: مقعد القناة + اليتيم فوق سقف المقعد الواحد
+      ws.add(jsonEncode(['SECOND']));
+      expect(await second.future, contains('"server_busy"'));
+      expect(
+        c.srv.counters.rejectionsByCode['server_busy'],
+        1,
+        reason:
+            'one refusal reads one increment - the reply writer is '
+            'the only counter',
+      );
+      // وإفصاح المعالج المعلق في finally وحده — إتمامُ مزدوج يرمي
+      await sub.cancel();
+      await ws.close();
+    } finally {
+      release.complete();
+      c.protection.dispose();
+      await c.srv.stop();
+    }
+  });
 }

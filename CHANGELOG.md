@@ -489,6 +489,12 @@
   facts into and stays deliberately unwired from the server's admission
   path (the intake never calls it; the wire enforces its per-origin
   budgets without it).
+- Changed: channel rejections count exactly once per refusal in the
+  per-code counters - the five channel refusal paths
+  (`unsupported_payload_shape`, `invalid_payload_item`, `invalid_json`,
+  `non_json_body` from the JSON path, and `server_busy`) used to rise
+  by two per refusal; every channel refusal now reads one increment,
+  the same contract the HTTP replies always had.
 
 ## 0.1.3
 
