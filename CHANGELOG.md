@@ -116,7 +116,11 @@
   `BridgeStopReport` (seats and orphan handlers still running at the
   return); with a timeout the whole drain - the graceful close, the seat
   wait, the orphan grace - is bounded by it, and a listener that misses
-  the graceful close inside the deadline is force-closed. Every
+  the graceful close inside the deadline is force-closed. The live
+  WebSocket channels close in parallel, each bounded by the deadline's
+  remainder: a channel that misses its close inside the deadline never
+  stretches the stop past it and is announced by count at the return.
+  Every
   still-working orphan is retired at the stop's return: a restart never
   inherits the previous generation's orphans into its live-work budget,
   and they stay visible in the orphan counter until they settle.

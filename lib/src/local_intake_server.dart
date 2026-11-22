@@ -1825,15 +1825,39 @@ class LocalIntakeServer {
         await _removeUnixSocketFile();
       }
       // قناة الويب سوكيت الحية: كل مقبس مفتوح يمسك مقعداً كطلب حي —
-      // الإغلاق الرشيق بحالتها الخاصة (going away) يحسم مستقبل مسار
-      // الاتصال فيفرغ مقعده داخل نافذة الفراغ نفسها، ولا يبقى مقبس
-      // قناة بعد العودة. الفشل هنا محتوى: الدمّر عند الإغلاق مسار
-      // dart:io نفسه ولا يترك مقعداً معلقاً وحده
-      for (final ws in _liveWsSockets.toList()) {
-        try {
-          await ws.close(WebSocketStatus.goingAway, 'server stopping');
-        } on Object {
-          // مقبس مات قبل الإغلاق — مساره حسم نفسه وحده
+      // الإغلاق بالتوازي كله، وكل قناة تحت ما تبقى من الموعد الكلي:
+      // قناة لا تحسم إغلاقها بانقضاء ما تبقى لا تمسك الإيقاف خارج
+      // مهلته — تُرك إغلاقها في الخلفية وتُعلن عدّاً صاخباً بدل انتظار
+      // بلا سقف أو صمت كاذب. وبلا مهلة يبقى الانتظار الكامل كله بالتوازي.
+      // الفشل هنا محتوى: قناة ماتت قبل الإغلاق حسم مسارها نفسه وحده
+      final sockets = _liveWsSockets.toList();
+      if (sockets.isNotEmpty) {
+        Future<bool> settle(WebSocket ws) {
+          final closing = ws
+              .close(WebSocketStatus.goingAway, 'server stopping')
+              .then<bool>((_) => true, onError: (Object _) => true);
+          if (deadlineMs == null) {
+            return closing;
+          }
+          return closing.timeout(
+            _remaining(deadlineMs),
+            onTimeout: () => false,
+          );
+        }
+
+        final settled = await Future.wait(<Future<bool>>[
+          for (final ws in sockets) settle(ws),
+        ]);
+        final stragglers = settled.where((done) => !done).length;
+        if (stragglers > 0) {
+          // الإعلان لا الصمت: قنوات لم تحسم إغلاقها حتى عودة الإيقاف —
+          // dart:io لا يكشف مقبس القناة المرفوع بلا واجهة قطع قسري،
+          // فالعدّ الصاخب هو الحقيقة الكاملة المتاحة
+          telemetry.warn(
+            'intake stopped with $stragglers websocket channel(s) still '
+            'closing past the deadline',
+            category: BridgeCategory.network,
+          );
         }
       }
       while (_activeRequests > 0) {

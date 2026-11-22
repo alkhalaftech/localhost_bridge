@@ -8,6 +8,7 @@
 import 'dart:async';
 import 'dart:convert';
 import 'dart:io';
+import 'dart:typed_data';
 
 import 'package:localhost_bridge/localhost_bridge.dart';
 import 'package:localhost_bridge/src/digest.dart' show hexEncode, hmacSha256;
@@ -601,6 +602,78 @@ void main() {
     } finally {
       c.protection.dispose();
       await c.srv.stop();
+    }
+  });
+
+  test('stop(timeout) keeps its deadline when a live channel never '
+      'answers the close frame', () async {
+    final c = await start(
+      config: BridgeConfig(
+        wsPath: '/ws',
+        idleTimeout: const Duration(minutes: 10),
+      ),
+      wsAuthTimeout: null,
+    );
+    try {
+      // نظير ميت بمقبس خام: مصافحة الترقية تجيب ثم الصمت أبدياً — لا
+      // اعتماد ولا قراءة ولا جواب ولا إغلاق، والاتصال يبقى مفتوحاً في
+      // مجموعة القنوات الحية فإطار الإغلاق يجد لا مجيباً أبداً
+      final dead = await Socket.connect('127.0.0.1', c.srv.port);
+      addTearDown(dead.destroy);
+      final key = base64Encode(List<int>.filled(16, 0xab));
+      dead.add(
+        utf8.encode(
+          'GET /ws HTTP/1.1\r\n'
+          'Host: 127.0.0.1:${c.srv.port}\r\n'
+          'Upgrade: websocket\r\n'
+          'Connection: Upgrade\r\n'
+          'Sec-WebSocket-Key: $key\r\n'
+          'Sec-WebSocket-Version: 13\r\n'
+          'Origin: https://portal.example\r\n'
+          '\r\n',
+        ),
+      );
+      final upgraded = Completer<void>();
+      final firstBytes = BytesBuilder();
+      late final StreamSubscription<List<int>> sub;
+      sub = dead.listen(
+        (chunk) {
+          firstBytes.add(chunk);
+          if (!upgraded.isCompleted &&
+              utf8.decode(firstBytes.toBytes()).contains('\r\n\r\n')) {
+            upgraded.complete();
+            // توقّف القراءة هنا: لا إطار يُقرأ ولا يُجاب بعدها أبداً
+            sub.pause();
+          }
+        },
+        onError: (Object _) {
+          if (!upgraded.isCompleted) upgraded.completeError('socket error');
+        },
+        onDone: () {
+          if (!upgraded.isCompleted) upgraded.completeError('socket closed');
+        },
+      );
+      await upgraded.future.timeout(const Duration(seconds: 5));
+      expect(
+        utf8.decode(firstBytes.toBytes()),
+        contains('101'),
+        reason: 'the upgrade completes - the channel is live and silent',
+      );
+      final watch = Stopwatch()..start();
+      await c.srv
+          .stop(timeout: const Duration(milliseconds: 900))
+          .timeout(const Duration(seconds: 8));
+      final elapsedMs = watch.elapsedMilliseconds;
+      expect(
+        elapsedMs,
+        lessThan(3000),
+        reason:
+            'stop honors its deadline - a channel holding the close '
+            'frame hostage cannot stretch the stop past it',
+      );
+      expect(c.srv.isListening, isFalse);
+    } finally {
+      c.protection.dispose();
     }
   });
 
