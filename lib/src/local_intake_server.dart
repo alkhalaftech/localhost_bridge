@@ -1250,12 +1250,14 @@ class LocalIntakeServer {
   /// to `0.0.0.0`, and the bridge must keep its loopback guarantee on its
   /// own. The peer guard is the FIRST gate: a forwarded request whose
   /// remote address is not loopback is refused with the standing `403
-  /// blocked_by_protection` code before any header is read and before any
-  /// counter, throttle budget, or log line is touched - a remote party
-  /// never writes into the bridge's security log or spends its warning
-  /// budget, so the denial is silent by design and carries a generated
-  /// correlation id only. No new wire code is minted for it, and the cut
-  /// over the detached socket matches the standing immediate-cut shape.
+  /// blocked_by_protection` code - no header is read, no log line is
+  /// written, and no warning budget is spent; the rejection is counted
+  /// only in the rejection-codes counter, an in-memory number that
+  /// helps the host see the attempts - a remote party never writes
+  /// into the bridge's security log, so the denial is silent by design
+  /// and carries a generated correlation id only. No new wire code is
+  /// minted for it, and the cut over the detached socket matches the
+  /// standing immediate-cut shape.
   /// An IPv4-mapped IPv6 peer (`::ffff:127.0.0.1`, what a dual-stack host
   /// bind delivers for an IPv4 loopback caller) counts as loopback: the
   /// mapping is unwrapped and the v4 bytes are judged alone. An
@@ -2225,10 +2227,10 @@ class LocalIntakeServer {
     try {
       // حارس الطرف البعيد أول بوابة على التركيب حصرا: خادم المضيف قد
       // يكون مربوطاً على 0.0.0.0 والجسر ضامنُ loopback على نفسه — حكم
-      // الطرف يسبق كل فحص ترويسة وكل سطر قياس: القيمة التي يتحكم فيها
-      // الطرف البعيد لا تبلغ بوابة أصلا ولا عدّادا ولا سجل كبح، فلا
-      // يكتب الطرف البعيد في سجل الجسر ولا يصرف ميزانية الكبح، والرفض
-      // معرفُه مولَّد حصرا (قراءة ترويسة الطرف نفسها فحص لا يسبقه
+      // الطرف يسبق كل فحص ترويسة وكل سطر قياس: لا قراءة ترويسة ولا سطر
+      // سجل ولا صرف من ميزانية التحذير، والرفض يُعدّ في عدّاد رموز
+      // الرفض فقط (رقم ذاكرة يعين المضيف على رؤية المحاولات) ومعرفُه
+      // مولَّد حصرا (قراءة ترويسة الطرف نفسها فحص لا يسبقه
       // الحكم). الطرف غير المقروء قرارُ رفض: الحارس يفشل مغلقاً، والرمز
       // القائم يحمل الرفض (لا رمز جديد)، والقطع الفوري الموثق يقرأه من
       // السجل لا من هذا الموضع

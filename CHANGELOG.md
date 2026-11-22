@@ -391,11 +391,13 @@
   bound to `0.0.0.0` does not break the package's loopback guarantee -
   a request whose remote address is not loopback is refused with the
   standing `403 blocked_by_protection` (no new wire code) by the first
-  gate: before any header is read and before any counter or log line
-  is written, so a remote party cannot write into the bridge's
-  security log or spend its warning budget; the denial is silent, the
-  refusal carries a generated correlation id only, and the reply is cut
-  over the detached socket; an IPv4-mapped IPv6 peer
+  gate: no header is read, no log line is written, and no warning
+  budget is spent; the rejection is counted only in the
+  rejection-codes counter, an in-memory number that helps the host see
+  the attempts, so a remote party cannot write into the bridge's
+  security log; the denial is silent, the refusal carries a generated
+  correlation id only, and the reply is cut over the detached socket;
+  an IPv4-mapped IPv6 peer
   (`::ffff:127.0.0.1`, what a dual-stack host bind delivers for an
   IPv4 loopback caller) counts as loopback, and an unreadable peer
   fact refuses. The open-connection cap guards the bridge's own

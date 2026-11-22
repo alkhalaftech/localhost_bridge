@@ -118,6 +118,20 @@ String _dechunk(String body) {
   return out.toString();
 }
 
+/// نص توثيق بعد طيّ الفراغات إلى مسافة واحدة: الحكم على الجملة لا على
+/// إخراج السطر
+String _flattened(String path) =>
+    File(path).readAsStringSync().replaceAll(RegExp(r'\s+'), ' ');
+
+/// نص مصدر بعد اقتطاع علامات التعليق من رؤوس الأسطر ثم طيّ الفراغات:
+/// جملة dartdoc تمتد أسطراً وبين الأسطر علامة /// فتكسر تطابق الجملة
+/// إن بقيت
+String _flattenedSource(String path) => File(path)
+    .readAsStringSync()
+    .replaceAll(RegExp(r'^\s*///\s?', multiLine: true), '')
+    .replaceAll(RegExp(r'^\s*//\s?', multiLine: true), '')
+    .replaceAll(RegExp(r'\s+'), ' ');
+
 /// يقرأ رداً كاملاً من مقبس خام — لا يفترض نصاً صالحاً في أي طرف.
 Future<Map<String, Object?>> _exchange(
   String address,
@@ -986,6 +1000,94 @@ void main() {
           'the whole remote sweep wrote no metric line - the '
           'protection log stays for local callers',
     );
+  });
+
+  test(
+    'a rejection of a non-loopback peer on the mounted entry moves the '
+    'rejection-codes counter by exactly one and writes no log line',
+    () async {
+      // شاهد حقيقة العدّاد: رفض الطرف البعيد يمر بمخرج الرد الواحد فيزيد
+      // عدّاد رموز الرفض واحداً بالضبط — رقم في الذاكرة يقرأه المضيف ليرى
+      // المحاولات — ولا سطر سجل يكتب ولا ميزانية كبح تصرف
+      final rec = _Rec();
+      final mounted = _make(rec: rec, pr: _allowAll(rec));
+      final door = await openDoor(
+        mounted,
+        bindAddress: InternetAddress.anyIPv4,
+      );
+      final pb = door.port;
+      final body = jsonEncode({
+        'data': ['PRINT 1'],
+      });
+
+      final ext = await _firstNonLoopbackIPv4();
+      if (ext == null) {
+        markTestSkipped(
+          'no non-loopback interface on this host - the external-peer '
+          'fact cannot be measured here',
+        );
+        return;
+      }
+      final before =
+          mounted.counters.rejectionsByCode['blocked_by_protection'] ?? 0;
+      final setupLines = rec.warns.length;
+      final refused = await _exchange(
+        ext,
+        pb,
+        _post('localhost:$pb', body, origin: 'https://portal.example'),
+      );
+      expect(refused['status'], 403, reason: 'the peer is refused as always');
+      final after =
+          mounted.counters.rejectionsByCode['blocked_by_protection'] ?? 0;
+      expect(
+        after - before,
+        1,
+        reason:
+            'the rejection is counted in the rejection-codes counter exactly '
+            'once - an in-memory number the host reads to see the attempts',
+      );
+      expect(
+        rec.warns.length,
+        setupLines,
+        reason: 'no log line is written for the remote party',
+      );
+    },
+  );
+
+  test('the mounted-entry docs state the counter truth: no header read, no '
+      'log line, no budget spent, and the rejection counted in the '
+      'rejection-codes counter only', () {
+    // شاهد الصياغة: المواضع الخمسة توصف بما يقيسه الكود فعلا — العدّاد
+    // يزيد ولا ينفى — وعبارات نفي العدّاد القديمة لا تعود إلى موضعها
+    final readme = _flattened('README.md');
+    final readmeAr = _flattened('README.ar.md');
+    final changelog = _flattened('CHANGELOG.md');
+    final serverFlat = _flattenedSource('lib/src/local_intake_server.dart');
+
+    const denialEn =
+        'no header is read, no log line is written, and no warning budget '
+        'is spent';
+    const countedEn =
+        'the rejection is counted only in the rejection-codes counter';
+    expect(readme, contains(denialEn));
+    expect(readme, contains(countedEn));
+    expect(readme, isNot(contains('before any counter')));
+    expect(changelog, contains(denialEn));
+    expect(changelog, contains(countedEn));
+    expect(changelog, isNot(contains('before any counter')));
+    expect(
+      readmeAr,
+      contains('لا قراءة ترويسة، ولا سطر سجل، ولا صرف من ميزانية التحذير'),
+    );
+    expect(readmeAr, contains('يُعدّ في عدّاد رموز الرفض فقط'));
+    expect(readmeAr, isNot(contains('قبل كتابة أي عدّاد')));
+    expect(serverFlat, contains(denialEn));
+    expect(
+      serverFlat,
+      isNot(contains('before any header is read and before any')),
+    );
+    expect(serverFlat, contains('لا قراءة ترويسة'));
+    expect(serverFlat, isNot(contains('لا عدّادا ولا')));
   });
 
   test('a dual-stack host bind delivers the loopback caller as the '
