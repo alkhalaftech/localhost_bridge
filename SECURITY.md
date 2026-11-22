@@ -297,7 +297,34 @@ What remains:
   itself — a host that wants a hard ceiling sets
   `BridgeConfig.maxOpenConnections` above zero, and a request arriving
   over the cap answers `503` until the count drops; `0` (the default)
-  keeps the option off.
+  keeps the option off. On the TLS door the count includes the feed's
+  in-flight handshakes, an accept over the cap cuts the new socket
+  before arming it (the one cut that reaches the wire), and while the
+  option is off the TLS transport still holds an internal
+  64-handshake ceiling — a handshake stuck past arming is the one
+  socket the server can never free by itself, so it gets the tighter
+  ceiling.
+- **A TLS client that completes its first record and then goes silent
+  holds a socket until the peer closes it — what the package does not
+  build, stated plainly.** The TLS gate bounds the path up to the
+  first record: a non-handshake first byte and an over-cap declared
+  length are cut at once, a silent client and a slow drip are cut at
+  `BridgeConfig.tlsFirstRecordTimeout`, and every such cut lands while
+  the socket is unarmed — the one state where the cut reaches the
+  wire. Once the first record completes, the TLS engine is armed, and
+  from that moment dart:io offers no handshake deadline and no kill
+  that reaches the wire: `destroy` and `close` on the server side do
+  not reach such a peer, a forced `stop` cannot reap it, and the
+  package does not pretend otherwise. Such a client holds one
+  in-flight handshake slot until it closes on its own; the bound on
+  how many slots it can hold is the ceiling — the feed counts its
+  in-flight handshakes into `maxOpenConnections`, holds an internal
+  64-handshake ceiling while that option is off, cuts any socket that
+  would push the total past the cap before arming it, and `stop`
+  announces in one line how many handshakes were left stuck past
+  arming (written only when the count is above zero). The tallies are
+  visible in `server.counters`: handshakes in flight, sockets cut on
+  the wire, and handshakes delivered.
 
 ## Recommended setup for irreversible commands
 
@@ -395,9 +422,6 @@ on the roadmap. The names are the tests' real names.
 - Bind stays `InternetAddress.loopbackIPv4`; the package never binds
   `0.0.0.0`/`anyIPv4` and exposes no IPv6 listener. If a host ever adds
   one, `[::1]:port` must join the authority set in the same change.
-- No TLS by design: on the browser path over loopback, a self-signed
-  certificate trains users to click through warnings and buys nothing
-  against the browser adversary model above (see `README.md`).
 - The package stays dependency-free. The one process it ever spawns is
   the system `/bin/chmod` at its full path, run only when the optional
   unix-socket listener is armed (Linux and macOS) and only on that

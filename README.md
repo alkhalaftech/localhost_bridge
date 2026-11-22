@@ -692,11 +692,26 @@ open-connection cap counts this listener too.
 
 **The TLS listener** — `BridgeConfig.securityContext` (a ready
 `SecurityContext` you pass in) binds the bridge's TCP listeners — the
-`127.0.0.1` listener and the optional `::1` listener — through
-`HttpServer.bindSecure`, so the address the browser uses becomes
+`127.0.0.1` listener and the optional `::1` listener — as plain
+listening sockets fed through the package's TLS handshake gate, so the
+address the browser uses becomes
 `https://127.0.0.1:<port>` (and `wss://` for the WebSocket channel),
 and a served local page's own origin arms as its `https://` spelling.
-This is the condition Safari and WebKit name themselves: their
+The gate reads the first full TLS record: a first byte that is not a
+handshake record (a plain HTTP client on the TLS port) is cut at once
+with no bytes sent back, a first record declaring a length over the
+transport record maximum is cut at once, and a first record that never
+completes inside `BridgeConfig.tlsFirstRecordTimeout` (five seconds by
+default, bounds one to sixty seconds) is cut at the deadline — every
+one of those cuts lands while the socket is still unarmed, which is
+the one state where the cut reaches the wire, so a silent client and
+a slow-dripping client are destroyed on the wire, not left hanging.
+What the gate cannot do is stated honestly in the limits section
+below: a client that completes its first record and then goes silent
+is armed by then, and dart:io offers no handshake deadline for the
+armed engine and no kill that reaches the wire after arming — the
+in-flight handshake ceiling and the count are the bound there. This is
+the condition Safari and WebKit name themselves: their
 mixed-content checker treats a plain-HTTP loopback address as insecure
 "unless loaded over HTTPS" (see the browser-support table below). The
 package never generates a certificate, never installs or trusts one,
@@ -713,7 +728,12 @@ bind path stays letter identical and the port speaks plain HTTP.
 Setting it together with `unixSocketPath` throws `ArgumentError` at
 construction — dart:io has no secure unix-domain bind, and a listener
 silently staying plain under a TLS option would promise cover it does
-not deliver. A practical lab for the real-Safari witness on a mac you
+not deliver. The read-only counters (`server.counters`) carry the
+TLS feed's tallies: handshakes in flight, sockets cut on the wire
+(cumulative), and handshakes delivered (cumulative). `stop` reaps
+every socket still before arming at once and announces — in one line,
+only when the count is above zero — how many handshakes were left
+stuck past arming. A practical lab for the real-Safari witness on a mac you
 own: `dart run tool/safari_https_loopback_lab.dart --cert <pem> --key
 <pem>` (the tool prints its steps and reads its flags; it never
 generates or installs a certificate).
@@ -1060,14 +1080,27 @@ CLI clients on Linux and macOS.
   (`BridgeConfig.listenIPv6Loopback`) and the optional unix-socket
   listener (`BridgeConfig.unixSocketPath`, Linux/macOS) join only when
   armed — never a non-loopback or network-facing address.
-- The TLS transport inherits one pre-handshake fact from dart:io,
-  stated honestly: a TCP client that connects to the TLS port and
-  never finishes the handshake holds no seat and never reaches the
-  intake at all — but dart:io exposes no public way to bound that
-  window, so such a socket stays open at the transport layer until
-  the listener closes (a forced stop does not reap it). A host
-  serving TLS on a hostile network fronts the port with its own
-  socket-level controls.
+- The TLS transport bounds its own handshake window now, and states
+  honestly what stays outside its reach: the first full TLS record is
+  gated — a non-handshake first byte and an over-cap declared length
+  are cut at once with no bytes sent back, a silent client and a
+  slow-dripping client are cut at `BridgeConfig.tlsFirstRecordTimeout`
+  (five seconds by default, bounds one to sixty seconds), and every
+  one of those cuts lands while the socket is unarmed, which is the
+  one state where the cut reaches the wire. What dart:io offers no
+  lever for: a client that completes its first record (a real
+  ClientHello) and then goes silent is armed by then — no handshake
+  deadline and no kill reaches the wire after arming, so such a socket
+  holds an in-flight slot until the peer closes it. The bound there is
+  the ceiling: the TLS feed counts its in-flight handshakes into the
+  open-connection cap (`BridgeConfig.maxOpenConnections`) and holds
+  its own internal 64-handshake ceiling while that option is off,
+  cutting the new socket before arming it, and `stop` announces in one
+  line how many handshakes were left stuck past arming. A host serving
+  TLS on a hostile network reads the same honesty front to back:
+  everything before the first record is the package's to bound,
+  everything after it is bounded by ceilings and counted, never
+  silenced.
 - JSON nesting is capped in the same pre-decode pass (`maxJsonDepth`,
   default 32) — deeper bodies get the same `413 payload_too_complex`
   before `jsonDecode` runs.
@@ -1110,8 +1143,15 @@ CLI clients on Linux and macOS.
   `BridgeConfig.maxOpenConnections` above zero: a request arriving while
   more sockets than the cap are open answers `503 server_busy`, and
   once the count drops (senders finish, idle sockets close after
-  `idleTimeout`) the next request is served. `0` — the default — keeps
-  the option off, and the wire never refuses for open sockets alone.
+  `idleTimeout`) the next request is served. The count is the sum over
+  every bound listener plus the TLS transport's in-flight handshakes,
+  and on the TLS door the cap cuts the new socket before arming it —
+  the one cut that reaches the wire — instead of answering it. `0` —
+  the default — keeps the option off, and the wire never refuses for
+  open sockets alone; the TLS transport still holds its own internal
+  64-handshake ceiling while the option is off, because a handshake
+  stuck past arming is the one socket the server can never free by
+  itself.
 - `BridgeConfig.extraHosts` adds host authorities the server answers for
   (a bare name matches `name:boundPort` too, like the built-ins). Every
   entry must be a name you control that resolves to this machine — a
@@ -1142,10 +1182,6 @@ CLI clients on Linux and macOS.
   Without a browser the lab skips itself and
   states why; CI runs it where the runner image ships Chrome; and the
   emulator side runs with `dart run tool/emulator_pairing_lab.dart`.
-- Why no TLS: on the browser path over loopback, a self-signed certificate
-  trains users to click through warnings and buys nothing against the
-  browser adversary model above; the transport is loopback-only and never
-  leaves the machine.
 
 ## Documentation
 
