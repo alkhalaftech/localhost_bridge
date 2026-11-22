@@ -187,11 +187,16 @@ class TlsHandshakeFeed extends Stream<Socket> implements ServerSocket {
     _onCut();
   }
 
-  /// انصراف العميل وحده قبل التسليح (خطأ أو إغلاق): يسحب من العدّ بلا
-  /// قطع محسوب — القطع عدّ ما قطعته التلقيمة لا ما تركه نظيره
+  /// انصراف النظير وحده قبل التسليح (خطأ أو إغلاق): يسحب من العدّ بلا
+  /// قطع محسوب — القطع عدّ ما قطعته التلقيمة لا ما تركه نظيره — ويهدم
+  /// المقبس لحظة الانصراف حصراً: تركه حياً هنا يسرّب مقبض النظام
+  /// (حلقة «اتصال ثم إغلاق» من خارج العملية تستنزف واصفات الجسر حتى
+  /// نفادها) والهدم هنا يصل السلك قبل التسليح كبقية الأهدمات
   void _abandon(_PreArm handshake) {
     if (_pending.remove(handshake)) {
       handshake.deadline?.cancel();
+      handshake.subscription?.cancel();
+      handshake.socket.destroy();
     }
   }
 

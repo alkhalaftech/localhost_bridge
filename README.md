@@ -730,10 +730,12 @@ construction — dart:io has no secure unix-domain bind, and a listener
 silently staying plain under a TLS option would promise cover it does
 not deliver. The read-only counters (`server.counters`) carry the
 TLS feed's tallies: handshakes in flight, sockets cut on the wire
-(cumulative), and handshakes delivered (cumulative). `stop` reaps
-every socket still before arming at once and announces — in one line,
-only when the count is above zero — how many handshakes were left
-stuck past arming. A practical lab for the real-Safari witness on a mac you
+(cumulative), and handshakes delivered (cumulative). A socket its own
+peer abandons (connects, then closes or errors before arming) is
+destroyed at the moment of abandonment — no handle lingers — and
+`stop` reaps every socket still before arming at once and announces —
+in one line, only when the count is above zero — how many handshakes
+were left stuck past arming. A practical lab for the real-Safari witness on a mac you
 own: `dart run tool/safari_https_loopback_lab.dart --cert <pem> --key
 <pem>` (the tool prints its steps and reads its flags; it never
 generates or installs a certificate).

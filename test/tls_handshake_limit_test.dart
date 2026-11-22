@@ -693,4 +693,65 @@ void main() {
       reason: 'a served handshake is not a cut - the counters stay distinct',
     );
   });
+
+  test('a socket its peer abandons before arming is destroyed at once: '
+      'process handles do not grow with abandon cycles', () async {
+    if (Platform.isMacOS) {
+      markTestSkipped(
+        'no /proc and no PowerShell on macOS - the abandonment handle '
+        'count is read from CI there',
+      );
+      return;
+    }
+    final srv = _make(
+      rec: null,
+      config: BridgeConfig(securityContext: tlsContext()),
+    );
+    await srv.start(preferredPort: 0);
+    addTearDown(srv.stop);
+    final before = _openHandles();
+    // دورات انصراف النظير قبل التسليح: نصفها صامت كامل ونصفها بايتان
+    // من رأس السجل ثم انصراف — كلاهما مسار الانصراف ذاته
+    for (var i = 0; i < 300; i++) {
+      final s = await Socket.connect(InternetAddress.loopbackIPv4, srv.port);
+      if (i.isEven) {
+        s.add(<int>[0x16, 0x03, 0x01]);
+        await s.flush();
+      }
+      s.destroy();
+    }
+    // مهلة تسوية: أحداث إغلاق المقابس المهدومة تكتمل
+    await Future<void>.delayed(const Duration(milliseconds: 600));
+    expect(
+      srv.counters.tlsHandshakesInFlight,
+      0,
+      reason: 'the abandoned sockets are out of every count at once',
+    );
+    final after = _openHandles();
+    expect(
+      after - before,
+      lessThan(100),
+      reason:
+          'every abandoned pre-arming socket is destroyed at the moment of '
+          'abandonment - a cycle that leaks its handle would add hundreds '
+          'of handles over three hundred cycles, and a hostile client '
+          'looping connects and closes from outside would exhaust the '
+          'file descriptors of the bridge process',
+    );
+  });
+}
+
+/// عدد مقابض/واصفات العملية الحالية: /proc/self/fd على لينكس،
+/// HandleCount عبر PowerShell على ويندوز — وماك بلا واحدة من الاثنتين
+/// فيتخطى شاهد الانصراف هناك صادقاً مسمّياً ويُقرأ من CI
+int _openHandles() {
+  if (Platform.isLinux) {
+    return Directory('/proc/self/fd').listSync().length;
+  }
+  final result = Process.runSync('powershell', <String>[
+    '-NoProfile',
+    '-Command',
+    '(Get-Process -Id $pid).HandleCount',
+  ]);
+  return int.parse(result.stdout.toString().trim());
 }
