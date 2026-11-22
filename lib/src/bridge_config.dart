@@ -22,6 +22,7 @@ class BridgeConfig {
     this.listenIPv6Loopback = false,
     this.unixSocketPath,
     this.securityContext,
+    this.tlsFirstRecordTimeout = defaultTlsFirstRecordTimeout,
     this.healthPath,
     this.maxJsonElements = 10_000,
     this.maxJsonDepth = 32,
@@ -91,10 +92,15 @@ class BridgeConfig {
   /// that wants a hard ceiling on open connections sets this above zero:
   /// a request arriving while more sockets than the cap are open answers
   /// `503 server_busy`, and once the count drops (senders finish, idle
-  /// sockets time out) the next request is served. `0` (the default)
-  /// keeps the option off - the wire never refuses for open sockets
-  /// alone. A negative value throws [ArgumentError] at server
-  /// construction.
+  /// sockets time out) the next request is served. The count is the sum
+  /// over every bound listener plus the TLS feed's in-flight handshakes
+  /// (sockets accepted on the TLS transport whose handshake has not yet
+  /// been delivered - the feed cuts a socket that would push the total
+  /// over this cap before arming it, since a pre-arming cut is the one
+  /// that reaches the wire). `0` (the default) keeps the option off -
+  /// the wire never refuses for open sockets alone, and the TLS feed
+  /// still holds its own internal handshake ceiling. A negative value
+  /// throws [ArgumentError] at server construction.
   final int maxOpenConnections;
 
   /// The optional `::1` (loopback IPv6) listener - when true, `start`
@@ -137,11 +143,19 @@ class BridgeConfig {
   final String? unixSocketPath;
 
   /// The optional TLS transport - when non-null, the bridge's TCP listeners
-  /// (the `127.0.0.1` listener and the optional `::1` listener) bind through
-  /// `HttpServer.bindSecure` with this exact context, so the address the
-  /// browser uses becomes `https://127.0.0.1:<port>` (and `wss://` for the
-  /// WebSocket channel), and the served local pages' own origin arms as its
-  /// `https://` spelling. The host supplies a ready [SecurityContext] - one
+  /// (the `127.0.0.1` listener and the optional `::1` listener) bind a
+  /// plain listening socket and feed it through the package's TLS
+  /// handshake gate with this exact context, so the address the browser
+  /// uses becomes `https://127.0.0.1:<port>` (and `wss://` for the
+  /// WebSocket channel), and the served local pages' own origin arms as
+  /// its `https://` spelling. The gate works on the first full TLS
+  /// record: a first byte that is not a handshake record (a plain HTTP
+  /// client on the TLS port) is cut at once with no bytes sent back, a
+  /// first record declaring a length over the transport record maximum
+  /// is cut at once, and a first record that never completes inside
+  /// [tlsFirstRecordTimeout] is cut at the deadline - each cut lands
+  /// while the socket is unarmed, which is the one state where the cut
+  /// reaches the wire. The host supplies a ready [SecurityContext] - one
   /// that already carries a certificate chain and its private key: this
   /// package never generates a certificate, never installs or trusts one,
   /// and never reads or writes any file for it; device trust in the
@@ -155,15 +169,32 @@ class BridgeConfig {
   /// has no secure unix-domain bind). The admission, the wire codes, the
   /// caps, and every reply contract are byte-for-byte the same over either
   /// transport - TLS terminates below the HTTP layer. One transport-level
-  /// fact is inherited from dart:io and stated honestly: a TCP client that
-  /// connects and never finishes the TLS handshake holds no seat and never
-  /// reaches the intake at all, but dart:io exposes no public way to bound
-  /// that pre-handshake window - the socket stays open at the transport
-  /// layer until the listener closes, even a forced stop does not reap it,
-  /// and a host serving TLS on a hostile network should front the port with
-  /// its own socket-level controls. A context without a certificate chain
+  /// residual is inherited from dart:io and stated honestly: a client that
+  /// sends its ClientHello and then goes silent is armed by then, and
+  /// dart:io exposes no handshake deadline for the armed engine and no
+  /// kill that reaches the wire after arming - such a socket holds its
+  /// in-flight slot until the peer closes it, bounded by the connection
+  /// cap ([maxOpenConnections] or the internal handshake ceiling), the
+  /// count is visible in the counters, and `stop` announces how many
+  /// were left stuck. A context without a certificate chain
   /// fails at connection time with dart:io's own handshake error.
   final SecurityContext? securityContext;
+
+  /// The first TLS record deadline for the TLS transport - how long a
+  /// socket accepted on the secure listener may take to complete its
+  /// first TLS record ([securityContext]'s handshake gate) before it is
+  /// cut on the wire. This bounds the silent client (connects, sends
+  /// nothing) and the slow drip (sends the record header, then trickles
+  /// bytes) - both are destroyed unarmed, so the cut reaches the peer.
+  /// The bound is the whole first record, not per byte: the deadline is
+  /// not restarted by arriving bytes. The default is five seconds, far
+  /// above any measured loopback handshake and wide enough for real
+  /// network RTT; values below one second or above sixty seconds throw
+  /// [ArgumentError] at server construction.
+  final Duration tlsFirstRecordTimeout;
+
+  /// The default first-record budget - see [tlsFirstRecordTimeout].
+  static const Duration defaultTlsFirstRecordTimeout = Duration(seconds: 5);
 
   /// The health page - when non-null, a `GET` on exactly this path is
   /// answered `200` with the literal body `{"ok":true}`: no version
