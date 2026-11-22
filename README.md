@@ -547,10 +547,13 @@ and the connection cut over the detached socket exactly as the private
 server does it. The local host authorities are built from the host
 server's own listening port (pass it as `hostPort`), and the bridge
 checks the remote peer itself: a request arriving from a non-loopback
-address is refused `403 blocked_by_protection` after the protocol-shape
-gates and before every policy gate,
-so binding the host to `0.0.0.0` does not break the package's loopback
-guarantee. An IPv4-mapped IPv6 peer (`::ffff:127.0.0.1`, what a
+address is refused `403 blocked_by_protection` by the FIRST gate -
+before any header is read and before any counter or log line is
+written (the denial is silent: a remote party never writes into the
+bridge's security log, and the refusal carries a generated correlation
+id only) - so binding the host to `0.0.0.0` does not break the
+package's loopback guarantee. An IPv4-mapped IPv6 peer
+(`::ffff:127.0.0.1`, what a
 dual-stack bind delivers for an IPv4 loopback caller) counts as
 loopback. The open-connection cap (`maxOpenConnections`) guards the
 bridge's own listener and has nothing to read here - the host owns the

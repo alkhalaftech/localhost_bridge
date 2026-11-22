@@ -863,9 +863,10 @@ void main() {
           'no non-loopback interface on this host - the external-peer '
           'fact cannot be measured here',
         );
+        return;
       }
       final refused = await _exchange(
-        ext!,
+        ext,
         pb,
         _post('localhost:$pb', body, origin: 'https://portal.example'),
       );
@@ -885,6 +886,107 @@ void main() {
       );
     },
   );
+
+  test('from a non-loopback peer the peer guard answers 403 '
+      'blocked_by_protection ahead of every header gate and writes no '
+      'metric line', () async {
+    // الحارس البعيد أول بوابة: كل فحص ترويسة لاحق له سطر قياس أو عدّ
+    // أو قراءة قيمة يتحكم فيها الطرف — فلا يبلغه شيء قبل حكم الطرف.
+    // البوابات الخمس (أصل طويل، أصل معتل، توكن طويل، رمز اقتران طويل،
+    // ترويسة مكررة) والترويسة المتقاعدة كلها تُجاب 403 الرمز القائم،
+    // ولا سطر قياس واحد يكتب عنها — إنكار صامت مقصود: الطرف البعيد لا
+    // يكتب في سجل الجسر ولا يصرف ميزانية الكبح.
+    final rec = _Rec();
+    final pr = _allowAll(rec)..enablePairing();
+    final mounted = _make(rec: rec, pr: pr);
+    final door = await openDoor(mounted, bindAddress: InternetAddress.anyIPv4);
+    final pb = door.port;
+    final body = jsonEncode({
+      'data': ['PRINT 1'],
+    });
+
+    final ext = await _firstNonLoopbackIPv4();
+    if (ext == null) {
+      markTestSkipped(
+        'no non-loopback interface on this host - the external-peer '
+        'fact cannot be measured here',
+      );
+      return;
+    }
+    // أسطر الإعداد (تسليح السياسة والاقتران) تُستبعد: الشاهد يقيس ما
+    // يكتبه الطلب نفسه لا ما كتبه الإعداد قبله
+    final setupLines = rec.warns.length;
+
+    Future<void> expectPeer403(String request, String label) async {
+      final r = await _exchange(ext, pb, request);
+      expect(
+        r['status'],
+        403,
+        reason: '[$label] the peer fact is judged before any gate',
+      );
+      final jb = jsonDecode(r['body'] as String) as Map<String, Object?>;
+      expect(
+        jb['error'],
+        'blocked_by_protection',
+        reason: '[$label] the standing code carries the refusal',
+      );
+      expect(
+        rec.warns.length,
+        setupLines,
+        reason: '[$label] no metric line is written for a remote party',
+      );
+    }
+
+    // أصل فوق سقف الطول
+    await expectPeer403(
+      _post('localhost:$pb', body, origin: 'https://${'a' * 1100}.example'),
+      'long origin',
+    );
+    // أصل معتل الشكل
+    await expectPeer403(
+      _post('localhost:$pb', body, origin: 'https://portal.example/../evil'),
+      'malformed origin',
+    );
+    // توكن فوق سقف البايتات
+    await expectPeer403(
+      _post('localhost:$pb', body, token: 'a' * 1100),
+      'long token',
+    );
+    // توقيع اقتران فوق سقفه والاقتران مسلح
+    await expectPeer403(
+      _post('localhost:$pb', body, extra: {'X-Bridge-Pairing': 'a' * 1100}),
+      'long pairing proof',
+    );
+    // ترويسة مكررة — بناء خام بقيمتين
+    final dup = StringBuffer()
+      ..writeln('POST / HTTP/1.1')
+      ..writeln('Host: localhost:$pb')
+      ..writeln('Content-Type: application/json')
+      ..writeln('Origin: https://portal.example')
+      ..writeln('X-Correlation-Id: mnt-dup-1')
+      ..writeln('X-Correlation-Id: mnt-dup-2')
+      ..writeln('Content-Length: ${utf8.encode(body).length}')
+      ..write('\r\n');
+    await expectPeer403(dup.toString() + body, 'duplicate header');
+    // الترويسة المتقاعدة: لا تبلغ قيمتها شيئا ولا يكتب تحذيرها
+    await expectPeer403(
+      _post(
+        'localhost:$pb',
+        body,
+        origin: 'https://portal.example',
+        token: _t64,
+        extra: {'X-Portal-Token': _t64},
+      ),
+      'legacy token header',
+    );
+    expect(
+      rec.warns.length,
+      setupLines,
+      reason:
+          'the whole remote sweep wrote no metric line - the '
+          'protection log stays for local callers',
+    );
+  });
 
   test('a dual-stack host bind delivers the loopback caller as the '
       'IPv4-mapped ::ffff:127.0.0.1 and it crosses', () async {

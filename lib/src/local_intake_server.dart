@@ -1231,15 +1231,19 @@ class LocalIntakeServer {
   ///
   /// The one added transport fact is the peer: a host server may be bound
   /// to `0.0.0.0`, and the bridge must keep its loopback guarantee on its
-  /// own. Every forwarded request whose remote address is not loopback is
-  /// refused with the standing `403 blocked_by_protection` code before any
-  /// other gate - no new wire code is minted for it - counted and logged
-  /// through the same authority-reject path as the Host-authority
-  /// rejection, and cut over the detached socket. An IPv4-mapped IPv6 peer
-  /// (`::ffff:127.0.0.1`, what a dual-stack host bind delivers for an IPv4
-  /// loopback caller) counts as loopback: the mapping is unwrapped and the
-  /// v4 bytes are judged alone. An unreadable peer fact is treated as
-  /// not-loopback - the guard fails closed.
+  /// own. The peer guard is the FIRST gate: a forwarded request whose
+  /// remote address is not loopback is refused with the standing `403
+  /// blocked_by_protection` code before any header is read and before any
+  /// counter, throttle budget, or log line is touched - a remote party
+  /// never writes into the bridge's security log or spends its warning
+  /// budget, so the denial is silent by design and carries a generated
+  /// correlation id only. No new wire code is minted for it, and the cut
+  /// over the detached socket matches the standing immediate-cut shape.
+  /// An IPv4-mapped IPv6 peer (`::ffff:127.0.0.1`, what a dual-stack host
+  /// bind delivers for an IPv4 loopback caller) counts as loopback: the
+  /// mapping is unwrapped and the v4 bytes are judged alone. An
+  /// unreadable peer fact is treated as not-loopback - the guard fails
+  /// closed.
   ///
   /// The open-connection cap ([BridgeConfig.maxOpenConnections]) guards the
   /// bridge's own listener and has no fact to read here - the host owns the
@@ -2175,6 +2179,31 @@ class LocalIntakeServer {
     // كل ردود المقبس الخام له تحمل الرأس وحده (التأطيرية تبقى للعلم)
     final headOnly = request.method == 'HEAD';
     try {
+      // حارس الطرف البعيد أول بوابة على التركيب حصرا: خادم المضيف قد
+      // يكون مربوطاً على 0.0.0.0 والجسر ضامنُ loopback على نفسه — حكم
+      // الطرف يسبق كل فحص ترويسة وكل سطر قياس: القيمة التي يتحكم فيها
+      // الطرف البعيد لا تبلغ بوابة أصلا ولا عدّادا ولا سجل كبح، فلا
+      // يكتب الطرف البعيد في سجل الجسر ولا يصرف ميزانية الكبح، والرفض
+      // معرفُه مولَّد حصرا (قراءة ترويسة الطرف نفسها فحص لا يسبقه
+      // الحكم). الطرف غير المقروء قرارُ رفض: الحارس يفشل مغلقاً، والرمز
+      // القائم يحمل الرفض (لا رمز جديد)، والقطع الفوري الموثق يقرأه من
+      // السجل لا من هذا الموضع
+      if (mounted) {
+        final remote = request.connectionInfo?.remoteAddress;
+        if (!_isLoopbackPeer(remote)) {
+          response.headers.set('X-Correlation-Id', correlationIdGenerator());
+          await _replyRejection(
+            response,
+            code: 'blocked_by_protection',
+            message:
+                'Request peer is not loopback — this mounted bridge accepts '
+                'local callers only',
+            bodyFullyRead: false,
+            headOnly: headOnly,
+          );
+          return;
+        }
+      }
       // سقف طول الأصل: القيمة يتحكم فيها الخصم وتصير مفاتيح خرائط
       // وأسئلة موافقة وحقول معالج وسياق قياس قبل أي قرار سياسة —
       // الأطول من السقف يُرد هنا قبل أن يراه أي كود آخر. رفض شكل
@@ -2349,33 +2378,6 @@ class LocalIntakeServer {
         }
       }
 
-      // حارس الطرف البعيد للتركيب حصرا: خادم المضيف قد يكون مربوطاً على
-      // 0.0.0.0 والجسر ضامنُ loopback على نفسه — الطرف غير loopback يُرفض
-      // 403 بالرمز القائم (لا رمز جديد) قبل كل بوابة أخرى وبنفس مسار سلطة
-      // المضيف: عدّاد وسطر أمني وقطع على المقبس المنتزع. حقيقة الطرف
-      // غير المقروء قرارُ رفض: الحارس يفشل مغلقاً.
-      if (mounted) {
-        final remote = request.connectionInfo?.remoteAddress;
-        if (!_isLoopbackPeer(remote)) {
-          final cid = _sanitizeCorrelationId(
-            _firstHeader(request, 'X-Correlation-Id'),
-          );
-          response.headers.set('X-Correlation-Id', cid);
-          final reason =
-              'Request peer is not loopback — this mounted bridge accepts '
-              'local callers only';
-          admission.noteAuthorityReject(reason);
-          // القطع الفوري الموثق يقرأه من السجل لا من هذا الموضع
-          await _replyRejection(
-            response,
-            code: 'blocked_by_protection',
-            message: reason,
-            bodyFullyRead: false,
-            headOnly: headOnly,
-          );
-          return;
-        }
-      }
       // سلطات المضيف المحلي: الحارس الواحد فوق كل الطرق — يغطي
       // OPTIONS و405 وما بعدهما؛ لا يحجز مقعداً؛ والمنع غير صامت (شرط
       // صريح): يمر بمسار العدّاد والسجل الأمني نفسه. التركيب يحمل
