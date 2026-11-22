@@ -631,5 +631,37 @@ void main() {
         reason: '$name local-page example carries no secret-looking code',
       );
     }
+
+    // امتداد التوثيق إلى واجهة lib: dartdoc الصنف نفسه لا يناقض إصلاح
+    // الصفحة الخالية من الأسرار — سطح العرض الذي يصفه نص الواجهة هو
+    // نص README وSECURITY ذاتهما، فلا يذكر رمز الاقتران سطحاً يُعرض
+    final bridgeConfigSource = File(
+      'lib/src/bridge_config.dart',
+    ).readAsStringSync().replaceAll(RegExp(r'^\s*///\s?', multiLine: true), '');
+    final pageDocStart = bridgeConfigSource.indexOf('One in-memory page');
+    expect(
+      pageDocStart,
+      greaterThanOrEqualTo(0),
+      reason: 'the BridgeLocalPage dartdoc names its contract',
+    );
+    final pageDocEnd = bridgeConfigSource.indexOf('class BridgeLocalPage');
+    expect(pageDocEnd, greaterThan(pageDocStart));
+    final pageDoc = bridgeConfigSource
+        .substring(pageDocStart, pageDocEnd)
+        .replaceAll(RegExp(r'\s+'), ' ');
+    expect(
+      pageDoc,
+      isNot(contains('display surface: a pairing code')),
+      reason:
+          'the BridgeLocalPage interface doc never names a pairing '
+          'code as the display surface',
+    );
+    expect(
+      pageDoc,
+      contains('no pairing code, no token, and no secret belong in it'),
+      reason:
+          'the BridgeLocalPage interface doc carries the same '
+          'secret-free rule as the README and SECURITY.md',
+    );
   });
 }

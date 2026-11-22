@@ -384,10 +384,14 @@ class BridgeConfig {
 
 /// One in-memory page the host serves through the local-pages option
 /// ([BridgeConfig.localPages]) - the headless host's display surface: a
-/// pairing code, a settings status, a pointer to the portal. The content
-/// lives in the host's memory: nothing here names a file, and the bridge
-/// never reads the filesystem, so there is no path to traverse and no
-/// folder to serve - the reply is a verbatim write of [content].
+/// settings status, a pointer to the portal, any non-secret state the
+/// user reads. The content lives in the host's memory: nothing here
+/// names a file, and the bridge never reads the filesystem, so there is
+/// no path to traverse and no folder to serve - the reply is a verbatim
+/// write of [content]. A plain `GET` with no browser headers reads the
+/// page, so no pairing code, no token, and no secret belong in it: the
+/// pairing code is shown through the host's own channel where only the
+/// human at the device reads it.
 class BridgeLocalPage {
   /// Builds the page. [path] must be a non-empty path starting with `/`,
   /// unique across the list, and different from the pairing route `/pair`
