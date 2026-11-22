@@ -347,6 +347,9 @@ on the roadmap. The names are the tests' real names.
 - No TLS by design: on the browser path over loopback, a self-signed
   certificate trains users to click through warnings and buys nothing
   against the browser adversary model above (see `README.md`).
-- The package never spawns processes and stays dependency-free; payload
-  semantics (including command allowlists) are the host's
+- The package stays dependency-free. The one process it ever spawns is
+  the system `/bin/chmod` at its full path, run only when the optional
+  unix-socket listener is armed (Linux and macOS) and only on that
+  socket's own path, to enforce the file's owner-only permissions;
+  payload semantics (including command allowlists) are the host's
   responsibility, demonstrated in `example/main.dart`.

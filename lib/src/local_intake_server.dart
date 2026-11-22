@@ -1540,6 +1540,20 @@ class LocalIntakeServer {
     }
     final unixPath = config.unixSocketPath;
     if (unixPath != null) {
+      // حاجز المجلد الأب قبل الربط: المقبس يولد بصلاحيات العملية ثم
+      // يضاق إلى المالك وحده في اللحظة التالية — والنافذة بين الولادة
+      // والتضييق تسدّ بأن يولد المقبس حصراً في مجلد لا يعبره سوى
+      // المالك. مجلد متساهل (للمجموعة أو الآخرين ركن فيه) يفشل البدء
+      // كله فشلاً مغلقاً والرسالة تسمي المجلد
+      final parentDir = File(unixPath).parent.path;
+      if (!_unixDirOwnerOnly(parentDir)) {
+        throw IntakeBindException(
+          'the unix socket parent directory "$parentDir" carries group or '
+          'other permissions - tighten it to owner-only (mode 0700) so '
+          'the socket is unreachable between its creation and its own '
+          'restriction',
+        );
+      }
       final unix = await HttpServer.bind(
         InternetAddress(unixPath, type: InternetAddressType.unix),
         0,
@@ -1597,13 +1611,31 @@ class LocalIntakeServer {
     }
   }
 
-  /// حاجز المقبس اليونكس: chmod 0600 ثم التحقق بقراءة الصلاحيات الفعلية
-  /// من الملف - الرجوع false في كل عائق (أداة chmod غائبة عن PATH، أو
-  /// رمي الأداة، أو قراءة صلاحيات غير مقنعة) فيفشل الربط مغلقاً ولا
-  /// يخدم الجسر مقبساً مفتوحاً على غير المالك. نداء واحد عند كل ربط.
+  /// قراءة صلاحيات المجلد الحامل للمقبس قبل الربط: المالك وحده يعبره —
+  /// الرجوع false في كل عائق (المجلد غائب، أو ليس مجلداً، أو القراءة
+  /// غير مقنعة) فيفشل الربط مغلقاً. نداء واحد قبل كل ربط.
+  bool _unixDirOwnerOnly(String path) {
+    try {
+      final stat = Directory(path).statSync();
+      if (stat.type != FileSystemEntityType.directory) {
+        return false;
+      }
+      // ‏0x3F = بتات المجموعة والآخرين في صيغة posix الصلاحية
+      return (stat.mode & 0x3F) == 0;
+    } on Object {
+      return false;
+    }
+  }
+
+  /// حاجز المقبس اليونكس: chmod 0600 بمسار الأداة الكامل ثم التحقق
+  /// بقراءة الصلاحيات الفعلية من الملف - الرجوع false في كل عائق (الأداة
+  /// غائبة عن مسارها الثابت، أو رميت، أو القراءة غير مقنعة) فيفشل الربط
+  /// مغلقاً ولا يخدم الجسر مقبساً مفتوحاً على غير المالك. نداء واحد عند
+  /// كل ربط. والمسار الكامل مقصود: نداء اسم مجرد يمر عبر PATH فيورّث
+  /// حارساً يمكن إزاحته بترتيب PATH الموروث — المسار الثابت يقطع ذلك
   Future<bool> _enforceUnixOwnerOnly(String path) async {
     try {
-      final result = await Process.run('chmod', <String>['600', path]);
+      final result = await Process.run('/bin/chmod', <String>['600', path]);
       if (result.exitCode != 0) {
         return false;
       }

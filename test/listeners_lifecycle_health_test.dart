@@ -158,6 +158,11 @@ bool get _isPosix => Platform.isLinux || Platform.isMacOS;
 /// directory - the socket path is never the directory itself.
 Future<(String, Directory)> _unixPaths() async {
   final dir = await Directory.systemTemp.createTemp('lb-j18-sock-');
+  // عقد النشر الحقيقي: المجلد الحامل للمقبس للمالك وحده — والخدمة ترفض
+  // غير ذلك صاخباً باسم المجلد (شاهد المجلد المتساهل أدناه)، فالخدمة
+  // هنا تهيئ مجلدها بالعقد نفسه. المجلد المؤقت قد يولد 0755 لا 0700
+  // باختلاف المنصة فيجب التضييق الصريح
+  await Process.run('/bin/chmod', <String>['700', dir.path]);
   return ('${dir.path}/bridge.sock', dir);
 }
 
@@ -327,6 +332,75 @@ void main() {
           'half-bound listener - the IPv4 side closed with the unix failure',
     );
     expect(r.srv.port, 0);
+  });
+
+  test('a permissive parent directory fails the start closed naming the '
+      'folder, and the tightened directory serves', () async {
+    if (!_isPosix) {
+      return; // unix sockets are a Linux/macOS fact; the live witness runs there
+    }
+    final (sockPath, dir) = await _unixPaths();
+    addTearDown(() async {
+      try {
+        await dir.delete(recursive: true);
+      } on Object {
+        // cleanup best-effort
+      }
+    });
+    // المجلد متساهل (للمجموعة والآخرين ركن): البدء كله يفشل فشلاً
+    // مغلقاً والرسالة تسمي المجلد نفسه — لا مقبس يولد أصلاً في مكان
+    // يعبره غير المالك، فنافذة الولادة قبل تضييق الملف سدّت
+    await Process.run('/bin/chmod', <String>['755', dir.path]);
+    expect(dir.statSync().mode & 0x3F, isNot(0));
+    final refused = Rig();
+    refused.protection = IntakeProtection(telemetry: const SilentTelemetry())
+      ..update(token: _t64);
+    refused.srv = LocalIntakeServer(
+      onCommand: (_) async => const CommandOutcome(ok: true),
+      telemetry: const SilentTelemetry(),
+      correlationIdGenerator: () => 'fr4-permissive',
+      protection: refused.protection,
+      config: BridgeConfig(unixSocketPath: sockPath),
+    );
+    await expectLater(
+      refused.srv.start(preferredPort: 0),
+      throwsA(
+        isA<IntakeBindException>().having(
+          (e) => e.message,
+          'message',
+          contains(dir.path),
+        ),
+      ),
+    );
+    expect(
+      refused.srv.isListening,
+      isFalse,
+      reason: 'the permissive parent closes the whole start',
+    );
+    expect(
+      File(sockPath).statSync().type,
+      FileSystemEntityType.notFound,
+      reason: 'the refusal precedes the bind - no socket file exists',
+    );
+
+    // المجلد نفسه مضيَّقاً إلى المالك وحده: البدء يعمل ويخدم
+    await Process.run('/bin/chmod', <String>['700', dir.path]);
+    final serving = Rig();
+    serving.protection = IntakeProtection(telemetry: const SilentTelemetry())
+      ..update(token: _t64);
+    serving.srv = LocalIntakeServer(
+      onCommand: (_) async => const CommandOutcome(ok: true),
+      telemetry: const SilentTelemetry(),
+      correlationIdGenerator: () => 'fr4-tightened',
+      protection: serving.protection,
+      config: BridgeConfig(unixSocketPath: sockPath),
+    );
+    addTearDown(serving.srv.stop);
+    final port = await serving.srv.start(preferredPort: 0);
+    expect(port, greaterThan(0), reason: 'the owner-only parent serves');
+    final (status, json) = await unixCommand(sockPath, token: _t64);
+    expect(status, 200, reason: 'the tightened path serves the standing wire');
+    expect(json['ok'], isTrue);
   });
 
   // ── شاهد pause/resume: المنفذ نفسه ومعرّف المثيل نفسه، أو رمز واضح ──

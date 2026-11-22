@@ -661,10 +661,15 @@ keeps serving on `127.0.0.1` alone.
 **The optional unix-socket listener** (Linux and macOS only) —
 `BridgeConfig.unixSocketPath: "/run/myapp/bridge.sock"` also serves HTTP
 on this filesystem path for local CLI clients. The socket file's
-owner-only permissions (mode 0600, enforced at bind and verified by
-reading the file's actual mode before anything is served) are the
-transport boundary — a chmod or verification failure fails the whole
-start, so no unguarded socket ever serves. The request rides the same
+owner-only permissions (mode 0600, enforced at bind by the system
+`/bin/chmod` at its full path and verified by reading the file's
+actual mode before anything is served) are the transport boundary, and
+the socket's parent directory must already be owner-only (mode 0700):
+the file is born with the process's permissions and tightens a moment
+later, so the socket is only ever created where no other user can
+traverse - a permissive parent fails the whole start naming the
+directory, and a chmod or verification failure fails it, so no
+unguarded socket ever serves. The request rides the same
 single admission step with no Origin (cross by the token alone; a CLI
 that sends no fetch metadata needs `OriginPolicy.requireFetchMetadata:
 false`, the standing headerless switch) behind the same Host gate (an

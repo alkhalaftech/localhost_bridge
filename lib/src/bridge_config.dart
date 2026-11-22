@@ -113,8 +113,13 @@ class BridgeConfig {
   /// The optional unix-domain-socket listener (Linux and macOS only) -
   /// when non-null, `start` also binds an HTTP listener on this filesystem
   /// path for local command-line clients: the socket file's owner-only
-  /// permissions (mode 0600, enforced at bind and verified before the
-  /// listener serves) are the transport boundary - there is no IP to
+  /// permissions (mode 0600, enforced at bind by the system `/bin/chmod`
+  /// at its full path and verified before the listener serves) are the
+  /// transport boundary, and the socket's parent directory must already
+  /// be owner-only (mode 0700) - the file is born with the process's
+  /// permissions and tightens a moment later, so a permissive parent
+  /// fails the whole start naming the directory and the socket is only
+  /// ever created where no other user can traverse - there is no IP to
   /// rebind and no Origin to read, so the request crosses the same single
   /// admission step origin-less, by its token alone, behind the same Host
   /// authority gate (an HTTP/1.1 client sends `Host: localhost`). A path
