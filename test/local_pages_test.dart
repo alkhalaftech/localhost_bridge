@@ -72,6 +72,11 @@ Future<(HttpClientResponse, String)> get(
   return (resp, body);
 }
 
+/// نص التوثيق بعد طيّ كل الفراغات إلى مسافة واحدة: الحكم على النص لا على
+/// إخراج السطر
+String _flattened(String path) =>
+    File(path).readAsStringSync().replaceAll(RegExp(r'\s+'), ' ');
+
 /// A POST command the way the served page sends it: fetch-shaped headers
 /// (Sec-Fetch cors/empty) with a JSON body on the command root.
 Future<(int status, Map<String, Object?> json, Map<String, String> headers)>
@@ -548,4 +553,83 @@ void main() {
       );
     },
   );
+
+  test('a plain non-browser GET with no Origin reads the page - the page '
+      'is readable by every program on the device, so no secret belongs '
+      'in it', () async {
+    // الشاهد المفصّل لحقيقة القراءة: عميل غير متصفح (HttpClient لا يرسل
+    // Origin ولا Sec-Fetch ولا ترويسة متصفح واحدة) يقرأ الصفحة بGET خالص
+    // — فالصفحة سطح عرض مقروء لكل برنامج على الجهاز، ولهذا لا توضع فيها
+    // رمز اقتران ولا توكن ولا أي سر: رمز الاقتران يُعرض بقناة المضيف
+    // نفسها (شاشته أو طرفيته) حيث يراه الإنسان وحده
+    final r = await rig(
+      config: const BridgeConfig(
+        localPages: [
+          BridgeLocalPage(
+            path: '/status',
+            content:
+                '<html><body><pre id="out">printer idle</pre></body></html>',
+          ),
+        ],
+      ),
+    );
+    addTearDown(r.srv.stop);
+    final (resp, body) = await get(r.srv.port, '/status');
+    expect(resp.statusCode, 200, reason: 'the headerless GET crosses');
+    expect(body, contains('printer idle'));
+    expect(resp.headers.value('access-control-allow-origin'), isNull);
+  });
+
+  test('the docs state the page is device-readable and the local-page '
+      'example carries no secret', () {
+    // شاهد التوثيق: جملة السلامة بنسختي README وبSECURITY.md، ومثال
+    // الصفحة في النسختين بلا رمز اقتران ولا أي رقم سري — أي تراجع في
+    // النص أو عودة الرمز إلى المثال تسقط هذا الشاهد
+    final readme = _flattened('README.md');
+    final readmeAr = _flattened('README.ar.md');
+    final security = _flattened('SECURITY.md');
+
+    const statementEn =
+        'no pairing code, no token, and no secret belong in a local page';
+    expect(readme, contains(statementEn));
+    expect(security, contains(statementEn));
+    expect(readmeAr, contains('لا يوضع فيها رمز اقتران ولا توكن ولا أي سر'));
+
+    for (final entry in <(String, String, String, String)>[
+      (
+        'README.md',
+        '## The local pages (an optional page from memory)',
+        '## The listeners, the lifecycle, and the health page',
+        readme,
+      ),
+      (
+        'README.ar.md',
+        '## الصفحات المحلية (صفحة اختيارية من الذاكرة)',
+        '## المستمعات ودورة الحياة وصفحة الصحة',
+        readmeAr,
+      ),
+    ]) {
+      final (name, start, end, doc) = entry;
+      final i = doc.indexOf(start);
+      expect(i, greaterThanOrEqualTo(0), reason: '$name names the section');
+      final j = doc.indexOf(end, i + start.length);
+      expect(j, greaterThan(i), reason: '$name closes the section');
+      final section = doc.substring(i, j);
+      expect(
+        section,
+        isNot(contains('Pairing code')),
+        reason: '$name local-page example carries no pairing code',
+      );
+      expect(
+        section,
+        isNot(contains('رمز الاقتران:')),
+        reason: '$name local-page example carries no pairing code',
+      );
+      expect(
+        RegExp(r'\b\d{6}\b').hasMatch(section),
+        isFalse,
+        reason: '$name local-page example carries no secret-looking code',
+      );
+    }
+  });
 }

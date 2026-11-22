@@ -392,9 +392,15 @@
   listener and has no fact to read on the mount; the seat budget binds
   there, and a mounted request mid-flight holds its seat inside
   `stop`'s drain exactly as on the private server.
+- Security: the local page is readable by every program on the device
+  - a plain `GET` with no browser headers reads it - so no pairing
+  code, no token, and no secret belong in a local page; the pairing
+  code is shown through the host's own channel (its screen, or its
+  terminal), and the local-page documentation and example serve a
+  status page, never a pairing-code page.
 - Added: `BridgeConfig.localPages` - the local pages, an optional
   page from memory for the host without a UI (a CLI tool, a service
-  showing a pairing code or its settings): pass the pages (a path,
+  showing a status readout or its settings): pass the pages (a path,
   the content, the content type) and a `GET` on exactly those paths
   answers the page, while every other `GET` keeps its standing
   `405 method_not_allowed`. `null` - the default - keeps the option

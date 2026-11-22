@@ -113,6 +113,13 @@ These are stated plainly so no host builds on a false assumption:
   the cost from "know a public string" to "hold a secret" — and only while
   no origin path accepts: with a non-empty allowlist, allow-all, or a
   remembered consent, that forged listed origin enters without the secret.
+- **Reading every served local page.** A served local page
+  (`BridgeConfig.localPages`) is readable by every program on the
+  device — a plain `GET` with no browser headers reads it — so no
+  pairing code, no token, and no secret belong in a local page. The
+  pairing code is shown through the host's own channel: its screen, or
+  its terminal, where only the human at the device reads it; a page
+  that displayed it would hand it to every local program.
 - **A local program that binds the port before the bridge.** Whoever
   binds `127.0.0.1:port` first receives the pages' commands — and the
   token does not help, because the client sends the token to whatever

@@ -166,7 +166,9 @@ valid token reads `403 token_required`, and the token alone - from an
 unqualified origin or with no Origin at all - never admits (the origin
 rejection answers it, so a wrong-origin sender learns nothing about its
 token). That mode is where **pairing** lives: the host displays a
-six-digit one-time code (`startPairing`, 120-second life), the page
+six-digit one-time code (`startPairing`, 120-second life; shown on the
+host's own screen or terminal - a local page is readable by every
+program on the device, so it never carries the code), the page
 sends it with its origin to `POST /pair`, and receives a token bound to
 that origin for 24 hours - revocable and rotatable by the host
 (`revokePairedOrigin` / `rotatePairedOrigin`) and never sent raw again:
@@ -583,7 +585,7 @@ server.listen((request) async {
 ## The local pages (an optional page from memory)
 
 A host without a UI - a CLI tool, a service - has nowhere to show a
-pairing code or its settings. `BridgeConfig.localPages` arms the
+status readout or its settings. `BridgeConfig.localPages` arms the
 local pages: pass the pages from memory (a path, the content, the
 content type) and a `GET` on exactly those paths answers the page,
 carrying the page's security headers. Every other `GET` keeps its
@@ -594,6 +596,13 @@ a folder from disk is not part of this package. The pages answer on
 the bridge's own listener only - on a mounted server the host serves
 its own routes, and a forwarded `GET` answers `405` like any
 non-POST.
+
+**The local page is readable by every program on the device** - a
+plain `GET` with no browser headers reads it - so no pairing code, no
+token, and no secret belong in a local page. The pairing code is
+shown through the host's own channel: its screen, or its terminal,
+where only the human at the device reads it; a page that displayed it
+would hand it to every local program.
 
 Every page reply carries a strict CSP - nothing loads from anywhere
 except the page's own inline script and style, and connections stay
@@ -622,9 +631,9 @@ final bridge = LocalIntakeServer(
   config: const BridgeConfig(
     localPages: [
       BridgeLocalPage(
-        path: '/pairing',
+        path: '/status',
         content: '<!doctype html><html><body>'
-            '<h1>Pairing code: 482913</h1>'
+            '<h1>Printer status</h1><pre id="out">idle</pre>'
             '<script>fetch("/", {method: "POST",'
             ' headers: {"Content-Type": "application/json"},'
             ' body: JSON.stringify(["STATUS"])});</script>'
