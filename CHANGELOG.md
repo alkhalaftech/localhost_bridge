@@ -40,7 +40,10 @@
   every repeat - a retry after `504 handler_timeout` returns the first
   result and never executes the command twice. The memory is bounded by
   size (`maxEntries` - a full ledger answers `ledger_full` and never
-  evicts a live entry) and by time (`ttl`, swept on the next look).
+  evicts a live entry) and by time (`ttl`, swept on the next look). A
+  non-positive `ttl` or `maxEntries` throws `ArgumentError` at
+  construction - release builds included - and the default clock is
+  monotonic, so a wall-clock jump never ends an entry before its ttl.
 - Added: an optional `::1` listener - `BridgeConfig.listenIPv6Loopback`
   (default off) binds a second loopback-IPv6 listener (`::1`, IPv6-only)
   at the same port, and the local host authorities widen in the same

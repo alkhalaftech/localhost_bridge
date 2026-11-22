@@ -23,6 +23,18 @@ library;
 
 import 'trusted_command.dart';
 
+/// The ledger's default clock: one wall-clock read anchors the origin at
+/// build time and every later read adds the [Stopwatch] elapsed - a
+/// wall-clock jump after the anchor never reaches a read, so no entry
+/// ends before its ttl because the wall moved. [wall] substitutes the
+/// anchor read for the jump witness; production builds pass nothing.
+/// The export gate hides this helper: it stays package-internal.
+DateTime Function() dedupMonotonicClock({DateTime Function()? wall}) {
+  final origin = (wall ?? DateTime.now)();
+  final elapsed = Stopwatch()..start();
+  return () => origin.add(elapsed.elapsed);
+}
+
 /// The lifecycle of one ledger entry, recorded before the work runs.
 enum LedgerState { running, done, failed }
 
@@ -55,19 +67,37 @@ class _Entry {
 ///   never evicted to make room: dropping a running or settled entry
 ///   would let a flood of fresh ids make an old command run twice. Size
 ///   the cap above your realistic command rate times [ttl].
-/// - [now] is the injectable clock; the default reads the wall clock.
-///   Tests pass their own to drive expiry deterministically.
+/// - [now] is the injectable clock; the default is a monotonic clock -
+///   one wall-clock anchor read at construction, [Stopwatch] reads
+///   afterwards - so a wall-clock jump never ends an entry before its
+///   ttl (a 504 retry stays protected across NTP corrections). Tests
+///   pass their own to drive expiry deterministically.
 class DedupLedger {
   /// Builds the ledger - [ttl] and [maxEntries] are required; a
-  /// non-positive value is a programming mistake and asserts at
-  /// construction.
+  /// non-positive value throws [ArgumentError] at construction. The
+  /// check runs in release builds too: asserts vanish there, and a
+  /// corrupt value must never enter silently.
   DedupLedger({
     required this.ttl,
     required this.maxEntries,
     DateTime Function()? now,
-  }) : assert(ttl > Duration.zero),
-       assert(maxEntries > 0),
-       _now = now ?? DateTime.now;
+  }) : _now = now ?? dedupMonotonicClock() {
+    if (ttl <= Duration.zero) {
+      throw ArgumentError.value(
+        ttl,
+        'ttl',
+        'must be positive - a non-positive ttl expires every entry at '
+            'once or keeps it forever',
+      );
+    }
+    if (maxEntries <= 0) {
+      throw ArgumentError.value(
+        maxEntries,
+        'maxEntries',
+        'must be positive - a non-positive cap refuses every command',
+      );
+    }
+  }
 
   /// The entry lifetime - see the class contract for sizing it.
   final Duration ttl;
