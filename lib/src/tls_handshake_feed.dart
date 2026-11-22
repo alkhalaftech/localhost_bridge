@@ -28,9 +28,12 @@ import 'dart:io';
 /// its ClientHello and went quiet), cannot be cut by this package:
 /// dart:io exposes no handshake deadline and no kill that reaches the
 /// wire once the engine is armed. Those sockets are bounded by the
-/// connection cap this feed enforces at accept time (the host's
-/// `maxOpenConnections`, or [internalHandshakeCap] while the option is
-/// off), counted while in flight, and announced by the count at stop.
+/// accept-time ceilings this feed enforces: the host's
+/// `maxOpenConnections` over the whole listener set while that option is
+/// on, or [internalHandshakeCap] over the in-flight handshakes alone
+/// while it is off - a delivered connection never counts as an in-flight
+/// handshake. They are counted while in flight and announced by the
+/// count at stop.
 ///
 /// The class shape is the measured narrow one: `extends Stream<Socket>`
 /// `implements ServerSocket`, and `HttpServer.listenOn` consumes exactly
@@ -41,13 +44,16 @@ import 'dart:io';
 /// path of the server reaps the pre-arming sockets unchanged.
 class TlsHandshakeFeed extends Stream<Socket> implements ServerSocket {
   /// The in-flight handshake ceiling while the host's
-  /// `maxOpenConnections` option is off. The value is deliberately
-  /// tighter than the destructible-socket ceilings: a socket stuck past
-  /// arming can never be freed by the server (no kill reaches the wire
-  /// once the engine is armed), so it holds its slot forever; one page
-  /// opens at most a handful of connections to one origin; and the
-  /// ceiling stays well under an OS default file-descriptor budget such
-  /// as macOS's 256.
+  /// `maxOpenConnections` option is off. It counts handshakes in flight
+  /// only - a socket accepted but undelivered - and never a delivered
+  /// connection: a completed handshake is the intake's connection, bounded
+  /// by the host's own option and never by this ceiling. The value is
+  /// deliberately tighter than the destructible-socket ceilings: a socket
+  /// stuck past arming can never be freed by the server (no kill reaches
+  /// the wire once the engine is armed), so it holds its slot forever;
+  /// one page opens at most a handful of connections to one origin; and
+  /// the ceiling stays well under an OS default file-descriptor budget
+  /// such as macOS's 256.
   static const int internalHandshakeCap = 64;
 
   /// The largest first record the gate accepts: the TLS record maximum
@@ -60,10 +66,13 @@ class TlsHandshakeFeed extends Stream<Socket> implements ServerSocket {
   final SecurityContext _context;
   final Duration _firstRecordTimeout;
   final int _openConnectionCap;
+  final int _inFlightHandshakeCap;
   final int Function() _openConnectionTotal;
+  final int Function() _inFlightHandshakesTotal;
   final void Function() _onCut;
   final void Function() _onDelivered;
-  final void Function(int openNow, int cap) _onOverCap;
+  final void Function(int inFlightNow, int cap) _onOverHandshakeCap;
+  final void Function(int openNow, int cap) _onOverConnectionCap;
 
   /// المقابس قبل التسليح: وصلت ولم يكتمل أول سجل لها بعد — عدّها حي
   /// ودمارها يصل السلك
@@ -81,28 +90,37 @@ class TlsHandshakeFeed extends Stream<Socket> implements ServerSocket {
   int stuckArmingAtClose = 0;
 
   /// Builds the feed over [raw]. The callbacks are the seam to the
-  /// owning server: [openConnectionTotal] reads the whole listener set
-  /// so the accept-time cap sees the delivered sockets of every
-  /// transport plus the in-flight handshakes of every feed; [onCut] and
-  /// [onDelivered] feed the cumulative counters; [onOverCap] carries the
-  /// rejected accept to the throttled warning line.
+  /// owning server: [openConnectionTotal] reads the whole listener set -
+  /// delivered sockets of every transport plus the in-flight handshakes
+  /// of every feed - and governs the accept gate while the host's
+  /// connection cap is on; [inFlightHandshakesTotal] reads the feeds'
+  /// in-flight handshakes only and governs the internal ceiling while
+  /// that cap is off; [onCut] and [onDelivered] feed the cumulative
+  /// counters; the two on-over callbacks carry the rejected accept to
+  /// the throttled warning line of its own position.
   TlsHandshakeFeed({
     required ServerSocket raw,
     required SecurityContext context,
     required Duration firstRecordTimeout,
     required int openConnectionCap,
+    required int inFlightHandshakeCap,
     required int Function() openConnectionTotal,
+    required int Function() inFlightHandshakesTotal,
     required void Function() onCut,
     required void Function() onDelivered,
-    required void Function(int openNow, int cap) onOverCap,
+    required void Function(int inFlightNow, int cap) onOverHandshakeCap,
+    required void Function(int openNow, int cap) onOverConnectionCap,
   }) : _raw = raw,
        _context = context,
        _firstRecordTimeout = firstRecordTimeout,
        _openConnectionCap = openConnectionCap,
+       _inFlightHandshakeCap = inFlightHandshakeCap,
        _openConnectionTotal = openConnectionTotal,
+       _inFlightHandshakesTotal = inFlightHandshakesTotal,
        _onCut = onCut,
        _onDelivered = onDelivered,
-       _onOverCap = onOverCap {
+       _onOverHandshakeCap = onOverHandshakeCap,
+       _onOverConnectionCap = onOverConnectionCap {
     _raw.listen(_onAccepted, onError: (Object error) => _out.addError(error));
   }
 
@@ -117,14 +135,27 @@ class TlsHandshakeFeed extends Stream<Socket> implements ServerSocket {
       socket.destroy();
       return;
     }
-    // السقف عند القبول حصراً: فوق السقف يُدمَّر المقبس الجديد قبل
-    // تسليحه — حيث يصل التدمير إلى السلك — لا رفض صامت يحرسه لا أحد
-    final openNow = _openConnectionTotal();
-    if (openNow + 1 > _openConnectionCap) {
-      socket.destroy();
-      _onCut();
-      _onOverCap(openNow + 1, _openConnectionCap);
-      return;
+    // سقفا القبول بالترتيب: سقف الخيار فوق المجموع الكلي (اتصالات
+    // مسلَّمة ومصافحات جارية معاً) حين يكون مسلَّحاً، وسقف المصافحات
+    // الجارية الداخلي حين يكون الخيار مطفأً حصراً — فالمسلَّم ليس
+    // مصافحة جارية أبداً ولا يعدّه السقف الداخلي — وفوق أي سقف يُدمَّر
+    // المقبس الجديد قبل تسليحه حيث يصل التدمير إلى السلك
+    if (_openConnectionCap > 0) {
+      final openNow = _openConnectionTotal();
+      if (openNow + 1 > _openConnectionCap) {
+        socket.destroy();
+        _onCut();
+        _onOverConnectionCap(openNow + 1, _openConnectionCap);
+        return;
+      }
+    } else {
+      final inFlightNow = _inFlightHandshakesTotal();
+      if (inFlightNow + 1 > _inFlightHandshakeCap) {
+        socket.destroy();
+        _onCut();
+        _onOverHandshakeCap(inFlightNow + 1, _inFlightHandshakeCap);
+        return;
+      }
     }
     final handshake = _PreArm(socket);
     _pending.add(handshake);
@@ -188,7 +219,7 @@ class TlsHandshakeFeed extends Stream<Socket> implements ServerSocket {
   }
 
   /// انصراف النظير وحده قبل التسليح (خطأ أو إغلاق): يسحب من العدّ بلا
-  /// قطع محسوب — القطع عدّ ما قطعته التلقيمة لا ما تركه نظيره — ويهدم
+  /// قطع محسوب — القطع عدّ ما قطعته التلقمة لا ما تركه نظيره — ويهدم
   /// المقبس لحظة الانصراف حصراً: تركه حياً هنا يسرّب مقبض النظام
   /// (حلقة «اتصال ثم إغلاق» من خارج العملية تستنزف واصفات الجسر حتى
   /// نفادها) والهدم هنا يصل السلك قبل التسليح كبقية الأهدمات

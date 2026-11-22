@@ -367,8 +367,9 @@ void main() {
   test('above the maxOpenConnections cap the new socket is cut before '
       'arming: refused while the cap holds, served once a closing stuck '
       'handshake frees a seat', () async {
+    final rec = _Rec();
     final srv = _make(
-      rec: null,
+      rec: rec,
       config: BridgeConfig(
         maxOpenConnections: 2,
         tlsFirstRecordTimeout: const Duration(seconds: 1),
@@ -397,6 +398,24 @@ void main() {
       reason:
           'the new socket over the cap is destroyed before arming - the '
           'destruction is the one that reaches the wire',
+    );
+    // سطر الخيار يسمّي ما يقيسه: اتصالات مفتوحة (مسلَّمة وجارية معاً)
+    // لا مصافحات جارية — فالمسلَّم ليس مصافحة جارية أبداً
+    final capLines = rec.warns
+        .where((w) => w.contains('intake TLS accept limit'))
+        .toList();
+    expect(
+      capLines,
+      hasLength(1),
+      reason: 'exactly one throttled line for the option-path accept cut',
+    );
+    expect(
+      capLines.single,
+      contains('open connections'),
+      reason:
+          'the option-path count is open connections - delivered and '
+          'in-flight summed - and is never mislabeled as handshakes in '
+          'flight',
     );
     // إغلاق أحد العالقين: المصافحة الفاشلة تنقص العدّ فيتحرر مقعد
     stuck1.destroy();
@@ -692,6 +711,54 @@ void main() {
       1,
       reason: 'a served handshake is not a cut - the counters stay distinct',
     );
+  });
+
+  test('the internal ceiling caps in-flight handshakes only: sixty-four '
+      'delivered keep-alive connections with the option off never refuse '
+      'the next sender', () async {
+    // maxOpenConnections مطفأ والسقف الداخلي للمصافحات الجارية حصراً:
+    // اتصال مكتمل المصافحة أُسلِّم إلى HttpServer فليس مصافحة جارية —
+    // عدّه في عدّ الاتصالات حيث يحدّه خيار المضيف وحده
+    final srv = _make(
+      rec: null,
+      config: BridgeConfig(securityContext: tlsContext()),
+    );
+    await srv.start(preferredPort: 0);
+    addTearDown(srv.stop);
+    final live = <SecureSocket>[];
+    for (var i = 0; i < 64; i++) {
+      live.add(
+        await SecureSocket.connect(
+          '127.0.0.1',
+          srv.port,
+          onBadCertificate: (cert) => true,
+        ),
+      );
+    }
+    await Future<void>.delayed(const Duration(milliseconds: 300));
+    expect(
+      srv.counters.tlsHandshakesDelivered,
+      64,
+      reason: 'sixty-four completed handshakes were delivered to the intake',
+    );
+    expect(
+      srv.counters.tlsHandshakesInFlight,
+      0,
+      reason: 'a delivered socket is out of the in-flight count at once',
+    );
+    final (status, body) = await _tlsPost(srv.port);
+    expect(
+      status,
+      200,
+      reason:
+          'the internal ceiling never counts a delivered connection as an '
+          'in-flight handshake - with the option off the sixty-fifth '
+          'sender is served, not refused at the door',
+    );
+    expect(body, contains('"ok":true'));
+    for (final s in live) {
+      s.destroy();
+    }
   });
 
   test('a socket its peer abandons before arming is destroyed at once: '

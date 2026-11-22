@@ -95,12 +95,14 @@ class BridgeConfig {
   /// sockets time out) the next request is served. The count is the sum
   /// over every bound listener plus the TLS feed's in-flight handshakes
   /// (sockets accepted on the TLS transport whose handshake has not yet
-  /// been delivered - the feed cuts a socket that would push the total
-  /// over this cap before arming it, since a pre-arming cut is the one
-  /// that reaches the wire). `0` (the default) keeps the option off -
-  /// the wire never refuses for open sockets alone, and the TLS feed
-  /// still holds its own internal handshake ceiling. A negative value
-  /// throws [ArgumentError] at server construction.
+  /// been delivered - while this cap is on, the feed cuts a socket that
+  /// would push the total over it at accept time, since a pre-arming cut
+  /// is the one that reaches the wire). `0` (the default) keeps the
+  /// option off - the wire never refuses for open sockets alone, and the
+  /// TLS feed then holds its own internal ceiling over the in-flight
+  /// handshakes alone: a delivered connection is never counted as an
+  /// in-flight handshake and is never refused for open sockets. A
+  /// negative value throws [ArgumentError] at server construction.
   final int maxOpenConnections;
 
   /// The optional `::1` (loopback IPv6) listener - when true, `start`
@@ -174,10 +176,11 @@ class BridgeConfig {
   /// dart:io exposes no handshake deadline for the armed engine and no
   /// kill that reaches the wire after arming - such a socket holds its
   /// in-flight slot until the peer closes it, bounded by the connection
-  /// cap ([maxOpenConnections] or the internal handshake ceiling), the
-  /// count is visible in the counters, and `stop` announces how many
-  /// were left stuck. A context without a certificate chain
-  /// fails at connection time with dart:io's own handshake error.
+  /// cap ([maxOpenConnections] over the whole listener set while it is
+  /// on, or by the internal ceiling over the in-flight handshakes alone
+  /// while it is off), the count is visible in the counters, and `stop`
+  /// announces how many were left stuck. A context without a certificate
+  /// chain fails at connection time with dart:io's own handshake error.
   final SecurityContext? securityContext;
 
   /// The first TLS record deadline for the TLS transport - how long a

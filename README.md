@@ -1095,9 +1095,12 @@ CLI clients on Linux and macOS.
   deadline and no kill reaches the wire after arming, so such a socket
   holds an in-flight slot until the peer closes it. The bound there is
   the ceiling: the TLS feed counts its in-flight handshakes into the
-  open-connection cap (`BridgeConfig.maxOpenConnections`) and holds
-  its own internal 64-handshake ceiling while that option is off,
-  cutting the new socket before arming it, and `stop` announces in one
+  open-connection cap (`BridgeConfig.maxOpenConnections`) while that
+  option is on, and holds its own internal 64-handshake ceiling while
+  the option is off — a ceiling over the in-flight handshakes alone,
+  never over delivered connections (sixty-four completed connections
+  with the option off never refuse the next sender) — cutting the new
+  socket before arming it, and `stop` announces in one
   line how many handshakes were left stuck past arming. A host serving
   TLS on a hostile network reads the same honesty front to back:
   everything before the first record is the package's to bound,
@@ -1150,10 +1153,11 @@ CLI clients on Linux and macOS.
   and on the TLS door the cap cuts the new socket before arming it —
   the one cut that reaches the wire — instead of answering it. `0` —
   the default — keeps the option off, and the wire never refuses for
-  open sockets alone; the TLS transport still holds its own internal
-  64-handshake ceiling while the option is off, because a handshake
-  stuck past arming is the one socket the server can never free by
-  itself.
+  open sockets alone; the TLS transport then holds its own internal
+  64-handshake ceiling over the in-flight handshakes alone — a
+  delivered connection is never counted as an in-flight handshake and
+  never refused for open sockets — because a handshake stuck past
+  arming is the one socket the server can never free by itself.
 - `BridgeConfig.extraHosts` adds host authorities the server answers for
   (a bare name matches `name:boundPort` too, like the built-ins). Every
   entry must be a name you control that resolves to this machine — a

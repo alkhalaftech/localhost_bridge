@@ -1455,7 +1455,7 @@ class LocalIntakeServer {
   }
 
   /// مجموع الاتصالات المفتوحة عبر المستمعين كلها زائد المصافحات الجارية
-  /// في التلقيمتين: حساب السقف الوحيد الذي يقرؤه باب القبول وباب الطلب
+  /// في التلقيمتين: حساب سقف الخيار الذي يقرؤه باب القبول وباب الطلب
   /// معاً — سقف واحد لا باب جانبي يحصّنه
   int _openConnectionTotal() =>
       (_server?.connectionsInfo().total ?? 0) +
@@ -1464,29 +1464,51 @@ class LocalIntakeServer {
       (_feed?.ongoingHandshakes ?? 0) +
       (_feedV6?.ongoingHandshakes ?? 0);
 
-  /// تلقمة جديدة فوق مستمع خام: السقف الفعّال هو الخيار فوق الصفر وإلا
-  /// السقف الداخلي 64 — لأن العالق بعد التسليح لا يقدر الخادم على تحريره
-  /// أبداً فيستحق سقفاً أضيق من المقابس القابلة للكنس
+  /// المصافحات الجارية في التلقيمتين وحصراً: سقف 64 الداخلي حين يكون
+  /// خيار الاتصالات مطفأً — فالمسلَّم ليس مصافحة جارية أبداً ولا يعدّه
+  /// هذا السقف، وعدّه في مجموع الاتصالات حيث يحدّه خيار المضيف وحده
+  int _inFlightHandshakesTotal() =>
+      (_feed?.ongoingHandshakes ?? 0) + (_feedV6?.ongoingHandshakes ?? 0);
+
+  /// تلقمة جديدة فوق مستمع خام: سقفا القبول — سقف الخيار فوق المجموع
+  /// الكلي مسلَّفاً، والسقف الداخلي 64 فوق الجاري حصراً والخيار مطفأً
+  /// (العالق بعد التسليح لا يقدر الخادم على تحريره أبداً فيستحق سقفاً
+  /// أضيق من المقابس القابلة للكنس)
   TlsHandshakeFeed _newTlsFeed(ServerSocket raw) => TlsHandshakeFeed(
     raw: raw,
     context: config.securityContext!,
     firstRecordTimeout: config.tlsFirstRecordTimeout,
-    openConnectionCap: config.maxOpenConnections > 0
-        ? config.maxOpenConnections
-        : TlsHandshakeFeed.internalHandshakeCap,
+    openConnectionCap: config.maxOpenConnections,
+    inFlightHandshakeCap: TlsHandshakeFeed.internalHandshakeCap,
     openConnectionTotal: _openConnectionTotal,
+    inFlightHandshakesTotal: _inFlightHandshakesTotal,
     onCut: () => _tlsSocketsCut++,
     onDelivered: () => _tlsHandshakesDelivered++,
-    onOverCap: _noteHandshakeCapLine,
+    onOverHandshakeCap: _noteHandshakeCapLine,
+    onOverConnectionCap: _noteAcceptCapLine,
   );
 
-  /// سطر كبح فوق سقف المصافحات: بنمط بقية أسطر السعة — سطر واحد في
-  /// الثانية على الأكثر بالساعة المحقونة، والسطر التالي يحمل عدد
-  /// المكتوم، وموضع مستقل فلا يكتم فيض موضعٍ تحذيرَ موضعٍ آخر
-  void _noteHandshakeCapLine(int openNow, int cap) {
+  /// سطر كبح السقف الداخلي: بنمط بقية أسطر السعة — سطر واحد في الثانية
+  /// على الأكثر بالساعة المحقونة، والسطر التالي يحمل عدد المكتوم،
+  /// وموضع مستقل فلا يكتم فيض موضعٍ تحذيرَ موضعٍ آخر، والعدّ الذي
+  /// يقوله عدّ المصافحات الجارية حصراً بما يسمّي حقيقته
+  void _noteHandshakeCapLine(int inFlightNow, int cap) {
     final line = _handshakeCapWarnThrottle.admit(
-      'intake TLS handshake limit: $openNow handshakes in flight over the '
-      'cap of $cap — cutting the new socket',
+      'intake TLS handshake limit: $inFlightNow handshakes in flight over '
+      'the cap of $cap — cutting the new socket',
+    );
+    if (line != null) {
+      telemetry.warn(line, category: BridgeCategory.network);
+    }
+  }
+
+  /// سطر كبح سقف الخيار عند القبول: العدّ مجموع اتصالات مفتوحة (مسلَّمة
+  /// وجارية معاً) بالتسمية نفسها التي يقولها باب الطلب — لا مصافحات
+  /// جارية فالمسلَّم ليس جارياً
+  void _noteAcceptCapLine(int openNow, int cap) {
+    final line = _acceptCapWarnThrottle.admit(
+      'intake TLS accept limit: $openNow open connections over the cap of '
+      '$cap — cutting the new socket',
     );
     if (line != null) {
       telemetry.warn(line, category: BridgeCategory.network);
@@ -2351,6 +2373,10 @@ class LocalIntakeServer {
     windowMs: _warnThrottleWindowMs,
   );
   late final _WarnThrottle _handshakeCapWarnThrottle = _WarnThrottle(
+    nowMs: () => _now,
+    windowMs: _warnThrottleWindowMs,
+  );
+  late final _WarnThrottle _acceptCapWarnThrottle = _WarnThrottle(
     nowMs: () => _now,
     windowMs: _warnThrottleWindowMs,
   );

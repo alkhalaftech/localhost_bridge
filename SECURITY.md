@@ -298,12 +298,14 @@ What remains:
   `BridgeConfig.maxOpenConnections` above zero, and a request arriving
   over the cap answers `503` until the count drops; `0` (the default)
   keeps the option off. On the TLS door the count includes the feed's
-  in-flight handshakes, an accept over the cap cuts the new socket
-  before arming it (the one cut that reaches the wire), and while the
-  option is off the TLS transport still holds an internal
-  64-handshake ceiling — a handshake stuck past arming is the one
-  socket the server can never free by itself, so it gets the tighter
-  ceiling.
+  in-flight handshakes, and while the cap is on an accept over it cuts
+  the new socket before arming it (the one cut that reaches the wire).
+  While the option is off the TLS transport holds an internal
+  64-handshake ceiling over the in-flight handshakes alone — a
+  delivered connection is never counted as an in-flight handshake and
+  is never refused for open sockets — because a handshake stuck past
+  arming is the one socket the server can never free by itself, so it
+  gets the tighter ceiling.
 - **A TLS client that completes its first record and then goes silent
   holds a socket until the peer closes it — what the package does not
   build, stated plainly.** The TLS gate bounds the path up to the
@@ -318,9 +320,11 @@ What remains:
   package does not pretend otherwise. Such a client holds one
   in-flight handshake slot until it closes on its own; the bound on
   how many slots it can hold is the ceiling — the feed counts its
-  in-flight handshakes into `maxOpenConnections`, holds an internal
-  64-handshake ceiling while that option is off, cuts any socket that
-  would push the total past the cap before arming it, and `stop`
+  in-flight handshakes into `maxOpenConnections` while that option is
+  on, holds an internal 64-handshake ceiling over the in-flight
+  handshakes alone while the option is off (a delivered connection is
+  never counted as an in-flight handshake), cuts any socket that would
+  push the governing cap past its limit before arming it, and `stop`
   announces in one line how many handshakes were left stuck past
   arming (written only when the count is above zero). The tallies are
   visible in `server.counters`: handshakes in flight, sockets cut on
