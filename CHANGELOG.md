@@ -499,6 +499,18 @@
   single-reply path delivers - `TrustedCommand.admission` on a
   streaming command used to be the unrecorded placeholder, so a
   streaming handler read no accepted route and no origin trust grade.
+- Security: the settle step re-checks the consumable admission facts on
+  the live state - a one-time grant still present, a pairing proof's
+  replay key still unused, the per-origin quota window and the token
+  guess budget not yet full. A request admitted and then held before
+  its acceptance gate (the host-owned telemetry measure is such a
+  holder) no longer rides a fact a concurrent request already
+  consumed: its record settles into the standing refusal for the live
+  state (`origin_pending`, `pair_signature_replay`,
+  `origin_rate_limited`, or `token_locked`), so one allow-once grant
+  accepts one request and one pairing proof passes once, whatever the
+  concurrency. Records whose facts are unchanged settle exactly as
+  before.
 
 ## 0.1.3
 

@@ -236,9 +236,14 @@ enum IntakeAdmissionPath {
 
 /// The one admission record for one request - the single projection of the
 /// protection state that replaces the per-question probes. Built by
-/// [IntakeProtection.admit]; every field is final and settled at build
-/// time, so the caller reads the record and never probes the protection
-/// object again for this request.
+/// [IntakeProtection.admit]; the caller reads the record and never probes
+/// the protection object again for this request. The verdict is recorded
+/// at build time from a pure read - and [settle] re-checks the consumable
+/// facts (a one-time grant, a pairing proof's replay slot, the per-origin
+/// quota seat, the token guess budget) on the live state before it lands:
+/// a fact a concurrent request already consumed flips the record into the
+/// standing refusal for the live state, and the getters below are the
+/// only view of that final verdict. Read them after [settle].
 ///
 /// The projection is deliberately side-effect free: a caller that never
 /// calls [settle] leaves no state behind - that is what keeps preflights,
@@ -246,8 +251,8 @@ enum IntakeAdmissionPath {
 /// decision's state effects exactly where the old admission gate stood.
 class IntakeAdmission {
   const IntakeAdmission._({
-    required this.rejection,
-    required this.acceptedPath,
+    required IntakeRejection? recordedRejection,
+    required IntakeAdmissionPath? recordedPath,
     required this.echoesCors,
     required this.verboseErrors,
     required this.origin,
@@ -256,15 +261,38 @@ class IntakeAdmission {
     required this.originTrust,
     _AdmissionDecision? decision,
     IntakeProtection? owner,
-  }) : _decision = decision,
+  }) : _recordedRejection = recordedRejection,
+       _recordedPath = recordedPath,
+       _verdict = null,
+       _decision = decision,
+       _owner = owner;
+
+  /// The live-built record [IntakeProtection.admit] returns - its verdict
+  /// sits in a refreshable holder so the settle-time re-check can flip it
+  /// in place without rebuilding the record.
+  IntakeAdmission._live({
+    required IntakeRejection? recordedRejection,
+    required IntakeAdmissionPath? recordedPath,
+    required this.echoesCors,
+    required this.verboseErrors,
+    required this.origin,
+    required this.normalizedOrigin,
+    required this.path,
+    required this.originTrust,
+    required _AdmissionDecision decision,
+    required IntakeProtection owner,
+  }) : _recordedRejection = recordedRejection,
+       _recordedPath = recordedPath,
+       _verdict = _AdmissionVerdict(recordedRejection, recordedPath),
+       _decision = decision,
        _owner = owner;
 
   /// The hand-built placeholder for a [TrustedCommand] constructed outside
   /// the intake (host tests): no rejection, no path, no decisions - and
   /// [settle] and [noteAuthorityReject] refuse it loudly.
   static const IntakeAdmission unrecorded = IntakeAdmission._(
-    rejection: null,
-    acceptedPath: null,
+    recordedRejection: null,
+    recordedPath: null,
     echoesCors: false,
     verboseErrors: false,
     origin: null,
@@ -273,14 +301,38 @@ class IntakeAdmission {
     originTrust: null,
   );
 
+  /// The verdict as recorded at build time - the getters read the
+  /// settle-refreshed verdict when one exists.
+  final IntakeRejection? _recordedRejection;
+  final IntakeAdmissionPath? _recordedPath;
+
+  /// The refreshable verdict holder - null only on the const [unrecorded]
+  /// placeholder, which refuses to settle.
+  final _AdmissionVerdict? _verdict;
+
   /// The policy rejection when the request was refused - null when it was
   /// accepted. The status, code, and message are the wire contract the
-  /// caller replies with.
-  final IntakeRejection? rejection;
+  /// caller replies with. Read it after [settle]: the settle-time
+  /// re-check may flip an accepted record whose consumable fact (a
+  /// one-time grant, a proof's replay slot, a budget seat) was already
+  /// consumed by a concurrent request, and this getter is the only view
+  /// of the final verdict.
+  IntakeRejection? get rejection {
+    final verdict = _verdict;
+    // الحامل حيث وُجد هو الحقيقة الحية — وُلد بالحكم المسجل وقلبه
+    // التسوي يكتب فيه، فلا تراجع إلى المسجل يقنع قلباً صار خالياً
+    if (verdict != null) return verdict.rejection;
+    return _recordedRejection;
+  }
 
   /// The route that accepted the request - null when [rejection] is
-  /// non-null.
-  final IntakeAdmissionPath? acceptedPath;
+  /// non-null, including after a settle-time refresh flipped an accepted
+  /// record into the standing refusal.
+  IntakeAdmissionPath? get acceptedPath {
+    final verdict = _verdict;
+    if (verdict != null) return verdict.acceptedPath;
+    return _recordedPath;
+  }
 
   /// Whether the reply to this request may carry the CORS echo. For an
   /// accepted request this is the qualified-origin decision; for a
@@ -322,6 +374,16 @@ class IntakeAdmission {
   /// busy reject) never settles, so it leaves no state behind - the same
   /// property the old gate position gave.
   ///
+  /// Before anything lands, the consumable facts behind an accepted
+  /// verdict are re-read on the live state: a one-time grant still
+  /// present, a pairing proof's replay key still unused, the per-origin
+  /// quota seat and the token guess budget not yet full. A fact a
+  /// concurrent request already consumed flips the record into the
+  /// standing refusal for the live state (`origin_pending`,
+  /// `pair_signature_replay`, `origin_rate_limited`, or `token_locked`)
+  /// and only that refusal's effects land - read [rejection] and
+  /// [acceptedPath] after this call for the final verdict.
+  ///
   /// Throws [StateError] on a hand-built [IntakeAdmission.unrecorded] or a
   /// second settle of the same record.
   void settle() {
@@ -339,6 +401,23 @@ class IntakeAdmission {
       );
     }
     decision.settled = true;
+    // إعادة فحص الوقائع المستهلكة على الحالة الحية قبل إنزال أي أثر:
+    // الحكم قراءة خالصة لحظة الإسقاط، وما بين الإسقاط والتسوية منفذُ
+    // القياس يملكه المضيف فقد يُحكَم طلبان متزامنان على الحالة نفسها.
+    // ما تغير يجعل السجل رفضاً برمز الواقع القائم (لا رمز جديد) -
+    // والمسار يقرأ الرفض من السجل بعد التسوية لا من فحص سابق
+    final flip = owner._recheckConsumedFacts(decision, origin);
+    if (flip != null) {
+      _verdict!
+        ..rejection = flip
+        ..acceptedPath = null;
+      owner._applyDecision(decision, origin);
+      final detail = decision.pairFailure == null
+          ? ''
+          : ' (pairing proof: ${decision.pairFailure})';
+      owner._noteAuthority('${flip.code}: ${flip.message}$detail', origin);
+      return;
+    }
     owner._applyDecision(decision, origin);
     // طابع الإثبات الموثق يسجل هنا حصرا — الإسقاط الخالص قرأه لا كتبه
     final replayKey = decision.pairReplayKey;
@@ -377,6 +456,18 @@ class IntakeAdmission {
   }
 }
 
+/// The refreshable verdict holder of one admission record: the projection
+/// writes the admit-time verdict once, and only the settle-time re-check
+/// of the consumable facts writes again (the flip into the standing
+/// refusal). Internal to this library - the record exposes its verdict
+/// through getters, never this holder.
+class _AdmissionVerdict {
+  _AdmissionVerdict(this.rejection, this.acceptedPath);
+
+  IntakeRejection? rejection;
+  IntakeAdmissionPath? acceptedPath;
+}
+
 /// The recorded decision one admission projection produced - the verdict
 /// plus the deferred state effects [IntakeAdmission.settle] lands.
 /// Internal to this library: the record exposes the fields, never the
@@ -389,6 +480,11 @@ class _AdmissionDecision {
     required this.verboseErrors,
     required this.stampMs,
     required this.key,
+    required this.fetchMode,
+    required this.fetchDest,
+    required this.sendMethod,
+    required this.platformVerified,
+    required this.mayAskConsent,
     this.tokenAttempt = false,
     this.tokenCompared = false,
     this.tokenMatched = false,
@@ -417,6 +513,19 @@ class _AdmissionDecision {
   /// request carried no origin).
   final String key;
 
+  /// The request facts the discovery re-walk at the settle-time re-check
+  /// replays: the same non-secret request shape the projection judged,
+  /// so the fresh walk reads the live state against the same request.
+  final String? fetchMode;
+  final String? fetchDest;
+  final String sendMethod;
+  final bool platformVerified;
+
+  /// The may-ask value the projection judged with - the fresh discovery
+  /// walk keeps it so a twin never opens a question its own admission
+  /// verdict forbade.
+  final bool mayAskConsent;
+
   /// Whether the token block ran (a token was supplied and a secret is
   /// configured) - its window fetch owns the periodic sweep, exactly like
   /// the old gate.
@@ -432,47 +541,60 @@ class _AdmissionDecision {
 
   /// Whether the wrong-token miss lands a stamp on settle - under the
   /// budget every miss counts; above it nothing stamps, so the window
-  /// drains honestly and the announced wait stays true.
-  final bool tokenMissStamped;
+  /// drains honestly and the announced wait stays true. The settle-time
+  /// re-check clears it when the live window is already full, so
+  /// concurrent misses never inflate the window past the budget.
+  bool tokenMissStamped = false;
 
   /// Whether the request presented a wrong token above the spent budget -
-  /// settle writes the muted budget line for it.
-  final bool tokenBudgetSpent;
+  /// settle writes the muted budget line for it. Set by the re-check
+  /// when it flips a stamp-planning record into the standing lock.
+  bool tokenBudgetSpent = false;
 
   /// The quota limit that governed the branch (0 = the branch ran no
   /// quota) - settle re-runs the same mutating quota call so the stamp, or
-  /// its withdrawal on a would-reject, lands as before.
-  final int quotaLimit;
+  /// its withdrawal on a would-reject, lands as before. The re-check
+  /// clears it when the live window is already full, so a concurrent
+  /// settle never stamps over a consumed seat.
+  int quotaLimit = 0;
 
   /// A one-time grant existed for the origin (valid or expired) - settle
-  /// consumes it either way, like the old gate.
-  final bool grantExisted;
+  /// consumes it either way, like the old gate. The re-check clears it
+  /// (and the acceptance it backed) when the live map no longer holds it.
+  bool grantExisted = false;
 
   /// The discovery branch reached the ask-budget trim point - settle runs
-  /// the real trim there.
-  final bool reachedAskTrim;
+  /// the real trim there. The re-check refreshes it from the fresh walk.
+  bool reachedAskTrim = false;
 
-  /// The consent question fires on settle.
-  final bool fireAsk;
+  /// The consent question fires on settle. The re-check refreshes it
+  /// from the fresh discovery walk when the grant behind the acceptance
+  /// is gone.
+  bool fireAsk = false;
 
   /// The full report-only would-reject line - settle warns it verbatim.
-  final String? reportOnlyLine;
+  String? reportOnlyLine;
 
   /// The replay-cache key a verified pairing proof records on settle -
-  /// `(pairingId, stamp)`; null when no verified proof rode the request.
+  /// `(pairingId, stamp)` bound to the full proof; null when no verified
+  /// proof rode the request. The re-check reads this same proof-bound key
+  /// (never a fresh timestamp) and flips the record into the standing
+  /// replay refusal when a concurrent settle already recorded it.
   final String? pairReplayKey;
 
   /// The internal reason a pairing proof failed (malformed, unknown id,
   /// expired, origin mismatch, signature) - it names the muted security
   /// line on settle and never travels the wire: the wire sees
-  /// token_required alone for every invalid-proof shape.
-  final String? pairFailure;
+  /// token_required alone for every invalid-proof shape. The re-check
+  /// names `reused-stamp` on the replay flip.
+  String? pairFailure;
 
   /// The parent domain the recorded question is budgeted against (empty
   /// when no parent budget is armed or no question fires) - settle stamps
   /// the same parent the projection decided with, whatever the policy does
-  /// between the projection and the settle.
-  final String askParent;
+  /// between the projection and the settle. The re-check refreshes it
+  /// from the fresh discovery walk.
+  String askParent = '';
 
   /// One-shot guard: a record settles once.
   bool settled = false;
@@ -2002,9 +2124,9 @@ class IntakeProtection {
       deferCredential: deferCredential,
       originTrust: effectiveTrust,
     );
-    return IntakeAdmission._(
-      rejection: decision.rejection,
-      acceptedPath: decision.acceptedPath,
+    return IntakeAdmission._live(
+      recordedRejection: decision.rejection,
+      recordedPath: decision.acceptedPath,
       echoesCors: decision.echoesCors,
       verboseErrors: decision.verboseErrors,
       origin: origin,
@@ -2056,6 +2178,11 @@ class IntakeProtection {
         verboseErrors: false,
         stampMs: now,
         key: key,
+        fetchMode: fetchMode,
+        fetchDest: fetchDest,
+        sendMethod: method,
+        platformVerified: platformVerifiedOrigin,
+        mayAskConsent: true,
       );
     }
 
@@ -2065,6 +2192,9 @@ class IntakeProtection {
     // ميزانية التخمين منفقة لهذا الطلب؟ تُحسب داخل طبقة التوكن وتُقرأ
     // عند بناء القرار (طابع الإخفاق وسطر الميزانية لا يُطلعان إلا بها)
     var budgetSpent = false;
+    // قيمة may-ask التي حُكم بها هذا الطلب — مشيُ إعادة الفحص يقرأها
+    // كما قُرئت فلا يفتح التوأم سؤالاً منع حكمُ دخله سؤاله
+    var askConsent = true;
     IntakeRejection? rejection;
     IntakeAdmissionPath? accepted;
     final beyond = _BeyondOutcome();
@@ -2112,13 +2242,14 @@ class IntakeProtection {
             ? IntakeAdmissionPath.originWithToken
             : IntakeAdmissionPath.token;
       } else {
+        askConsent = !budgetSpent;
         _projectBeyondToken(
           origin,
           key,
           fetchMode,
           fetchDest,
           now: now,
-          mayAskConsent: !budgetSpent,
+          mayAskConsent: askConsent,
           out: beyond,
           method: method,
           platformVerifiedOrigin: platformVerifiedOrigin,
@@ -2293,6 +2424,11 @@ class IntakeProtection {
       verboseErrors: verboseErrors,
       stampMs: now,
       key: key,
+      fetchMode: fetchMode,
+      fetchDest: fetchDest,
+      sendMethod: method,
+      platformVerified: platformVerifiedOrigin,
+      mayAskConsent: askConsent,
       tokenAttempt: tokenAttempt,
       tokenCompared: tokenCompared,
       tokenMatched: tokenMatched,
@@ -2609,6 +2745,108 @@ class IntakeProtection {
     if (line != null) {
       telemetry?.warn(line, category: BridgeCategory.security);
     }
+  }
+
+  /// إعادة فحص الوقائع المستهلكة على الحالة الحية لحظة التسوية — سجل
+  /// القبول بنى حكمه قراءةً خالصة لحظة الإسقاط، وما بين الإسقاط
+  /// والتسوية منفذُ القياس يملكه المضيف فقد يتأخر فيه تنفيذ الطلب
+  /// فيحكم طلبان متزامنان على الحالة نفسها. الوقائع التي يستهلكها
+  /// طلب واحد (منحة سماح-مرة، مفتاح إثبات الاقتران، خانة حصة الأصل،
+  /// خانة ميزانية التخمين) تُعاد قراءتها هنا: ما تغير يجعل السجل
+  /// رفضاً برمز الواقع القائم (لا رمز جديد) ويعيد كتابة أعلام الأثر
+  /// كي لا يهبط من استحقاقٍ صُرف، وما بقي كما كان لا يلمس القرار
+  /// إطلاقاً فسلوكُ الطلب المتسلسل حرفاً. وذاكرة الإعادة تُقرأ
+  /// بالمفتاح المقيَّد بالإثبات الكامل كما سُجل — لا بطابع زمني جديد
+  IntakeRejection? _recheckConsumedFacts(_AdmissionDecision d, String? origin) {
+    if (_disposed) return null;
+    final now = _now;
+    // مفتاح إثبات الاقتران: القبول المقترن يبني على غيابه — إثبات
+    // متزامن سوّى قبله سجل مفتاحه فيصير قبولُنا إعادةَ إثبات، ونمط
+    // بوابة الإثبات نفسه: أثر الاستحقاق المسجل يُصفَّر
+    if (d.acceptedPath == IntakeAdmissionPath.originWithPairedToken &&
+        d.pairReplayKey != null &&
+        _pairReplay.containsKey(d.pairReplayKey)) {
+      d
+        ..grantExisted = false
+        ..quotaLimit = 0
+        ..fireAsk = false
+        ..reportOnlyLine = null
+        ..pairFailure = 'reused-stamp';
+      return const IntakeRejection(
+        403,
+        'pair_signature_replay',
+        'This pairing signature was already used — sign a fresh request',
+      );
+    }
+    // منحة سماح-مرة: القبول عليها يبني على حضورها — توأمٌ متزامن
+    // سوّى قبله صرفها فحُكمنا صار على منحة غير موجودة. الحكم سلوك
+    // الطلب نفسه على الحالة الحية: مشيُ فرع الاكتشاف من جديد قراءةً
+    // خالصة فيُنتج رمز الواقع القائم، وسؤال الموافقة إن أطلقه المشي
+    // فهو أثره؛ وإن كان الأصل مقبولاً الآن من غيرها فالقبول الأصلي باقٍ
+    if (d.acceptedPath == IntakeAdmissionPath.onceGrant) {
+      final grant = _onceGrants[d.key];
+      if (grant == null || now > grant) {
+        final fresh = _BeyondOutcome();
+        _projectBeyondToken(
+          origin,
+          d.key,
+          d.fetchMode,
+          d.fetchDest,
+          now: now,
+          mayAskConsent: d.mayAskConsent,
+          out: fresh,
+          method: d.sendMethod,
+          platformVerifiedOrigin: d.platformVerified,
+        );
+        final freshRejection = fresh.accepted == null ? fresh.rejection : null;
+        if (freshRejection != null) {
+          d
+            ..grantExisted = false
+            ..quotaLimit = 0
+            ..fireAsk = fresh.fireAsk
+            ..reachedAskTrim = fresh.reachedAskTrim
+            ..askParent = fresh.askParent
+            ..reportOnlyLine = null;
+          return freshRejection;
+        }
+      }
+    }
+    // خانة حصة الأصل: ختمُ القبول يستهلك خانة — امتلأت النافذة على
+    // توأم متزامن فإنزال الختم تجاوزٌ للحصة والقبولُ على خانية صرفت.
+    // الوضع المراقب لا يرفض أبداً فيبقى على حكمه، والرفض لا يشغل
+    // الحصة فلا ختم يهبط أصلاً
+    if (d.acceptedPath != null &&
+        d.quotaLimit > 0 &&
+        origin != null &&
+        !_policy.reportOnly) {
+      final fresh = _quotaWouldReject(origin, d.quotaLimit, now);
+      if (fresh != null) {
+        d.quotaLimit = 0;
+        return fresh;
+      }
+    }
+    // خانة ميزانية التخمين: طابعُ الإخفاق يستهلك خانة — امتلأت
+    // النافذة على توأم متزامن فالطابعُ الزائد يضخمها ويجعل انتظارها
+    // المعلن كاذباً. الحكم الحي رمزُ القفل القائم ببقايا النافذة
+    // نفسها، والطابع الزائد لا يهبط والسطر المكبوط يخرج للإخفاق
+    if (d.tokenMissStamped) {
+      final liveMisses = _liveTokenMisses(origin, now);
+      if (liveMisses.length >= _tokenGuessBudget) {
+        d
+          ..tokenMissStamped = false
+          ..tokenBudgetSpent = true;
+        final budgetWaitMs = liveMisses.isEmpty
+            ? _tokenBudgetWindowMs
+            : _tokenBudgetWindowMs - (now - liveMisses.first) + 500;
+        return IntakeRejection(
+          429,
+          'token_locked',
+          'Too many failed token attempts — retry after a short wait',
+          retryAfterMs: budgetWaitMs < 1000 ? 1000 : budgetWaitMs,
+        );
+      }
+    }
+    return null;
   }
 
   /// The shared counter+log path: the protection's own rejections (from
