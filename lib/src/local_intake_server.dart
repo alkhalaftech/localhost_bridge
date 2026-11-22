@@ -10,6 +10,7 @@ import 'bridge_telemetry.dart';
 import 'intake_invariants.dart';
 import 'intake_protection.dart';
 import 'intake_rejections.dart';
+import 'tls_handshake_feed.dart';
 import 'trusted_command.dart';
 
 /// Body over the byte cap - an internal exception that tells the 413 reject
@@ -146,6 +147,9 @@ class BridgeCounters {
     required this.activeSeats,
     required this.orphanHandlers,
     required this.retiredOrphanHandlers,
+    required this.tlsHandshakesInFlight,
+    required this.tlsSocketsCut,
+    required this.tlsHandshakesDelivered,
     required this.rejectionsByCode,
     required this.protocolShapeRejections,
     required this.pairingRejections,
@@ -161,6 +165,28 @@ class BridgeCounters {
   /// The subset of [orphanHandlers] retired at a previous stop's return -
   /// visible here, never counted against the live-work budget.
   final int retiredOrphanHandlers;
+
+  /// TLS handshakes in flight right now on the secure listener: sockets
+  /// accepted but still before their first record completes, plus
+  /// sockets handed to the TLS engine whose handshake has not settled.
+  /// A socket that completed its handshake is delivered to the intake
+  /// and counted by the open-connection number instead - the feed stops
+  /// counting it the moment it is delivered, so the two tallies never
+  /// double-count one socket.
+  final int tlsHandshakesInFlight;
+
+  /// Sockets the TLS feed has cut on the wire since the server was
+  /// built, cumulative: the non-handshake first byte, the over-cap
+  /// declared record length, the first-record timeout, the over-cap
+  /// accept, and stop's pre-arming harvest all land here. A peer that
+  /// disconnects on its own is not a cut, and a delivered handshake is
+  /// never a cut.
+  final int tlsSocketsCut;
+
+  /// TLS handshakes completed and delivered to the intake since the
+  /// server was built, cumulative - the proof the secure door served
+  /// through the feed.
+  final int tlsHandshakesDelivered;
 
   /// Every rejection answered since the server was built, by wire code -
   /// counted at the single reply exit, so no path can bypass the tally.
@@ -380,6 +406,19 @@ class LocalIntakeServer {
         config.maxErrorMessageLength,
         'config.maxErrorMessageLength',
         'must not be negative - 0 is the named off value',
+      );
+    }
+    // مهلة أول سجل TLS بنطاق صريح: تحت الثانية يقطع مصافحات حقيقية على
+    // شبكة بطيئة، وفوق الدقيقة يعيد فتح نافذة الصامت التي أغلقها الحد —
+    // والقيمة خارج النطاق خطأ إعداد يُقال عند البناء لا مفاجأة على السلك
+    if (config.tlsFirstRecordTimeout < const Duration(seconds: 1) ||
+        config.tlsFirstRecordTimeout > const Duration(seconds: 60)) {
+      throw ArgumentError.value(
+        config.tlsFirstRecordTimeout,
+        'config.tlsFirstRecordTimeout',
+        'must be between one second and sixty seconds - below the floor it '
+            'cuts real handshakes on slow networks, above the ceiling it '
+            're-opens the silent-client window the bound exists to close',
       );
     }
     if (config.maxSeatsPerOrigin < 1) {
@@ -819,6 +858,11 @@ class LocalIntakeServer {
     'pairing_too_long',
   };
 
+  // عدّادا التلقمة تراكميان على الخادم لا على الجيل: القطع والسلامات
+  // يبقيان عبر stop/start كي يقرأ المضيف تراكم الجسر كله لا الجيل الأخير
+  int _tlsSocketsCut = 0;
+  int _tlsHandshakesDelivered = 0;
+
   /// An in-progress start guards the race: two parallel start calls would both
   /// see no server and bind two - the first leaking live with no reference.
   bool _starting = false;
@@ -838,9 +882,16 @@ class LocalIntakeServer {
   HttpServer? _server;
   int _port = 0;
 
+  /// تلقمة النقل الآمن للمستمع الأساسي: موجودة حين سياق TLS مسلَّح
+  /// — وإغلاق HttpServer يمر منها فيحصد ما قبل التسليح في كل مسار
+  TlsHandshakeFeed? _feed;
+
   /// The optional `::1` listener - bound only while
   /// [BridgeConfig.listenIPv6Loopback] is armed and the bind succeeded.
   HttpServer? _serverV6;
+
+  /// تلقمة النقل الآمن لمستمع الـ::1 الاختياري — نقل الباب الأول نفسه
+  TlsHandshakeFeed? _feedV6;
 
   /// The optional unix-socket listener - bound only while
   /// [BridgeConfig.unixSocketPath] is armed and the bind and its
@@ -909,12 +960,18 @@ class LocalIntakeServer {
   bool get isListening => _server != null;
 
   /// The read-only counter snapshot: seats in use, working orphans across
-  /// generations, and the rejections by wire code with the protocol-shape
-  /// and pairing tallies. Read it anytime - it never touches the wire.
+  /// generations, the TLS feed's in-flight handshakes with its cut and
+  /// delivered tallies, and the rejections by wire code with the
+  /// protocol-shape and pairing tallies. Read it anytime - it never
+  /// touches the wire.
   BridgeCounters get counters => BridgeCounters._(
     activeSeats: _activeRequests,
     orphanHandlers: _activeOrphans + _retiredOrphans,
     retiredOrphanHandlers: _retiredOrphans,
+    tlsHandshakesInFlight:
+        (_feed?.ongoingHandshakes ?? 0) + (_feedV6?.ongoingHandshakes ?? 0),
+    tlsSocketsCut: _tlsSocketsCut,
+    tlsHandshakesDelivered: _tlsHandshakesDelivered,
     rejectionsByCode: Map.unmodifiable(Map<String, int>.of(_rejectionsByCode)),
     protocolShapeRejections: _protocolShapeRejections,
     pairingRejections: _pairingRejections,
@@ -1397,6 +1454,45 @@ class LocalIntakeServer {
     });
   }
 
+  /// مجموع الاتصالات المفتوحة عبر المستمعين كلها زائد المصافحات الجارية
+  /// في التلقيمتين: حساب السقف الوحيد الذي يقرؤه باب القبول وباب الطلب
+  /// معاً — سقف واحد لا باب جانبي يحصّنه
+  int _openConnectionTotal() =>
+      (_server?.connectionsInfo().total ?? 0) +
+      (_serverV6?.connectionsInfo().total ?? 0) +
+      (_serverUnix?.connectionsInfo().total ?? 0) +
+      (_feed?.ongoingHandshakes ?? 0) +
+      (_feedV6?.ongoingHandshakes ?? 0);
+
+  /// تلقمة جديدة فوق مستمع خام: السقف الفعّال هو الخيار فوق الصفر وإلا
+  /// السقف الداخلي 64 — لأن العالق بعد التسليح لا يقدر الخادم على تحريره
+  /// أبداً فيستحق سقفاً أضيق من المقابس القابلة للكنس
+  TlsHandshakeFeed _newTlsFeed(ServerSocket raw) => TlsHandshakeFeed(
+    raw: raw,
+    context: config.securityContext!,
+    firstRecordTimeout: config.tlsFirstRecordTimeout,
+    openConnectionCap: config.maxOpenConnections > 0
+        ? config.maxOpenConnections
+        : TlsHandshakeFeed.internalHandshakeCap,
+    openConnectionTotal: _openConnectionTotal,
+    onCut: () => _tlsSocketsCut++,
+    onDelivered: () => _tlsHandshakesDelivered++,
+    onOverCap: _noteHandshakeCapLine,
+  );
+
+  /// سطر كبح فوق سقف المصافحات: بنمط بقية أسطر السعة — سطر واحد في
+  /// الثانية على الأكثر بالساعة المحقونة، والسطر التالي يحمل عدد
+  /// المكتوم، وموضع مستقل فلا يكتم فيض موضعٍ تحذيرَ موضعٍ آخر
+  void _noteHandshakeCapLine(int openNow, int cap) {
+    final line = _handshakeCapWarnThrottle.admit(
+      'intake TLS handshake limit: $openNow handshakes in flight over the '
+      'cap of $cap — cutting the new socket',
+    );
+    if (line != null) {
+      telemetry.warn(line, category: BridgeCategory.network);
+    }
+  }
+
   /// The generation bind itself: waits out a draining stop, tries the
   /// candidate ports, arms the optional listeners, and wires every bound
   /// listener to the same handler. `resuming` only shapes the failure
@@ -1432,15 +1528,24 @@ class LocalIntakeServer {
       for (final candidate in candidates) {
         try {
           // النقل يتبع الخيار: بلا سياق الربط HTTP العادي حرفاً كما كان،
-          // ومع سياق جاهز من المضيف يُربط bindSecure على العنوان الحلقي
-          // نفسه - TLS ينتهي تحت طبقة HTTP فلا عقد سلك يتغير
-          _server = tls == null
-              ? await HttpServer.bind(InternetAddress.loopbackIPv4, candidate)
-              : await HttpServer.bindSecure(
-                  InternetAddress.loopbackIPv4,
-                  candidate,
-                  tls,
-                );
+          // ومع سياق جاهز من المضيف يُربط المستمع الخام على العنوان الحلقي
+          // نفسه وتغذي التلقيمة HttpServer.listenOn بعد بوابة أول سجل —
+          // TLS ينتهي تحت طبقة HTTP فلا عقد سلك يتغير، والصامت والمزيّف
+          // يُقطعان قبل التسليح حيث يصل التدمير إلى السلك
+          if (tls == null) {
+            _server = await HttpServer.bind(
+              InternetAddress.loopbackIPv4,
+              candidate,
+            );
+          } else {
+            final raw = await ServerSocket.bind(
+              InternetAddress.loopbackIPv4,
+              candidate,
+            );
+            final feed = _newTlsFeed(raw);
+            _feed = feed;
+            _server = HttpServer.listenOn(feed);
+          }
           // المنفذ الفعلي المُسند (يُصحّح عيب إعادة 0 عند طلب منفذ عشوائي
           // — والطلب الصريح يساوي الفعلي فلا فرق سلكياً)
           _port = _server!.port;
@@ -1471,15 +1576,24 @@ class LocalIntakeServer {
           final orphan = _server;
           if (orphan != null) {
             _server = null;
+            final orphanFeed = _feed;
+            // والتلقمة تتبع الخادم إلى الصفر معه: إغلاقها هو الذي يحصد
+            // ما قبل التسليح (listenOn لا يغلق الممرَّر له) وترك مرجعها
+            // يستدعي عدّاً على باب لم يعد موجوداً
+            _feed = null;
             // والمنفذ يتبع الخادم إلى الصفر: رقم قديم فوق خادم لم
             // يعد موجوداً كذبة يستند إليها المستدعي (عقد port)
             _port = 0;
             await orphan.close(force: true);
+            await orphanFeed?.close();
           }
           final orphanV6 = _serverV6;
           if (orphanV6 != null) {
             _serverV6 = null;
+            final orphanFeedV6 = _feedV6;
+            _feedV6 = null;
             await orphanV6.close(force: true);
+            await orphanFeedV6?.close();
           }
           final orphanUnix = _serverUnix;
           if (orphanUnix != null) {
@@ -1519,19 +1633,24 @@ class LocalIntakeServer {
     if (config.listenIPv6Loopback) {
       try {
         // مستمع الـ::1 يرتدي نقل المستمع الأول نفسه: بلا سياق HTTP عادي،
-        // ومع سياق جاهز bindSecure — بابٌ واحد لا ينشق نقله
-        final v6 = tls == null
-            ? await HttpServer.bind(
-                InternetAddress.loopbackIPv6,
-                _port,
-                v6Only: true,
-              )
-            : await HttpServer.bindSecure(
-                InternetAddress.loopbackIPv6,
-                _port,
-                tls,
-                v6Only: true,
-              );
+        // ومع سياق جاهز التلقمة نفسها — بابٌ واحد لا ينشق نقله
+        HttpServer v6;
+        if (tls == null) {
+          v6 = await HttpServer.bind(
+            InternetAddress.loopbackIPv6,
+            _port,
+            v6Only: true,
+          );
+        } else {
+          final rawV6 = await ServerSocket.bind(
+            InternetAddress.loopbackIPv6,
+            _port,
+            v6Only: true,
+          );
+          final feedV6 = _newTlsFeed(rawV6);
+          _feedV6 = feedV6;
+          v6 = HttpServer.listenOn(feedV6);
+        }
         _serverV6 = v6;
         // توسعة السلطات في الربط نفسه: صيغتا الـ::1 اسمتما عنواناً حياً
         // حصراً والمستمع مربوط فعلاً — ومطفأً تبقى المجموعة حرفاً كما هي
@@ -1793,8 +1912,12 @@ class LocalIntakeServer {
       final server = _server;
       final serverV6 = _serverV6;
       final serverUnix = _serverUnix;
+      final feed = _feed;
+      final feedV6 = _feedV6;
       _server = null;
+      _feed = null;
       _serverV6 = null;
+      _feedV6 = null;
       _serverUnix = null;
       _port = 0;
       // الإيقاف الكامل ينسى المنفذ المعلق: بعده لا استئناف يملك عنواناً
@@ -1819,10 +1942,29 @@ class LocalIntakeServer {
       // الـ::1 أو مقبس يونكس يمسك مقعده فينتظره الفراغ كالـIPv4
       await _closeListener(serverV6, deadlineMs);
       await _closeListener(serverUnix, deadlineMs);
+      // والمرجعان الخامان يُغلقان بيد الحزمة حصراً: listenOn لا يغلق
+      // ServerSocket الممرَّر له (_closeServer=false في dart:io) — فإغلاق
+      // التلقمة هو الذي يوقف القبول ويحصد ما قبل التسليح في كل مسار
+      await feed?.close();
+      await feedV6?.close();
       if (serverUnix != null) {
         // ملف المقبس الذي أنشأته الحالة هذه يُرفع بعد الإغلاق: بداية
         // تالية على المسار نفسه تعيد الربط نظيفة بلا ملف عالق
         await _removeUnixSocketFile();
+      }
+      // العالق بعد التسليح: الإعلان لا الصمت — dart:io لا وسيلة قتل
+      // تصل السلك بعد تسليح المحرك فلا يحصده stop (وما قبل التسليح
+      // حصدته التلقيمة عبر إغلاق المستمعين)، والعدّ الصاخب هو الحقيقة
+      // الكاملة المتاحة، وسطر واحد يُكتب فقط حين العدد فوق الصفر
+      final stuckHandshakes =
+          (feed?.stuckArmingAtClose ?? 0) + (feedV6?.stuckArmingAtClose ?? 0);
+      if (stuckHandshakes > 0) {
+        telemetry.warn(
+          'intake stopped with $stuckHandshakes TLS handshake(s) stuck '
+          'past arming - the TLS engine holds their sockets and no cut '
+          'reaches them',
+          category: BridgeCategory.network,
+        );
       }
       // قناة الويب سوكيت الحية: كل مقبس مفتوح يمسك مقعداً كطلب حي —
       // الإغلاق بالتوازي كله، وكل قناة تحت ما تبقى من الموعد الكلي:
@@ -2208,6 +2350,10 @@ class LocalIntakeServer {
     nowMs: () => _now,
     windowMs: _warnThrottleWindowMs,
   );
+  late final _WarnThrottle _handshakeCapWarnThrottle = _WarnThrottle(
+    nowMs: () => _now,
+    windowMs: _warnThrottleWindowMs,
+  );
   late final _WarnThrottle _originBusyWarnThrottle = _WarnThrottle(
     nowMs: () => _now,
     windowMs: _warnThrottleWindowMs,
@@ -2516,13 +2662,11 @@ class LocalIntakeServer {
       // ويُخدم الطلب بعد هبوط العدد. الصفر مطفأ فالسلك بلا الخيار
       // حرفاً كما هو، والعد يشمل الاتصال الحامل للطلب نفسه — وعلى
       // كل المستمعين المربوطين (الـ::1 ومقبس يونكس الاختياريان
-      // يحسبان في السقف ذاته فلا باب جانبي يحصّنه)
+      // يحسبان في السقف ذاته) ومعهم المصافحات الجارية في التلقيمة
+      // فلا باب جانبي يحصّنه فوق الباب الآمن
       final openConnectionCap = config.maxOpenConnections;
       if (openConnectionCap > 0) {
-        final openNow =
-            (_server?.connectionsInfo().total ?? 0) +
-            (_serverV6?.connectionsInfo().total ?? 0) +
-            (_serverUnix?.connectionsInfo().total ?? 0);
+        final openNow = _openConnectionTotal();
         if (openNow > openConnectionCap) {
           // كبح السطر بنمط بقية أسطر السعة: سطر واحد في الثانية على
           // الأكثر بالساعة المحقونة، والسطر التالي يحمل عدد المكتوم
