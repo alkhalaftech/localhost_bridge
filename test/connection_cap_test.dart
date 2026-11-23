@@ -20,7 +20,7 @@ IntakeProtection _allowlist() {
 }
 
 // مقبس كاذب: ترويسات كاملة وجسم معلن ناقص — اتصال مفتوح يبقى حيا
-/// (يحمل مقعداً في طور قراءة الجسم) حتى الهدم.
+// (يحمل مقعداً في طور قراءة الجسم) حتى الهدم.
 Future<Socket> _stall(
   int port, {
   String origin = 'https://portal.example',

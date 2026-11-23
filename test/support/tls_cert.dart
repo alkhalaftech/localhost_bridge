@@ -39,8 +39,8 @@ SecurityContext tlsContext() => SecurityContext()
   ..usePrivateKeyBytes(utf8.encode(keyPem));
 
 // التقاط أول سجل TLS كامل من عميل حقيقي: مستمع TCP خام يقبل
-/// `SecureSocket.connect` من عميل، يقرأ الرأس الخماسي والحمولة المعلنة
-/// (ClientHello)، ثم يغلق — فترجع البايتات لمن يدوّرها على باب آخر.
+// `SecureSocket.connect` من عميل، يقرأ الرأس الخماسي والحمولة المعلنة
+// (ClientHello)، ثم يغلق — فترجع البايتات لمن يدوّرها على باب آخر.
 // العميل نفسه تفشل مصافحته حتماً (الماسك لا يجيب) وهذا هو المقصود.
 Future<List<int>> captureClientHello() async {
   final capture = await ServerSocket.bind(InternetAddress.loopbackIPv4, 0);

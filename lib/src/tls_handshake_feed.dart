@@ -94,7 +94,7 @@ class TlsHandshakeFeed extends Stream<Socket> implements ServerSocket {
   bool _closed = false;
 
   // عالق ما بعد التسليح لحظة الإغلاق: العدد الذي يعلنه stop بسطر واحد
-  /// (صفر لا يُعلن) — يُقرأ بعد [close] وحصراً
+  // (صفر لا يُعلن) — يُقرأ بعد [close] وحصراً
   int stuckArmingAtClose = 0;
 
   /// Builds the feed over [raw]. The callbacks are the seam to the
@@ -229,7 +229,7 @@ class TlsHandshakeFeed extends Stream<Socket> implements ServerSocket {
   // انصراف النظير وحده قبل التسليح (خطأ أو إغلاق): يسحب من العدّ بلا
   // قطع محسوب — القطع عدّ ما قطعته التلقيمة لا ما تركه نظيره — ويهدم
   // المقبس لحظة الانصراف حصراً: تركه حياً هنا يسرّب مقبض النظام
-  /// (حلقة «اتصال ثم إغلاق» من خارج العملية تستنزف واصفات الجسر حتى
+  // (حلقة «اتصال ثم إغلاق» من خارج العملية تستنزف واصفات الجسر حتى
   // نفادها) والهدم هنا يصل السلك قبل التسليح كبقية الأهدمات
   void _abandon(_PreArm handshake) {
     if (_pending.remove(handshake)) {
@@ -240,7 +240,7 @@ class TlsHandshakeFeed extends Stream<Socket> implements ServerSocket {
   }
 
   // التسليح: البايتات المقروءة قبل التسليح تعاد للمحرك عبر
-  /// bufferedData، والاشتراك ينتقل للمحرك به بينما مهلة أول سجل تُلغى،
+  // bufferedData، والاشتراك ينتقل للمحرك به بينما مهلة أول سجل تُلغى،
   // والعدّ يبقى
   // على المقبس حتى يُسلَّم إلى HttpServer أو تفشل المصافحة
   void _arm(_PreArm handshake, List<int> bytes) {

@@ -126,7 +126,7 @@ String _dechunk(String body) {
 }
 
 // قارئ الرد المشترك: يكتب الطلب على المقبس ويجمع الرد حتى اكتماله
-/// (حسب طول المحتوى المعلن أو نهاية التأطير المجزأ أو قطع الاتصال) —
+// (حسب طول المحتوى المعلن أو نهاية التأطير المجزأ أو قطع الاتصال) —
 // ولا يفترض نصاً صالحاً في أي طرف.
 Future<Map<String, Object?>> _drive(Socket socket, String request) async {
   final buffer = BytesBuilder();
