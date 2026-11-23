@@ -141,17 +141,19 @@ class OriginPolicy {
 
   /// Optional per-parent budget on NEW consent questions: one parent domain
   /// may open at most this many new questions per 10-minute window, beside
-  /// the global 10-per-10-minutes ceiling. The parent domain is the origin's
-  /// host without its first label (`a.b.example.com` shares
-  /// `b.example.com` with its sibling subdomains); a two-label host or an
-  /// IP literal is its own parent. `0` - the default - keeps the
-  /// global-only ceiling, so the default wire is unchanged; a negative
-  /// value is a configuration mistake and throws at `update()` time. A
-  /// question past this parent's budget still answers `429
-  /// origin_parent_rate_limited` with the honest `Retry-After`, but it
-  /// fires nothing and spends nothing from the global budget - one site
-  /// rotating subdomains of a single parent can no longer starve another
-  /// origin's question. The global ceiling keeps its own `origin_pending`.
+  /// the global 10-per-10-minutes ceiling. The parent domain is the last
+  /// two labels of the origin's host (`x.r1.example.com`,
+  /// `x.r2.example.com` and `example.com` all share `example.com`); a
+  /// two-label host or an IP literal is its own parent; hosts under a
+  /// multi-label public suffix (`bank.co.uk`, `shop.github.io`) share that
+  /// suffix. `0` - the default - keeps the global-only ceiling, so the
+  /// default wire is unchanged; a negative value is a configuration
+  /// mistake and throws at `update()` time. A question past this parent's
+  /// budget still answers `429 origin_parent_rate_limited` with the honest
+  /// `Retry-After`, but it fires nothing and spends nothing from the
+  /// global budget - one site rotating subdomains at any depth can no
+  /// longer starve another origin's question. The global ceiling keeps its
+  /// own `origin_pending`.
   final int askFiresPerParentPerWindow;
 }
 
@@ -2623,11 +2625,15 @@ class IntakeProtection {
         );
         return;
       }
-      // ميزانية الأب بجانب السقف العام: النطاق الأب هو المضيف بلا أول
-      // مقطع، والمضيف ذو المقطعين أو العنوان أبٌ لنفسه. التطبيع بأدوات
-      // computeAuthorities القائمة (قصّ وتصغير) وعادة Uri نفسها هنا —
-      // بلا دالة تطبيع ثالثة. ما فوق ميزانية أبه يُجاب بلا سؤال وبلا
-      // طابع على أي ميزانية: الكبح حصرٌ على الأب لا استهلاك للسقف العام
+      // ميزانية الأب بجانب السقف العام: الأب هو آخر مقطعين من المضيف إن
+      // زادت مقاطعه على اثنين — فتدوير أي مستوى فوقهما يبقى تحت أب واحد
+      // — والمضيف ذو المقطعين أو العنوان أبٌ لنفسه. والمضيفات تحت لاحقة
+      // عامة متعددة المقاطع (مثل co.uk) تتشارك أباً واحداً، وهذا قائم في
+      // المستوى الأول أصلاً، ولا قائمة لواحق داخل الحزمة. التطبيع
+      // بأدوات computeAuthorities القائمة (قصّ وتصغير) وعادة Uri نفسها
+      // هنا — بلا دالة تطبيع ثالثة. ما فوق ميزانية أبه يُجاب بلا سؤال
+      // وبلا طابع على أي ميزانية: الكبح حصرٌ على الأب لا استهلاك للسقف
+      // العام
       if (_policy.askFiresPerParentPerWindow > 0) {
         final host = Uri.tryParse(origin)?.host.trim().toLowerCase() ?? '';
         var parent = host;
@@ -2637,7 +2643,7 @@ class IntakeProtection {
             (label) => int.tryParse(label) != null,
           );
           if (labels.length > 2 && !addressShaped) {
-            parent = labels.sublist(1).join('.');
+            parent = labels.sublist(labels.length - 2).join('.');
           }
         }
         final parentFires = _liveParentAskFires(parent, now);

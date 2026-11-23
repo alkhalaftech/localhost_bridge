@@ -8,6 +8,88 @@ import 'package:localhost_bridge/localhost_bridge.dart';
 
 void main() {
   group('per-parent ask budget beside the global ceiling', () {
+    test('a site rotating a deeper level shares one parent budget', () async {
+      var asked = 0;
+      final p = IntakeProtection(nowMs: () => 0)
+        ..update(
+          policy: OriginPolicy(
+            askFiresPerParentPerWindow: 1,
+            requireFetchMetadata: false,
+            onUnknownOrigin: (origin) {
+              asked++;
+              return Future<OriginConsent>.value(OriginConsent.dismissed);
+            },
+          ),
+        );
+      // تدوير المستوى الثاني: x.r1 وx.r2 وr3 كلها تحت evil.example — أب
+      // واحد وميزانية واحدة، فالسؤال الثاني والثالث يُكبحان بلا سؤال
+      final a1 = await p.admit(origin: 'https://x.r1.evil.example');
+      expect(a1.rejection?.code, 'origin_pending');
+      a1.settle();
+      await pumpEventQueue();
+      final a2 = await p.admit(origin: 'https://x.r2.evil.example');
+      expect(
+        a2.rejection?.code,
+        'origin_parent_rate_limited',
+        reason: 'a rotated second level is still the same parent',
+      );
+      a2.settle();
+      await pumpEventQueue();
+      final a3 = await p.admit(origin: 'https://r3.evil.example');
+      expect(a3.rejection?.code, 'origin_parent_rate_limited');
+      a3.settle();
+      await pumpEventQueue();
+      expect(asked, 1, reason: 'one fire for the whole parent');
+      // والزوج الذي كان يُعدّ أبوين: مضيف تحت قمة مسجلة والقمة ذات
+      // المقطعين — آخر مقطعين واحد، فميزانية واحدة
+      final a4 = await p.admit(origin: 'https://s.shop.example.com');
+      expect(a4.rejection?.code, 'origin_pending');
+      a4.settle();
+      await pumpEventQueue();
+      final a5 = await p.admit(origin: 'https://example.com');
+      expect(
+        a5.rejection?.code,
+        'origin_parent_rate_limited',
+        reason: 'the registrable apex and its subdomains share one parent',
+      );
+      a5.settle();
+      await pumpEventQueue();
+      expect(asked, 2, reason: 'two parents: evil.example and example.com');
+      p.dispose();
+    });
+
+    test(
+      'a question from another site still fires while one parent is spent',
+      () async {
+        var asked = 0;
+        final p = IntakeProtection(nowMs: () => 0)
+          ..update(
+            policy: OriginPolicy(
+              askFiresPerParentPerWindow: 1,
+              requireFetchMetadata: false,
+              onUnknownOrigin: (origin) {
+                asked++;
+                return Future<OriginConsent>.value(OriginConsent.dismissed);
+              },
+            ),
+          );
+        for (final host in const ['x.r1.evil.example', 'x.r2.evil.example']) {
+          final a = await p.admit(origin: 'https://$host');
+          a.settle();
+          await pumpEventQueue();
+        }
+        expect(asked, 1);
+        // موقع آخر لا علاقة له: سؤاله يُفتح، فالكبح على الأب لا على السقف
+        // العام
+        final other = await p.admit(origin: 'https://unrelated.org');
+        expect(other.rejection?.code, 'origin_pending');
+        other.settle();
+        await pumpEventQueue();
+        expect(asked, 2, reason: 'the other site keeps its question');
+        p.dispose();
+      },
+    );
+
     test('ten subdomain questions of one parent no longer starve an '
         'unrelated origin', () async {
       var asked = 0;
@@ -156,7 +238,7 @@ void main() {
             },
           ),
         );
-      // نطاق بأربعة مقاطع: أبوه بلا مقطعه الأول
+      // نطاق بأربعة مقاطع: أبوه آخر مقطعين
       final a1 = await p.admit(origin: 'https://s.shop.example.com');
       a1.settle();
       await pumpEventQueue();
@@ -170,11 +252,11 @@ void main() {
         asked,
         1,
         reason:
-            'both subdomains share the shop.example.com '
+            'both subdomains share the example.com '
             'parent budget',
       );
-      // المضيف ذو المقطعين أبٌ لنفسه: سؤاله مستقل عن ميزانية أي لاحقة
-      final a3 = await p.admit(origin: 'https://example.com');
+      // المضيف ذو المقطعين أبٌ لنفسه: سؤاله مستقل عن ميزانية أي موقع آخر
+      final a3 = await p.admit(origin: 'https://example.org');
       a3.settle();
       await pumpEventQueue();
       expect(a3.rejection?.code, 'origin_pending');
