@@ -251,10 +251,11 @@
   token_required`, and the token alone never admits - from an
   unqualified origin it is answered with the origin rejection alone, so
   a wrong-origin sender learns nothing about its token.
-- Security: one site rotating subdomains of a single parent can no
-  longer spend the whole new-question budget -
+- Security: one site rotating subdomains of a single parent at any depth
+  can no longer spend the whole new-question budget -
   `OriginPolicy.askFiresPerParentPerWindow` (off by default) bounds each
-  parent domain's new questions beside the global 10-per-10-minutes
+  parent domain's new questions - the parent is the host's last two
+  labels - beside the global 10-per-10-minutes
   ceiling, its suppressed questions fire nothing and spend nothing from
   the global budget, so an unrelated origin keeps its question; and at
   the 1,000-decision cap the oldest remembered deny is now evicted
