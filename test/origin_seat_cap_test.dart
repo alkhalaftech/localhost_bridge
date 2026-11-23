@@ -35,8 +35,8 @@ LocalIntakeServer _server({
   handlerTimeout: LocalIntakeServer.noHandlerTimeout,
 );
 
-/// طلب POST حقيقي يعيد (الحالة، الجسم) — انقطاع الاتصال بلا رد يُسجل
-/// (-1, '') بدل استثناء كي يتحدث الحكم بالأسماء لا بالأعطال.
+// طلب POST حقيقي يعيد (الحالة، الجسم) — انقطاع الاتصال بلا رد يُسجل
+// (-1, '') بدل استثناء كي يتحدث الحكم بالأسماء لا بالأعطال.
 Future<(int, String)> _post(
   int port, {
   String? origin = 'https://busy.example',

@@ -365,10 +365,10 @@ void main() {
   );
 
   group('the body deadline is absolute, not event-gated', () {
-    /// خادم مهلة 5s وحماية محصنة تقبل الأصول https بلا ترويسات fetch.
-    /// كل مدد هذه المجموعة عشرة أضعاف جدولها الأصلي والنسب باقية —
-    /// هامش الحسم صار بثوان لا بمئات الميلي ثانية فلا يكسره اختلاس
-    /// ساعة مضيف محمّل، وبقاؤه بالعقد نفسه (1.25 ضعف الموعد مثلها).
+    // خادم مهلة 5s وحماية محصنة تقبل الأصول https بلا ترويسات fetch.
+    // كل مدد هذه المجموعة عشرة أضعاف جدولها الأصلي والنسب باقية —
+    // هامش الحسم صار بثوان لا بمئات الميلي ثانية فلا يكسره اختلاس
+    // ساعة مضيف محمّل، وبقاؤه بالعقد نفسه (1.25 ضعف الموعد مثلها).
     LocalIntakeServer deadlineServer() => LocalIntakeServer(
       telemetry: const SilentTelemetry(),
       correlationIdGenerator: _counterId,
@@ -387,8 +387,8 @@ void main() {
         ),
     );
 
-    /// ترويسات POST مقطّعة بلا Content-Length حصراً — فلا بوابة CL
-    /// أصلاً والمهلة الصمتية وحدها لا تحرس العمر المطلق.
+    // ترويسات POST مقطّعة بلا Content-Length حصراً — فلا بوابة CL
+    // أصلاً والمهلة الصمتية وحدها لا تحرس العمر المطلق.
     Future<Socket> chunkedHead(int port) async {
       final sock = await Socket.connect(InternetAddress.loopbackIPv4, port);
       unawaited(sock.done.catchError((Object _) {}));
@@ -412,7 +412,7 @@ void main() {
       await sock.flush();
     }
 
-    /// سطر الحالة الأول من مقبس مفتوح قائم — الطلب أُرسل عليه أصلاً.
+    // سطر الحالة الأول من مقبس مفتوح قائم — الطلب أُرسل عليه أصلاً.
     Future<String> statusOfSocket(
       Socket sock, {
       Duration wait = const Duration(seconds: 10),

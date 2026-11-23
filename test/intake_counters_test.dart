@@ -47,7 +47,7 @@ IntakeProtection _allowlist() {
   return pr;
 }
 
-/// طلب حقيقي عبر HttpClient يعيد (الحالة، الجسم).
+// طلب حقيقي عبر HttpClient يعيد (الحالة، الجسم).
 Future<(int, String)> _post(
   int port, {
   String origin = 'https://portal.example',

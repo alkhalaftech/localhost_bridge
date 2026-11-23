@@ -183,8 +183,8 @@ class _ExplodingMeasure extends BridgeTelemetry {
   }
 }
 
-/// مرصد يرمي مرة واحدة في أول info (سطر الإقلاع بعد أول bind ناجح)
-/// ثم يصمت — عطل خطوة إقلاع لا عطل ربط.
+// مرصد يرمي مرة واحدة في أول info (سطر الإقلاع بعد أول bind ناجح)
+// ثم يصمت — عطل خطوة إقلاع لا عطل ربط.
 class _ThrowsOnceOnInfo extends BridgeTelemetry {
   var throwsLeft = 1;
 

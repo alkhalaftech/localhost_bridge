@@ -49,7 +49,7 @@ class _Rec extends BridgeTelemetry {
   }) => body();
 }
 
-/// حماية صارمة مقترنة بساعة محقونة — نمط شاهد التوقيع القائم حرفا
+// حماية صارمة مقترنة بساعة محقونة — نمط شاهد التوقيع القائم حرفا
 IntakeProtection _strictPaired() {
   final protection =
       IntakeProtection(telemetry: _Rec(), nowMs: () => _clockMs[0])
@@ -64,13 +64,13 @@ IntakeProtection _strictPaired() {
   return protection;
 }
 
-/// توكن حشو مميز بالموقع — كل سجل حشو يحتاج توكناً مختلفاً كي لا يستبدل
-/// أحدهم الآخر في الخريطة (مفتاحها digest التوكن)
+// توكن حشو مميز بالموقع — كل سجل حشو يحتاج توكناً مختلفاً كي لا يستبدل
+// أحدهم الآخر في الخريطة (مفتاحها digest التوكن)
 String _fillerToken(int i) =>
     _t64.replaceFirst('a3f1', i.toRadixString(16).padLeft(4, '0'));
 
-/// توقيع صفحة بنفس بناء شاهد التوقيع القائم — الطابع من ساعة الجدار
-/// الحقيقية (نافذة الانحراف تُقاس عليها لا على الساعة المحقونة)
+// توقيع صفحة بنفس بناء شاهد التوقيع القائم — الطابع من ساعة الجدار
+// الحقيقية (نافذة الانحراف تُقاس عليها لا على الساعة المحقونة)
 String _sign({required String token, required String pairingId}) {
   final stamp = DateTime.now().millisecondsSinceEpoch;
   final canonical = 'v1\n$pairingId\n$stamp\nPOST\n/\n';

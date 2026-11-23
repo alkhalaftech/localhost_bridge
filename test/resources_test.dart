@@ -164,7 +164,7 @@ void main() {
       final p = await srv.start(preferredPort: 0);
       addTearDown(srv.stop);
 
-      /// يقرأ رداً كاملاً من مقبس جسم مُرسل — يفهم CL وخاتمة chunked
+      // يقرأ رداً كاملاً من مقبس جسم مُرسل — يفهم CL وخاتمة chunked
       Future<int> readStatus(Socket s) async {
         final done = Completer<int>();
         final chunks = <int>[];

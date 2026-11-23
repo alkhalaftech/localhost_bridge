@@ -54,8 +54,8 @@ LocalIntakeServer _dedupServer(
     ..update(policy: const OriginPolicy(allowed: ['https://dedup.test'])),
 );
 
-/// خادم الفيض: عمل يُنجز فورا بلا تعليق — لملء السقف بمدخلات حية واختبار
-/// رفض الدفتر الممتلئ (لا تعليق عمل هنا أصلا، فالملء كله يستقر).
+// خادم الفيض: عمل يُنجز فورا بلا تعليق — لملء السقف بمدخلات حية واختبار
+// رفض الدفتر الممتلئ (لا تعليق عمل هنا أصلا، فالملء كله يستقر).
 LocalIntakeServer _floodServer(DedupLedger ledger, List<String> executions) =>
     LocalIntakeServer(
       onCommand: (cmd) => idempotentCommand(ledger, cmd, (c) async {

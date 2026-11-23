@@ -44,7 +44,7 @@ class _Rec extends BridgeTelemetry {
   }) async => await body();
 }
 
-/// ساعة محقونة: خلية واحدة يقرؤها كائن الحماية عبر nowMs
+// ساعة محقونة: خلية واحدة يقرؤها كائن الحماية عبر nowMs
 final _clockMs = <int>[1_000_000];
 
 IntakeProtection _listed({List<_Rec>? recs}) {

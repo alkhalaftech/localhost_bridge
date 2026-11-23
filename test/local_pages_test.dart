@@ -72,8 +72,8 @@ Future<(HttpClientResponse, String)> get(
   return (resp, body);
 }
 
-/// نص التوثيق بعد طيّ كل الفراغات إلى مسافة واحدة: الحكم على النص لا على
-/// إخراج السطر
+// نص التوثيق بعد طيّ كل الفراغات إلى مسافة واحدة: الحكم على النص لا على
+// إخراج السطر
 String _flattened(String path) =>
     File(path).readAsStringSync().replaceAll(RegExp(r'\s+'), ' ');
 

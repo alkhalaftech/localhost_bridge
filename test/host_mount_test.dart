@@ -50,8 +50,8 @@ class _Rec extends BridgeTelemetry {
 var _idSeq = 0;
 String _counterId() => 'mnt-${_idSeq++}';
 
-/// خادم الجسر القياسي بالشكل نفسه الذي يقوده طقم السلك — كل بند لاحق
-/// يقارن بابه الخاص ببابه المركب من المصنع نفسه.
+// خادم الجسر القياسي بالشكل نفسه الذي يقوده طقم السلك — كل بند لاحق
+// يقارن بابه الخاص ببابه المركب من المصنع نفسه.
 LocalIntakeServer _make({
   required _Rec rec,
   required IntakeProtection pr,
@@ -77,8 +77,8 @@ LocalIntakeServer _make({
   handlerTimeout: handlerTimeout,
 );
 
-/// باب المضيف: خادم dart:io عادي يوزّع طلباته — مسار التطبيق يبقى للمضيف
-/// حصرا (الشاهد الثالث) وكل ما سوى جسرَ يُمرَّر للتركيب.
+// باب المضيف: خادم dart:io عادي يوزّع طلباته — مسار التطبيق يبقى للمضيف
+// حصرا (الشاهد الثالث) وكل ما سوى جسرَ يُمرَّر للتركيب.
 Future<(HttpServer, int)> _hostDoor(
   LocalIntakeServer bridge, {
   Future<void> Function(HttpRequest request)? app,
@@ -99,9 +99,9 @@ Future<(HttpServer, int)> _hostDoor(
   return (server, server.port);
 }
 
-/// فك الإطار المجزأ للرد المُدار: البابان يكتبان التأطير نفسه فالمقارنة
-/// الزوجية صادقة قبل الفك وبعده، والقراءة المطلقة للأجسام تحتاج الجسم
-/// الخالص
+// فك الإطار المجزأ للرد المُدار: البابان يكتبان التأطير نفسه فالمقارنة
+// الزوجية صادقة قبل الفك وبعده، والقراءة المطلقة للأجسام تحتاج الجسم
+// الخالص
 String _dechunk(String body) {
   final out = StringBuffer();
   var i = 0;
@@ -118,21 +118,21 @@ String _dechunk(String body) {
   return out.toString();
 }
 
-/// نص توثيق بعد طيّ الفراغات إلى مسافة واحدة: الحكم على الجملة لا على
-/// إخراج السطر
+// نص توثيق بعد طيّ الفراغات إلى مسافة واحدة: الحكم على الجملة لا على
+// إخراج السطر
 String _flattened(String path) =>
     File(path).readAsStringSync().replaceAll(RegExp(r'\s+'), ' ');
 
-/// نص مصدر بعد اقتطاع علامات التعليق من رؤوس الأسطر ثم طيّ الفراغات:
-/// جملة dartdoc تمتد أسطراً وبين الأسطر علامة /// فتكسر تطابق الجملة
-/// إن بقيت
+// نص مصدر بعد اقتطاع علامات التعليق من رؤوس الأسطر ثم طيّ الفراغات:
+// جملة dartdoc تمتد أسطراً وبين الأسطر علامة /// فتكسر تطابق الجملة
+// إن بقيت
 String _flattenedSource(String path) => File(path)
     .readAsStringSync()
     .replaceAll(RegExp(r'^\s*///\s?', multiLine: true), '')
     .replaceAll(RegExp(r'^\s*//\s?', multiLine: true), '')
     .replaceAll(RegExp(r'\s+'), ' ');
 
-/// يقرأ رداً كاملاً من مقبس خام — لا يفترض نصاً صالحاً في أي طرف.
+// يقرأ رداً كاملاً من مقبس خام — لا يفترض نصاً صالحاً في أي طرف.
 Future<Map<String, Object?>> _exchange(
   String address,
   int port,

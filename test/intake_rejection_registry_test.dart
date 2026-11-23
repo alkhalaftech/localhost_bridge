@@ -269,8 +269,8 @@ IntakeProtection _discovery(Future<OriginConsent> Function(String) cb) =>
       policy: OriginPolicy(requireFetchMetadata: false, onUnknownOrigin: cb),
     );
 
-/// قائمة صارمة بالاقتران مسلحا، على الساعة المحقونة نفسها التي يقرؤها
-/// الخادم — شاهود ميزانية الرمز وانتهائه حتمية
+// قائمة صارمة بالاقتران مسلحا، على الساعة المحقونة نفسها التي يقرؤها
+// الخادم — شاهود ميزانية الرمز وانتهائه حتمية
 IntakeProtection _strictPairing() => IntakeProtection(nowMs: () => _clockMs[0])
   ..update(
     policy: const OriginPolicy(
@@ -1380,9 +1380,9 @@ void main() {
   }, timeout: const Timeout(Duration(seconds: 60)));
 }
 
-/// رموز القنوات غير الـHTTP الخمسة: ترد بإطار قناة لا رد HTTP — مشيها
-/// الخاص أدناه يقرأ الإطار الأخير وحياة القناة، وسطر الحالة المسجل
-/// يبقى مرجع عائلة الفشل في السجل والجدولين لا سطراً على هذا السلك
+// رموز القنوات غير الـHTTP الخمسة: ترد بإطار قناة لا رد HTTP — مشيها
+// الخاص أدناه يقرأ الإطار الأخير وحياة القناة، وسطر الحالة المسجل
+// يبقى مرجع عائلة الفشل في السجل والجدولين لا سطراً على هذا السلك
 const _channelWalkCodes = <String>{
   'progress_data_too_large',
   'ws_auth_timeout',
@@ -1391,8 +1391,8 @@ const _channelWalkCodes = <String>{
   'ws_message_too_large',
 };
 
-/// حصيلة مشي قناة واحدة: الإطارات التي قرأها النظير، وهل ماتت القناة،
-/// وما يُفرَّج عنه بعد القراءة
+// حصيلة مشي قناة واحدة: الإطارات التي قرأها النظير، وهل ماتت القناة،
+// وما يُفرَّج عنه بعد القراءة
 class _ChannelWalk {
   _ChannelWalk(this.frames, this.dead, this.release);
 
@@ -1550,8 +1550,8 @@ List<_ChannelScenario> _channelScenarios() {
   return cases;
 }
 
-/// يجمع كل ما ترسله القناة إلى إغلاقها — الإطار الأخير مع رمز الإغلاق
-/// الشبكي يقرآن معاً
+// يجمع كل ما ترسله القناة إلى إغلاقها — الإطار الأخير مع رمز الإغلاق
+// الشبكي يقرآن معاً
 Future<(List<String>, int?)> awaitClosed(
   WebSocket ws, {
   Duration limit = const Duration(seconds: 5),

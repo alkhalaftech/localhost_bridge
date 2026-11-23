@@ -29,12 +29,12 @@ import 'package:test/test.dart';
 
 final (String?, String?, int?) _labBrowser = _discoverBrowser();
 
-/// مسار المتصفح المكتشف، أو null إن لم يوجد — حينها كل الاختبارات تتخطى
+// مسار المتصفح المكتشف، أو null إن لم يوجد — حينها كل الاختبارات تتخطى
 final String? _browserPath = _labBrowser.$1;
 
-/// سبب التخطي الصادق، أو null إن وُجد متصفح فيعمل الاختبار فعلاً —
-/// وعلى SDK لا تعرف dart:io معلمة سقف النقل لا تُسلَّح القناة أصلاً
-/// (الرفض عند البناء) وسلك المختبر كله يركب القناة فلا مشهد له هنا
+// سبب التخطي الصادق، أو null إن وُجد متصفح فيعمل الاختبار فعلاً —
+// وعلى SDK لا تعرف dart:io معلمة سقف النقل لا تُسلَّح القناة أصلاً
+// (الرفض عند البناء) وسلك المختبر كله يركب القناة فلا مشهد له هنا
 final String? _skipReason =
     _labBrowser.$2 ??
     (LocalIntakeServer.wsTransportCeilingSupported
@@ -42,8 +42,8 @@ final String? _skipReason =
         : 'the channel refuses to arm without a transport ceiling below '
               'Dart 3.13 - every lab scene rides the channel');
 
-/// رقم الإصدار الأكبر للمتصفح المكتشف إن قرأ — سيناريو Local Network
-/// Access يحتاج علم محاكاة الفضاء الذي وُلد بعد M146
+// رقم الإصدار الأكبر للمتصفح المكتشف إن قرأ — سيناريو Local Network
+// Access يحتاج علم محاكاة الفضاء الذي وُلد بعد M146
 final int? _browserMajor = _labBrowser.$3;
 
 /// Locates a real Chrome/Chromium for the lab: the BRIDGE_BROWSER override
@@ -304,8 +304,8 @@ async function signProof(tokenHex, pairingId, method, path, correlationId) {
 </html>
 ''';
 
-/// مرصد أسطر الأمن والشبكة أثناء تحقيقات القناة — يطبع لسجل الاختبار
-/// كي تُقرأ قصة الخادم جانب المتصفح
+// مرصد أسطر الأمن والشبكة أثناء تحقيقات القناة — يطبع لسجل الاختبار
+// كي تُقرأ قصة الخادم جانب المتصفح
 class _RecordingTelemetry extends BridgeTelemetry {
   @override
   void info(
@@ -382,11 +382,11 @@ Future<(LocalIntakeServer, int)> _startBridge({
 /// literal marker text inside the page's own script source
 String _flat(String dom) => dom.replaceAll('\r\n', '\n');
 
-/// شهادة الاختبار الذاتية لخادم صفحة https — ولّدتا محلياً لهذا المختبر
-/// (منحنى P-256 وSAN لـ127.0.0.1 وlocalhost) وتحمي لا شيء: غرضها أن يكون
-/// أصل الصفحة أصل https حقيقياً لقصة Local Network Access لا أن يُبنى
-/// عليها ثقة، وجلسة المتصفح العابرة تقبلها بعلم الأتمتة الموثق في
-/// ترويسة الملف
+// شهادة الاختبار الذاتية لخادم صفحة https — ولّدتا محلياً لهذا المختبر
+// (منحنى P-256 وSAN لـ127.0.0.1 وlocalhost) وتحمي لا شيء: غرضها أن يكون
+// أصل الصفحة أصل https حقيقياً لقصة Local Network Access لا أن يُبنى
+// عليها ثقة، وجلسة المتصفح العابرة تقبلها بعلم الأتمتة الموثق في
+// ترويسة الملف
 const String _labTlsCertPem = r'''
 -----BEGIN CERTIFICATE-----
 MIIBvzCCAWWgAwIBAgIUOyM1NSWvcU6oQ49nLN9wRQpDv+IwCgYIKoZIzj0EAwIw
@@ -410,8 +410,8 @@ ms39DvXUA3h9za/ADPwAGdXvSFqhRANCAASJvQTPSUhnm6eT5kY8jPqr8xP8FAVc
 -----END PRIVATE KEY-----
 ''';
 
-/// سياق TLS لخادم الصفحة الآمن من ملفَّي التثبيت أعلاه — خادم https
-/// حقيقي يدور على حلقي ويخدم صفحة المختبر
+// سياق TLS لخادم الصفحة الآمن من ملفَّي التثبيت أعلاه — خادم https
+// حقيقي يدور على حلقي ويخدم صفحة المختبر
 SecurityContext _labTlsContext() => SecurityContext()
   ..useCertificateChainBytes(utf8.encode(_labTlsCertPem))
   ..usePrivateKeyBytes(utf8.encode(_labTlsKeyPem));

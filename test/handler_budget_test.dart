@@ -46,7 +46,7 @@ IntakeProtection _allowlist() {
   return pr;
 }
 
-/// طلب حقيقي عبر HttpClient يعيد (الحالة، الجسم) — بنمط شاهد عقد المهلة.
+// طلب حقيقي عبر HttpClient يعيد (الحالة، الجسم) — بنمط شاهد عقد المهلة.
 Future<(int, String)> _post(
   int port, {
   String origin = 'https://portal.example',

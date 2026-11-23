@@ -55,8 +55,8 @@ class _Rec extends BridgeTelemetry {
 var _idSeq = 0;
 String _counterId() => 'corp-${_idSeq++}';
 
-/// يقرأ رداً كاملاً من مقبس خام أُرسلت عليه بايتات حرة — لا يفترض
-/// نصاً صالحاً في أي من الطرفين (شهود الجسم التالف).
+// يقرأ رداً كاملاً من مقبس خام أُرسلت عليه بايتات حرة — لا يفترض
+// نصاً صالحاً في أي من الطرفين (شهود الجسم التالف).
 Future<Map<String, Object?>> _rawExchange(int port, List<int> payload) async {
   final socket = await Socket.connect('127.0.0.1', port);
   final buffer = BytesBuilder();

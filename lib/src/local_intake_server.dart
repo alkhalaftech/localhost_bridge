@@ -5303,7 +5303,7 @@ class LocalIntakeServer {
   /// a live socket past its window. A close that already claimed the socket
   /// keeps its course untouched (the detach throws and is swallowed), and a
   /// late error from the pending close is consumed here instead of surfacing
-  /// as an orphan zone error. القطع عبر بدأة القطع الواحدة لا بيده.
+  // as an orphan zone error. القطع عبر بدأة القطع الواحدة لا بيده.
   Future<void> _closeGuarded(HttpResponse response) async {
     final closing = response.close();
     try {

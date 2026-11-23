@@ -63,7 +63,7 @@ void main() {
     return (ctype, text);
   }
 
-  /// الرد الواحد للطلب نفسه: الترويسات عينها بلا ترويسة التدفق
+  // الرد الواحد للطلب نفسه: الترويسات عينها بلا ترويسة التدفق
   Future<(String ctype, String text)> plainPost(int port) async {
     final client = HttpClient();
     final req = await client.open('POST', '127.0.0.1', port, '/');
