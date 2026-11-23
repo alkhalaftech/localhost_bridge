@@ -1064,15 +1064,32 @@ void main() {
 }
 
 // عدد مقابض/واصفات العملية الحالية حيثما يمكن قراءته محلياً لعملية
-// الاختبار نفسها: /proc/self/fd على لينكس و/dev/fd على ماك،
-// وHandleCount عبر PowerShell على ويندوز — وحيث لا يُقرأ أي منها
+// الاختبار نفسها: /proc/self/fd على لينكس، و/dev/fd على ماك واصفاً
+// واصفاً، وHandleCount عبر PowerShell على ويندوز — وحيث لا يُقرأ أي منها
 // يعيد null فيتخطى الشاهد صادقاً مسمّياً
 int? _openHandles() {
   if (Platform.isLinux) {
     return Directory('/proc/self/fd').listSync().length;
   }
   if (Platform.isMacOS) {
-    return Directory('/dev/fd').listSync().length;
+    // على ماك إدراج /dev/fd يعمل stat لكل مدخل، والواصف الذي يُغلق بين
+    // الإدراج وفحصه يُسقط الإدراج كله بخطأ واصف سيئ — فكل واصف يُسأل
+    // وحده: المفتوح يجيب فحصه والمغلق يرمي فيُلتقط، ولا يرمي شيء منهما
+    // إلى الشاهد. وإن تعذر العدّ كله عاد null فيُتخطى الشاهد بأمانة
+    try {
+      var open = 0;
+      for (var fd = 0; fd < 4096; fd++) {
+        try {
+          File('/dev/fd/$fd').statSync();
+          open++;
+        } on FileSystemException {
+          // واصف غير مفتوح الآن
+        }
+      }
+      return open;
+    } on Object {
+      return null;
+    }
   }
   if (!Platform.isWindows) {
     return null;
