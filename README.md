@@ -945,7 +945,7 @@ the behavior they share.
 | Firefox (desktop 153+) | shipped — permission prompt as above, enabled by default | 2026-11-15 | [Firefox 153.0 release notes](https://www.mozilla.org/en-US/firefox/153.0/releasenotes/) |
 | Firefox (Android 160+) | shipped — the vendor's shipped-versions feed lists 160.0 at re-verification | 2026-11-15 | [Mozilla product details: Firefox for Android versions](https://product-details.mozilla.org/1.0/mobile_versions.json) · [Mozilla release calendar](https://wiki.mozilla.org/Release_Management/Calendar) |
 | Safari, and iOS browsers built on WebKit | not supported over plain HTTP — WebKit's own mixed-content checker treats a plain-HTTP loopback address as insecure "unless loaded over HTTPS" ([WebKit bug 281149](https://bugs.webkit.org/show_bug.cgi?id=281149), reopened, last change 2026-04-20, fetched 2026-11-22); the spec-level exemption requests remain open ([WebKit bug 171934](https://bugs.webkit.org/show_bug.cgi?id=171934), NEW with activity through 2026-08-19, fetched 2026-11-22 · [WebKit bug 218623](https://bugs.webkit.org/show_bug.cgi?id=218623), NEW, fetched 2026-11-22), and MDN's mixed-content page (last modified 2026-08-15, fetched 2026-11-22) names Safari as the browser whose default blocks all mixed content while loopback origins stay secure contexts as origins. The TLS option above is exactly the condition WebKit's checker names ("unless loaded over HTTPS") — but whether a current shipped Safari build admits `https://127.0.0.1` with a device-trusted certificate is **not** claimed here: it is the device-lab witness (`tool/safari_https_loopback_lab.dart`), unverified until a trusted-certificate mac runs it. Apple permits other engines in the EU (iOS 17.4+); none is tested here | 2026-11-22 | [WebKit bug 281149](https://bugs.webkit.org/show_bug.cgi?id=281149) · [WebKit bug 171934](https://bugs.webkit.org/show_bug.cgi?id=171934) · [MDN: Mixed content](https://developer.mozilla.org/en-US/docs/Web/Security/Defenses/Mixed_content) · [Apple: alternative browser engines](https://developer.apple.com/support/alternative-browser-engines) |
-| Android WebView | untested here — no permission prompt of its own; reachability follows the permissions of the app embedding the WebView. On Android 17, WebView traffic inherits the host app's local-network permission state, and the `ACCESS_LOCAL_NETWORK` permission applies only to apps targeting SDK 37; the official local-network definition does not mention loopback | 2026-11-15 | [Android: local network permission](https://developer.android.com/privacy-and-security/local-network-permission) · [Android: local network definition](https://developer.android.com/privacy-and-security/local-network-definition) |
+| Android WebView | tested on the emulator (Android 16 and 17) — no permission prompt of its own; reachability follows the permissions of the app embedding the WebView. An app that loads a loopback page over plain HTTP into a WebView on Android 16 or below must opt into cleartext for the loopback names in its network security config (the guide's bullet below carries the example), or the platform refuses the page with `ERR_CLEARTEXT_NOT_PERMITTED` before it reaches the bridge; Android 17 allows the loopback page without the declaration, as measured on the emulator. On Android 17, WebView traffic inherits the host app's local-network permission state, and the `ACCESS_LOCAL_NETWORK` permission applies only to apps targeting SDK 37; the official local-network definition does not mention loopback | 2026-11-23 | [Android: Network security configuration](https://developer.android.com/privacy-and-security/security-config) · [Android: local network permission](https://developer.android.com/privacy-and-security/local-network-permission) · [Android: local network definition](https://developer.android.com/privacy-and-security/local-network-definition) |
 
 "Shipped" means the page can send and read a reply after the user grants
 the prompt. The fetch-mode hardening does not depend on any prompt — it
@@ -965,7 +965,7 @@ enforced as a blocking requirement and are not needed as a fallback"
 | Host platform | Status | As of | Source |
 |---|---|---|---|
 | Desktop (Windows, macOS, Linux) | shipped — the usual loopback server model; Windows and Linux put no platform gate on it, while a macOS host inside App Sandbox needs the `com.apple.security.network.server` entitlement | 2026-11-15 | [Apple: App Sandbox entitlements](https://developer.apple.com/documentation/bundleresources/entitlements/com.apple.security.network.server) |
-| Android | shipped — an in-app loopback server; run the host app foregrounded or behind a foreground service, or the system may stop it. Chrome and Firefox reach it after the user grants Local Network Access. On Android 17, loopback traffic between two profiles (work and personal) is blocked by default for every app regardless of targetSdk; loopback within one profile is unaffected. On Android, any installed app can reach the port and send any `Origin`, so the origin+token requirement with pairing is the real barrier there: the page pairs with a displayed one-time code and proves possession with HMAC signatures - an installed app can present the same listed origin but cannot sign. Native clients on the device send the shared token. With the requirement off (the default), a browser page presents the token only where its preflight is echoed: a listed origin, or any valid https origin not yet refused under the discovery and allow-all modes - and an installed app can present that same listed origin. The emulator side of the pairing story is runnable with `dart run tool/emulator_pairing_lab.dart` (adb reverse commands and the page URL are printed; the verdicts are read from the page's report collector). | 2026-11-18 | [Android: local network permission](https://developer.android.com/privacy-and-security/local-network-permission) · [Android 17 behavior changes](https://developer.android.com/about/versions/17/behavior-changes-all) |
+| Android | shipped — an in-app loopback server; run the host app foregrounded or behind a foreground service, or the system may stop it. A loopback page reaches a loopback bridge with no permission grant — measured on the emulator on Android 16 and 17 with Chrome, Firefox, and WebView (WebView with its cleartext opt-in). A real page from the Internet was not measured; with the lab page mapped to the public address space in its place, Chrome 145 on Android 17 shows the Local Network Access prompt, the request that raises it fails, a later load crosses after Allow, and a later load stays blocked with no new prompt after Block; Chrome 134 on the Android 16 image carries no Local Network Access check and crosses with no prompt; Firefox was not measured that way. On Android 17, loopback traffic between two profiles (work and personal) is blocked by default for every app regardless of targetSdk; loopback within one profile is unaffected. On Android, any installed app can reach the port and send any `Origin`, so the origin+token requirement with pairing is the real barrier there: the page pairs with a displayed one-time code and proves possession with HMAC signatures - an installed app can present the same listed origin but cannot sign. Native clients on the device send the shared token. With the requirement off (the default), a browser page presents the token only where its preflight is echoed: a listed origin, or any valid https origin not yet refused under the discovery and allow-all modes - and an installed app can present that same listed origin. The emulator side of the pairing story is runnable with `dart run tool/emulator_pairing_lab.dart` (adb reverse commands and the page URL are printed; the verdicts are read from the page's report collector). | 2026-11-23 | [Android: local network permission](https://developer.android.com/privacy-and-security/local-network-permission) · [Android 17 behavior changes](https://developer.android.com/about/versions/17/behavior-changes-all) |
 | iOS | untested here — no verified browser path: WebKit treats a plain-HTTP loopback address as insecure "unless loaded over HTTPS" (mixed content — the Safari row above, fetched 2026-11-22), and iOS suspends in-app sockets when the host app backgrounds | 2026-11-22 | [WebKit bug 281149](https://bugs.webkit.org/show_bug.cgi?id=281149) · [WebKit bug 171934](https://bugs.webkit.org/show_bug.cgi?id=171934) |
 
 ### The mobile host (Android and iOS) — verified 2026-11-21
@@ -989,11 +989,15 @@ the source and that date ride the line. Lines that name no vendor fact
   on the foreground return — the same port and the same instance id come
   back (see the listeners and lifecycle section above). Wiring guidance,
   not a vendor fact.
-- Chrome (desktop and Android) reaches a loopback server after the user
-  grants the Local Network Access prompt: the permission's scope
-  explicitly covers loopback destinations (`127.0.0.0/8` and `::1/128`),
-  and the prompt launched in Chrome 142. Verified 2026-11-21 —
-  [Chrome: New permission prompt for Local Network Access](https://developer.chrome.com/blog/local-network-access)
+- Chrome (desktop and Android) covers loopback destinations with the
+  Local Network Access prompt: the permission's scope explicitly covers
+  loopback destinations (`127.0.0.0/8` and `::1/128`), and the prompt
+  launched in Chrome 142. Verified 2026-11-21 —
+  [Chrome: New permission prompt for Local Network Access](https://developer.chrome.com/blog/local-network-access).
+  Measured on the emulator 2026-11-23: the prompt appears for a page
+  mapped to the public address space and not for a loopback page (the
+  Android row of the host platform table above carries what Allow and
+  Block each did).
 - Firefox ships the same model: release 153.0 (July 21, 2026) enabled
   Local Network Access restrictions by default for all users —
   websites must request permission before connecting to devices on the
@@ -1012,6 +1016,27 @@ the source and that date ride the line. Lines that name no vendor fact
   2026-11-21 —
   [Android: Local network permission](https://developer.android.com/privacy-and-security/local-network-permission) ·
   [Android: local network definition](https://developer.android.com/privacy-and-security/local-network-definition)
+- WebView and a loopback page over plain HTTP: cleartext support is
+  disabled by default (since Android 9, API level 28), so an app that
+  loads a `http://127.0.0.1` page into a WebView on Android 16 or below
+  must opt into cleartext for the loopback names in its network
+  security config — referenced from the manifest with
+  `android:networkSecurityConfig="@xml/network_security_config"` — or
+  the platform refuses the page with `ERR_CLEARTEXT_NOT_PERMITTED`
+  before it reaches the bridge. Android 17 allows the loopback page
+  without the declaration, as measured on the emulator. The opt-in:
+
+  ```xml
+  <network-security-config>
+    <domain-config cleartextTrafficPermitted="true">
+      <domain includeSubdomains="false">127.0.0.1</domain>
+      <domain includeSubdomains="false">localhost</domain>
+    </domain-config>
+  </network-security-config>
+  ```
+
+  Verified 2026-11-23 —
+  [Android: Network security configuration](https://developer.android.com/privacy-and-security/security-config)
 - Cross-profile loopback: beginning with Android 17, cross-profile
   loopback traffic is no longer permitted by default, for every app
   running on Android 17 or higher regardless of target API level;

@@ -676,7 +676,7 @@ Chromium، فمصادر Chromium في هذا الجدول هي حاكمة للس
 | Firefox (سطح المكتب 153+) | صدر — بمطالبة الإذن نفسها مفعلة افتراضياً | 2026-11-15 | [Firefox 153.0 release notes](https://www.mozilla.org/en-US/firefox/153.0/releasenotes/) |
 | Firefox (Android 160+) | صدر — وجبة إصدارات الشاحن تعد 160.0 لحظة إعادة التحقق | 2026-11-15 | [تفاصيل منتج موزيلا: إصدارات فايرفوكس لأندرويد](https://product-details.mozilla.org/1.0/mobile_versions.json) · [تقويم إصدارات موزيلا](https://wiki.mozilla.org/Release_Management/Calendar) |
 | Safari وكل متصفحات iOS المبنية على WebKit | غير مدعوم على HTTP الخام — فاحص المحتوى المختلط في WebKit نفسه يعامل عنوان الحلقة الراجعة على HTTP الخام بوصفه غير آمن «ما لم يُحمَّل عبر HTTPS» ([WebKit bug 281149](https://bugs.webkit.org/show_bug.cgi?id=281149)، مُعاد فتحه، آخر تغيير 2026-04-20، جُلب 2026-11-22)؛ وطلبات الإعفاء بمستوى المواصفة ما تزال مفتوحة ([WebKit bug 171934](https://bugs.webkit.org/show_bug.cgi?id=171934)، حالة NEW بنشاط إلى 2026-08-19، جُلب 2026-11-22 · [WebKit bug 218623](https://bugs.webkit.org/show_bug.cgi?id=218623)، حالة NEW، جُلب 2026-11-22)، وصفحة المحتوى المختلط في MDN (آخر تعديل 2026-08-15، جُلبت 2026-11-22) تسمي Safari المتصفحَ الذي يحجب افتراضياً كل المحتوى المختلط بينما تبقى أصول الحلقة الراجعة سياقات آمنة بوصفها أصولاً. وخيار TLS أعلاه هو الشرط الذي يسميه فاحص WebKit حرفاً («ما لم يُحمَّل عبر HTTPS») — لكن هل يقبُل إصدار Safari شاحن حالي `https://127.0.0.1` بشهادة موثوقة في الجهاز **لا يُدَّعى هنا**: فهو شاهد مختبر الأجهزة (`tool/safari_https_loopback_lab.dart`)، غير متحقق إلى أن يشغّله ماك بشهادة موثوقة. أبل تسمح بمحركات أخرى في الاتحاد الأوروبي (iOS 17.4+)؛ ولا واحد منها مختبر هنا | 2026-11-22 | [WebKit bug 281149](https://bugs.webkit.org/show_bug.cgi?id=281149) · [WebKit bug 171934](https://bugs.webkit.org/show_bug.cgi?id=171934) · [MDN: Mixed content](https://developer.mozilla.org/en-US/docs/Web/Security/Defenses/Mixed_content) · [Apple: alternative browser engines](https://developer.apple.com/support/alternative-browser-engines) |
-| Android WebView | غير مختبَر هنا — بلا مطالبة إذن خاصة به؛ الوصول يخضع لصلاحيات التطبيق الذي يضمّ الـ WebView. وعلى Android 17 ترث حركة WebView حالة إذن الشبكة المحلية من التطبيق المضيف، وإذن `ACCESS_LOCAL_NETWORK` لمن يستهدف SDK 37 فقط؛ وتعريف «الشبكة المحلية» الرسمي لا يذكر loopback | 2026-11-15 | [Android: local network permission](https://developer.android.com/privacy-and-security/local-network-permission) · [Android: local network definition](https://developer.android.com/privacy-and-security/local-network-definition) |
+| Android WebView | مُختبَر على المحاكي (Android 16 و17) — بلا مطالبة إذن خاصة به؛ الوصول يخضع لصلاحيات التطبيق الذي يضمّ الـ WebView. وعلى Android 16 وما قبله، على التطبيق الذي يعرض صفحة حلقة راجعة على HTTP الخام داخل WebView أن يصرّح بـcleartext لأسماء الحلقة في إعداد أمن الشبكة لديه (مثاله في البند أدناه من الدليل)، وإلا منعت المنصةُ الصفحةَ بالخطأ `ERR_CLEARTEXT_NOT_PERMITTED` قبل أن تصل الجسر؛ وعلى Android 17 تُسمح الصفحة الحلقية بلا تصريح، كما قيس على المحاكي. وعلى Android 17 ترث حركة WebView حالة إذن الشبكة المحلية من التطبيق المضيف، وإذن `ACCESS_LOCAL_NETWORK` لمن يستهدف SDK 37 فقط؛ وتعريف «الشبكة المحلية» الرسمي لا يذكر loopback | 2026-11-23 | [Android: Network security configuration](https://developer.android.com/privacy-and-security/security-config) · [Android: local network permission](https://developer.android.com/privacy-and-security/local-network-permission) · [Android: local network definition](https://developer.android.com/privacy-and-security/local-network-definition) |
 
 «صدر» تعني أن الصفحة ترسل وتقرأ الرد بعد منح المستخدم الإذن. وتحصين
 طريقة الإرسال لا يعتمد على أي مطالبة — يسري حيثما وصل الطلب. ومن داخل
@@ -698,7 +698,7 @@ blocking requirement and are not needed as a fallback» ([دليل Chrome: Local
 | المنصة | الحالة | بتاريخ | المصدر |
 |---|---|---|---|
 | سطح المكتب (Windows وmacOS وLinux) | صدر — نموذج خادم الحلقة الراجعة المعتاد؛ Windows وLinux بلا بوابة منصة، ومضيف macOS داخل App Sandbox يحتاج الاستحقاق `com.apple.security.network.server` | 2026-11-15 | [Apple: App Sandbox entitlements](https://developer.apple.com/documentation/bundleresources/entitlements/com.apple.security.network.server) |
-| Android | صدر — خادم حلقة راجعة داخل التطبيق؛ شغّل التطبيق في الواجهة أو خلف خدمة أمامية وإلا فقد يوقفه النظام. يصل إليه Chrome وFirefox بعد منح المستخدم إذن الشبكة المحلية. وعلى Android 17 حركة الحلقة الراجعة بين ملفين شخصيين (العمل والشخصي) ممنوعة افتراضياً لكل التطبيقات مهما كان targetSdk، وداخل الملف الواحد لا تتأثر. على Android يستطيع أي تطبيق مثبت أن يصل إلى المنفذ ويرسل أي `Origin`، فشرط الأصل مع التوكن مع الاقتران هو الحاجز الحقيقي هناك: تقترن الصفحة برمز معروض لمرة واحدة وتثبت حيازتها بتواقيع حممية — ويستطيع التطبيق المثبت تقديم الأصل المدرج نفسه لكنه لا يستطيع التوقيع. والعملاء الأصليون على الجهاز يرسلون التوكن المشترك. وبالخيار مطفأً (الافتراضي) تقدّم صفحة المتصفح التوكن حيثما يُجاب لها الفحص المسبق حصراً: أصل مدرج، أو أي أصل https صالح لم يُرفض بعد في وضعَي الاكتشاف و«الكل-المحصَّن» — ويستطيع تطبيق مثبت آخر تقديم الأصل المدرج نفسه. وجهة المحاكي من قصة الاقتران تُشغَّل بـ`dart run tool/emulator_pairing_lab.dart` (تطبع أوامر adb reverse وعنوان الصفحة، وتقرأ الأحكام من مجمّع تقارير الصفحة). | 2026-11-18 | [Android: local network permission](https://developer.android.com/privacy-and-security/local-network-permission) · [Android 17 behavior changes](https://developer.android.com/about/versions/17/behavior-changes-all) |
+| Android | صدر — خادم حلقة راجعة داخل التطبيق؛ شغّل التطبيق في الواجهة أو خلف خدمة أمامية وإلا فقد يوقفه النظام. تصل صفحة على الحلقة الراجعة إلى جسر على الحلقة الراجعة بلا منح أي إذن — قيس على المحاكي على Android 16 و17 بـChrome وFirefox وWebView (‏WebView مع تصريح cleartext الخاص به). وصفحة حقيقية من الإنترنت لم تُقس؛ وبعد تعيين صفحة المختبر إلى فضاء عناوين الإنترنت بدلاً منها، يعرض Chrome 145 على Android 17 مطالبة Local Network Access، ويفشل الطلب الذي أثارها، ويعبر حملٌ لاحق بعد Allow، ويبقى حملٌ لاحق محجوباً بلا مطالبة جديدة بعد Block؛ وChrome 134 على صورة Android 16 لا يحمل فحص Local Network Access أصلاً فيعبر بلا مطالبة؛ وFirefox لم يُقس على هذا النحو. وعلى Android 17 حركة الحلقة الراجعة بين ملفين شخصيين (العمل والشخصي) ممنوعة افتراضياً لكل التطبيقات مهما كان targetSdk، وداخل الملف الواحد لا تتأثر. على Android يستطيع أي تطبيق مثبت أن يصل إلى المنفذ ويرسل أي `Origin`، فشرط الأصل مع التوكن مع الاقتران هو الحاجز الحقيقي هناك: تقترن الصفحة برمز معروض لمرة واحدة وتثبت حيازتها بتواقيع حممية — ويستطيع التطبيق المثبت تقديم الأصل المدرج نفسه لكنه لا يستطيع التوقيع. والعملاء الأصليون على الجهاز يرسلون التوكن المشترك. وبالخيار مطفأً (الافتراضي) تقدّم صفحة المتصفح التوكن حيثما يُجاب لها الفحص المسبق حصراً: أصل مدرج، أو أي أصل https صالح لم يُرفض بعد في وضعَي الاكتشاف و«الكل-المحصَّن» — ويستطيع تطبيق مثبت آخر تقديم الأصل المدرج نفسه. وجهة المحاكي من قصة الاقتران تُشغَّل بـ`dart run tool/emulator_pairing_lab.dart` (تطبع أوامر adb reverse وعنوان الصفحة، وتقرأ الأحكام من مجمّع تقارير الصفحة). | 2026-11-23 | [Android: local network permission](https://developer.android.com/privacy-and-security/local-network-permission) · [Android 17 behavior changes](https://developer.android.com/about/versions/17/behavior-changes-all) |
 | iOS | غير مختبَر هنا — لا مسار متصفح متحقق: WebKit يعامل عنوان الحلقة الراجعة على HTTP الخام بوصفه غير آمن «ما لم يُحمَّل عبر HTTPS» (محتوى مختلط — صف Safari أعلاه، جُلب 2026-11-22)، ونظام iOS يعلّق مقابس التطبيق حين ينتقل للخلفية | 2026-11-22 | [WebKit bug 281149](https://bugs.webkit.org/show_bug.cgi?id=281149) · [WebKit bug 171934](https://bugs.webkit.org/show_bug.cgi?id=171934) |
 
 ### المضيف على الجوال (‏Android وiOS) — تحقق 2026-11-21
@@ -718,11 +718,14 @@ blocking requirement and are not needed as a fallback» ([دليل Chrome: Local
 - اقرن `pause()` بنداء دورة الخلفية و`resume()` على عودة الواجهة —
   يعود المنفذ نفسه ومعرّف المثيل نفسه (انظر قسم المستمعات ودورة الحياة
   أعلاه). توجيه توصيل، لا حقيقة شاحن.
-- Chrome (‏سطح المكتب وAndroid) يصل إلى خادم حلقة راجعة بعد أن يمنح
-  المستخدم مطالبة Local Network Access: نطاق الإذن يغطي وجهات الحلقة
-  الراجعة صراحة (`127.0.0.0/8` و`::1/128`)، والمطالبة انطلقت في
-  Chrome 142. تحقق 2026-11-21 —
-  [‏Chrome: مطالبة إذن جديدة للوصول إلى الشبكة المحلية](https://developer.chrome.com/blog/local-network-access)
+- Chrome (‏سطح المكتب وAndroid) يغطي وجهات الحلقة الراجعة بمطالبة
+  Local Network Access: نطاق الإذن يغطي وجهات الحلقة الراجعة صراحة
+  (`127.0.0.0/8` و`::1/128`)، والمطالبة انطلقت في Chrome 142. تحقق
+  2026-11-21 —
+  [‏Chrome: مطالبة إذن جديدة للوصول إلى الشبكة المحلية](https://developer.chrome.com/blog/local-network-access).
+  وقيس على المحاكي 2026-11-23: تظهر المطالبة لصفحة معيَّنة إلى فضاء
+  عناوين الإنترنت ولا تظهر لصفحة على الحلقة الراجعة (وما فعله كل من
+  Allow وBlock مكتوب في صف Android بجدول منصات المضيف أعلاه).
 - Firefox يسلك النموذج نفسه: الإصدار 153.0 (21 يوليو 2026) فعّل قيود
   Local Network Access افتراضياً لكل المستخدمين — المواقع تستلزم طلب
   الإذن قبل الاتصال بأجهزة الشبكة المحلية أو بالتطبيقات والخدمات على
@@ -738,6 +741,26 @@ blocking requirement and are not needed as a fallback» ([دليل Chrome: Local
   `127.0.0.1` ليس في ذلك النطاق. تحقق 2026-11-21 —
   [‏Android: إذن الشبكة المحلية](https://developer.android.com/privacy-and-security/local-network-permission) ·
   [‏Android: تعريف الشبكة المحلية](https://developer.android.com/privacy-and-security/local-network-definition)
+- WebView وصفتها الحلقية على HTTP الخام: دعم cleartext معطّل افتراضياً
+  (منذ Android 9، المستوى 28)، فعلى التطبيق الذي يعرض صفحة
+  `http://127.0.0.1` داخل WebView على Android 16 وما قبله أن يصرّح
+  بـcleartext لأسماء الحلقة في إعداد أمن الشبكة لديه — يُشار إليه من
+  البيان بـ`android:networkSecurityConfig="@xml/network_security_config"`
+  — وإلا منعت المنصة الصفحة بالخطأ `ERR_CLEARTEXT_NOT_PERMITTED` قبل
+  أن تصل الجسر. وعلى Android 17 تُسمح الصفحة الحلقية بلا تصريح، كما
+  قيس على المحاكي. والتصريح:
+
+  ```xml
+  <network-security-config>
+    <domain-config cleartextTrafficPermitted="true">
+      <domain includeSubdomains="false">127.0.0.1</domain>
+      <domain includeSubdomains="false">localhost</domain>
+    </domain-config>
+  </network-security-config>
+  ```
+
+  تحقق 2026-11-23 —
+  [‏Android: إعداد أمن الشبكة](https://developer.android.com/privacy-and-security/security-config)
 - الحلقة الراجعة بين الملفات الشخصية: اعتباراً من Android 17 حركة
   الحلقة الراجعة بين ملفين شخصيين لم تعد مسموحة افتراضياً لكل تطبيق
   يعمل على Android 17 فأعلى مهما كان مستوى الهدف؛ وحركة الحلقة داخل
