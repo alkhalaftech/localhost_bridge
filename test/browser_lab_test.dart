@@ -446,8 +446,10 @@ void scene(String name, Future<void> Function() body, {String? skip}) =>
 
 /// Drives the real browser headlessly over the lab page and returns the
 /// dumped DOM: scripts run, virtual time advances the page's async work,
-/// then the serialized DOM is printed to stdout. When BRIDGE_LAB_EVIDENCE_DIR
-/// is set, the full dump is also written there verbatim (one file per call).
+/// then the serialized DOM is printed to stdout. Every run prints one
+/// `LAB-RUN:` line naming its evidence file and its wall time. When
+/// BRIDGE_LAB_EVIDENCE_DIR is set, the full dump is also written there
+/// verbatim (one file per call).
 Future<String> _dumpDom(
   String url,
   String evidenceFile, {
@@ -458,9 +460,9 @@ Future<String> _dumpDom(
   final userDataDir = await Directory.systemTemp.createTemp(
     'bridge-browser-lab-',
   );
-  // زمن الجولة الحقيقي يُعلن وحده حين يبلغ سقف الالتقاط: جولة بطيئة
-  // اكتملت علاماتها تمرّ، وسطرها يبقى في السجل فيسمّي المشهد البطيء
-  // والمقدار — لا يُستنتج من سكون
+  // زمن الجولة الحقيقي يُعلن لكل جولة: جولة بطيئة اكتملت علاماتها تمرّ،
+  // وسطرها يبقى في السجل فيسمّي المشهد ومقداره — والمدة تُقرأ من
+  // المخرج لا تُستنتج من سكون
   final stopwatch = Stopwatch()..start();
   try {
     final result = await Process.run(
@@ -490,15 +492,9 @@ Future<String> _dumpDom(
       stdoutEncoding: utf8,
       stderrEncoding: utf8,
     ).timeout(_browserRunWait);
-    if (stopwatch.elapsed >= _browserCaptureCeiling) {
-      // ليست فشلاً: العلامات وحدها تحكم الجولة، وهذا السطر يسمّي
-      // بطأها بمقداره كي يُقرأ في سجل المشغّل حيث لا يُقرأ غيره
-      print(
-        'LAB-SLOW-RUN: $evidenceFile returned after '
-        '${stopwatch.elapsed.inMilliseconds} ms, at or beyond the browser '
-        'capture ceiling of ${_browserCaptureCeiling.inMilliseconds} ms',
-      );
-    }
+    // ليست فشلاً: العلامات وحدها تحكم الجولة، وهذا السطر يسمّي مدتها
+    // كي تُقرأ في سجل المشغّل حيث لا يُقرأ غيره
+    print('LAB-RUN: $evidenceFile ${stopwatch.elapsed.inMilliseconds} ms');
     final dom = result.stdout as String;
     if (result.exitCode != 0) {
       final err = (result.stderr as String).trim();
