@@ -139,6 +139,21 @@ jobs:
           tail -n 3 "$RUNNER_TEMP/test_out.txt" || true
           exit "$status"
 
+      # Every browser run of the lab prints one LAB-RUN line naming its
+      # evidence file and its wall time. Each line is repeated here as a
+      # notice annotation, so the per-scene durations read from the public
+      # API on a green run too - not only from the admin-gated job log.
+      # The grep is wrapped before the count: under bash -eo pipefail a
+      # grep that finds nothing (an entry without a browser) exits 1, and
+      # an entry with no run is this step's pass condition.
+      - name: browser run durations
+        shell: bash
+        if: always()
+        run: |
+          (grep -E "^LAB-RUN:" "$RUNNER_TEMP/test_out.txt" || true) | head -40 | while IFS= read -r line; do
+            echo "::notice title=LAB-RUN::${line:0:200}"
+          done
+
   browser-lab:
     # The real-browser lab (test/browser_lab_test.dart): a system
     # Chrome/Chromium driven headlessly proves the pre-pairing browser
@@ -198,6 +213,16 @@ jobs:
           fi
           tail -n 3 "$RUNNER_TEMP/lab_out.txt" || true
           exit "$status"
+
+      # The lab's own run durations, as notice annotations - the same
+      # lines the matrix job repeats after its suite.
+      - name: browser run durations
+        shell: bash
+        if: always()
+        run: |
+          (grep -E "^LAB-RUN:" "$RUNNER_TEMP/lab_out.txt" || true) | head -40 | while IFS= read -r line; do
+            echo "::notice title=LAB-RUN::${line:0:200}"
+          done
 
   release-doc-gate:
     runs-on: ubuntu-latest
