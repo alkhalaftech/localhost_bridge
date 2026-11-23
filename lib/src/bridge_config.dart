@@ -168,14 +168,19 @@ class BridgeConfig {
   /// off: every bind path stays letter identical to previous releases and
   /// the port speaks plain HTTP. Setting it together with
   /// [unixSocketPath] throws [ArgumentError] at server construction (dart:io
-  /// has no secure unix-domain bind). The admission, the wire codes, the
-  /// caps, and every reply contract are byte-for-byte the same over either
-  /// transport - TLS terminates below the HTTP layer. One transport-level
-  /// residual is inherited from dart:io and stated honestly: a client that
-  /// sends its ClientHello and then goes silent is armed by then, and
-  /// dart:io exposes no handshake deadline for the armed engine and no
-  /// kill that reaches the wire after arming - such a socket holds its
-  /// in-flight slot until the peer closes it, bounded by the connection
+  /// has no secure unix-domain bind). The admission, the wire codes, and
+  /// every reply contract are byte-for-byte the same over either transport
+  /// - the one exception is the connection cap itself: with
+  /// [maxOpenConnections] on, a new TLS connection over the cap is cut
+  /// before arming with no reply, where the plain door answers `503`; TLS
+  /// terminates below the HTTP layer. One transport-level residual is
+  /// inherited from dart:io and stated honestly: after arming the package
+  /// holds only the detached wrapper socket, so `destroy` and `close` on
+  /// it do not reach the peer and `stop` does not reap it, and dart:io
+  /// exposes no public API that hands the raw engine socket back wrapped
+  /// as the `Socket` shape `HttpServer.listenOn` consumes - so a client
+  /// that sends its ClientHello and then goes silent holds its in-flight
+  /// slot until the peer closes it, bounded by the connection
   /// cap ([maxOpenConnections] over the whole listener set while it is
   /// on, or by the internal ceiling over the in-flight handshakes alone
   /// while it is off), the count is visible in the counters, and `stop`

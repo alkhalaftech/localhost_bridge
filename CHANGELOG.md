@@ -514,21 +514,12 @@
   before.
 - API: `BridgeConfig.tlsFirstRecordTimeout` (default five seconds,
   bounds one to sixty seconds, `ArgumentError` outside at
-  construction) bounds the TLS transport's first-record window - the
-  handshake gate cuts a non-handshake first byte and an over-cap
-  declared length at once with no bytes sent back, cuts a silent
-  client and a slow drip at the deadline, and every such cut lands
-  while the socket is unarmed so it reaches the wire; a socket its
-  peer abandons before arming is destroyed at the moment of
-  abandonment; while `maxOpenConnections` is on the feed counts its
-  in-flight handshakes into that cap, and while it is off the feed
-  holds an internal 64-handshake ceiling over the in-flight handshakes
-  alone - a delivered connection is never counted as an in-flight
-  handshake and is never refused for open sockets - cutting the new
-  socket over the governing ceiling before arming it; the counters
-  name the in-flight, cut, and delivered TLS tallies, and `stop` reaps
-  the pre-arming sockets at once and announces in one line what was
-  left stuck past arming.
+  construction) bounds the TLS transport's first-record window; the
+  three TLS counters on `server.counters` are named
+  `tlsHandshakesInFlight`, `tlsSocketsCut`, and
+  `tlsHandshakesDelivered`; while `maxOpenConnections` is on it counts
+  in-flight TLS handshakes too; and `stop` announces in one line the
+  TLS handshakes left stuck past arming.
 
 ## 0.1.3
 

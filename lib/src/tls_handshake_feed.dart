@@ -4,10 +4,12 @@
 // غير بدء المصافحة (0x16) عميل HTTP عادي على المنفذ الآمن فيُدمَّر
 // فوراً، والطول المعلن فوق السقف يُدمَّر فوراً، وعدم اكتمال أول سجل
 // داخل مهلة [firstRecordTimeout] يُدمَّر عند المهلة — والدمار هنا يصل
-// السلك لأنه قبل تسليح محرك TLS. هذا هو الفرق الحاكم الذي قاسته
-// المنصة: تدمير المقبس يبلغ النظير قبل التسليح حصراً، وبعد تسليحه لا
-// تصل أي وسيلة قتل إلى السلك فيبقى العالق بعد التسليح خارج اليد —
-// حده السقف الداخلي والسقف الاختياري وسطر الإعلان عند stop.
+// السلك لأنه قبل تسليح محرك TLS: تدمير المقبس يبلغ النظير قبل التسليح
+// حصراً، وبعد التسليح لا يملك البندُ إلا الغلافَ المنفصل فدماره
+// وإغلاقه لا يبلغان النظير ولا يحصده stop، ولا يقدم dart:io واجهة
+// عامة تعيد مقبس المحرك الخام إلى صورة Socket التي يستهلكها
+// HttpServer.listenOn فالبند لا يبني ذلك القتل — حده السقف الداخلي
+// والسقف الاختياري وسطر الإعلان عند stop.
 import 'dart:async';
 import 'dart:io';
 
@@ -26,8 +28,11 @@ import 'dart:io';
 /// where destroying it reaches the wire. A socket whose handshake fails
 /// after arming, or that stays silent past arming (a client that sent
 /// its ClientHello and went quiet), cannot be cut by this package:
-/// dart:io exposes no handshake deadline and no kill that reaches the
-/// wire once the engine is armed. Those sockets are bounded by the
+/// after arming the package holds only the detached wrapper socket, so
+/// destroying or closing it does not reach the peer and `stop` does not
+/// reap it, and dart:io exposes no public API that hands the raw engine
+/// socket back wrapped as the `Socket` shape `HttpServer.listenOn`
+/// consumes. Those sockets are bounded by the
 /// accept-time ceilings this feed enforces: the host's
 /// `maxOpenConnections` over the whole listener set while that option is
 /// on, or [internalHandshakeCap] over the in-flight handshakes alone
@@ -39,9 +44,11 @@ import 'dart:io';
 /// `implements ServerSocket`, and `HttpServer.listenOn` consumes exactly
 /// [listen], [port], [address], and [close]. Closing the feed stops the
 /// accept loop, destroys every socket still before arming (the harvest
-/// that reaches the wire), and closes the delivered-socket stream -
-/// which is what `HttpServer.close` triggers, so every existing close
-/// path of the server reaps the pre-arming sockets unchanged.
+/// that reaches the wire), and closes the delivered-socket stream.
+/// `HttpServer.close` does not pass through this feed: `listenOn` never
+/// closes the socket handed to it, so the owning server closes the feed
+/// by its own hand - in `stop`, after closing the listeners and before
+/// the seats drain, and in the orphan path.
 class TlsHandshakeFeed extends Stream<Socket> implements ServerSocket {
   /// The in-flight handshake ceiling while the host's
   /// `maxOpenConnections` option is off. It counts handshakes in flight
@@ -49,8 +56,9 @@ class TlsHandshakeFeed extends Stream<Socket> implements ServerSocket {
   /// connection: a completed handshake is the intake's connection, bounded
   /// by the host's own option and never by this ceiling. The value is
   /// deliberately tighter than the destructible-socket ceilings: a socket
-  /// stuck past arming can never be freed by the server (no kill reaches
-  /// the wire once the engine is armed), so it holds its slot forever;
+  /// stuck past arming can never be freed by the server (after arming the
+  /// package holds only the detached wrapper socket, and destroying it
+  /// does not reach the peer), so it holds its slot forever;
   /// one page opens at most a handful of connections to one origin; and
   /// the ceiling stays well under an OS default file-descriptor budget
   /// such as macOS's 256.
@@ -219,7 +227,7 @@ class TlsHandshakeFeed extends Stream<Socket> implements ServerSocket {
   }
 
   /// انصراف النظير وحده قبل التسليح (خطأ أو إغلاق): يسحب من العدّ بلا
-  /// قطع محسوب — القطع عدّ ما قطعته التلقمة لا ما تركه نظيره — ويهدم
+  /// قطع محسوب — القطع عدّ ما قطعته التلقيمة لا ما تركه نظيره — ويهدم
   /// المقبس لحظة الانصراف حصراً: تركه حياً هنا يسرّب مقبض النظام
   /// (حلقة «اتصال ثم إغلاق» من خارج العملية تستنزف واصفات الجسر حتى
   /// نفادها) والهدم هنا يصل السلك قبل التسليح كبقية الأهدمات

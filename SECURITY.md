@@ -313,11 +313,13 @@ What remains:
   length are cut at once, a silent client and a slow drip are cut at
   `BridgeConfig.tlsFirstRecordTimeout`, and every such cut lands while
   the socket is unarmed — the one state where the cut reaches the
-  wire. Once the first record completes, the TLS engine is armed, and
-  from that moment dart:io offers no handshake deadline and no kill
-  that reaches the wire: `destroy` and `close` on the server side do
-  not reach such a peer, a forced `stop` cannot reap it, and the
-  package does not pretend otherwise. Such a client holds one
+  wire. Once the first record completes, the TLS engine is armed.
+  From that moment the package holds only the detached wrapper socket:
+  `destroy` and `close` on it do not reach such a peer, and `stop`
+  cannot reap it — and dart:io exposes no public API that hands the
+  raw engine socket back wrapped as the `Socket` shape
+  `HttpServer.listenOn` consumes, so the package does not build that
+  cut. The package does not pretend otherwise. Such a client holds one
   in-flight handshake slot until it closes on its own; the bound on
   how many slots it can hold is the ceiling — the feed counts its
   in-flight handshakes into `maxOpenConnections` while that option is

@@ -882,8 +882,10 @@ class LocalIntakeServer {
   HttpServer? _server;
   int _port = 0;
 
-  /// تلقمة النقل الآمن للمستمع الأساسي: موجودة حين سياق TLS مسلَّح
-  /// — وإغلاق HttpServer يمر منها فيحصد ما قبل التسليح في كل مسار
+  /// تلقيمة النقل الآمن للمستمع الأساسي: موجودة حين سياق TLS مسلَّح
+  /// — والخادم يغلقها بيده في stop بعد إغلاق المستمعين وقبل فراغ
+  /// المقاعد، وفي مسار اليتامى؛ وإغلاق HttpServer لا يمر منها ولا
+  /// يحصد ما قبل التسليح
   TlsHandshakeFeed? _feed;
 
   /// The optional `::1` listener - bound only while
@@ -1974,17 +1976,18 @@ class LocalIntakeServer {
         // تالية على المسار نفسه تعيد الربط نظيفة بلا ملف عالق
         await _removeUnixSocketFile();
       }
-      // العالق بعد التسليح: الإعلان لا الصمت — dart:io لا وسيلة قتل
-      // تصل السلك بعد تسليح المحرك فلا يحصده stop (وما قبل التسليح
-      // حصدته التلقيمة عبر إغلاق المستمعين)، والعدّ الصاخب هو الحقيقة
-      // الكاملة المتاحة، وسطر واحد يُكتب فقط حين العدد فوق الصفر
+      // العالق بعد التسليح: الإعلان لا الصمت — بعد التسليح لا يملك
+      // البندُ إلا الغلافَ المنفصل فدماره وإغلاقه لا يبلغان النظير
+      // ولا يحصده stop (وما قبل التسليح حصدته التلقيمة بإغلاقها
+      // بيدها)، والعدّ الصاخب هو الحقيقة الكاملة المتاحة، وسطر واحد
+      // يُكتب فقط حين العدد فوق الصفر
       final stuckHandshakes =
           (feed?.stuckArmingAtClose ?? 0) + (feedV6?.stuckArmingAtClose ?? 0);
       if (stuckHandshakes > 0) {
         telemetry.warn(
           'intake stopped with $stuckHandshakes TLS handshake(s) stuck '
-          'past arming - the TLS engine holds their sockets and no cut '
-          'reaches them',
+          'past arming - the package holds only the detached wrapper and '
+          'its cut does not reach them',
           category: BridgeCategory.network,
         );
       }

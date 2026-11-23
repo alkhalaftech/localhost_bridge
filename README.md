@@ -708,9 +708,12 @@ the one state where the cut reaches the wire, so a silent client and
 a slow-dripping client are destroyed on the wire, not left hanging.
 What the gate cannot do is stated honestly in the limits section
 below: a client that completes its first record and then goes silent
-is armed by then, and dart:io offers no handshake deadline for the
-armed engine and no kill that reaches the wire after arming — the
-in-flight handshake ceiling and the count are the bound there. This is
+is armed by then; after arming the package holds only the detached
+wrapper socket, so `destroy` and `close` on it do not reach the peer
+and `stop` does not reap it, and dart:io exposes no public API that
+hands the raw engine socket back wrapped as the `Socket` shape
+`HttpServer.listenOn` consumes — the in-flight handshake ceiling and
+the count are the bound there. This is
 the condition Safari and WebKit name themselves: their
 mixed-content checker treats a plain-HTTP loopback address as insecure
 "unless loaded over HTTPS" (see the browser-support table below). The
@@ -721,8 +724,11 @@ private key, and the device's trust in that certificate is entirely
 your responsibility — installing a locally issued certificate
 authority on a device is a decision to weigh against its risks (the
 device will trust anything that authority signs, for every app on it,
-until it is removed). The admission, the wire codes, the caps, and
-every reply contract are byte-for-byte the same over either transport.
+until it is removed). The admission, the wire codes, and every reply
+contract are byte-for-byte the same over either transport — the one
+exception is the connection cap itself: over `maxOpenConnections` a
+new TLS connection is cut before arming with no reply, where the plain
+door answers `503`.
 The option is off by default: with `securityContext` left null every
 bind path stays letter identical and the port speaks plain HTTP.
 Setting it together with `unixSocketPath` throws `ArgumentError` at
@@ -1082,17 +1088,20 @@ CLI clients on Linux and macOS.
   (`BridgeConfig.listenIPv6Loopback`) and the optional unix-socket
   listener (`BridgeConfig.unixSocketPath`, Linux/macOS) join only when
   armed — never a non-loopback or network-facing address.
-- The TLS transport bounds its own handshake window now, and states
+- The TLS transport bounds its own handshake window, and states
   honestly what stays outside its reach: the first full TLS record is
   gated — a non-handshake first byte and an over-cap declared length
   are cut at once with no bytes sent back, a silent client and a
   slow-dripping client are cut at `BridgeConfig.tlsFirstRecordTimeout`
   (five seconds by default, bounds one to sixty seconds), and every
   one of those cuts lands while the socket is unarmed, which is the
-  one state where the cut reaches the wire. What dart:io offers no
-  lever for: a client that completes its first record (a real
-  ClientHello) and then goes silent is armed by then — no handshake
-  deadline and no kill reaches the wire after arming, so such a socket
+  one state where the cut reaches the wire. What the package cannot
+  build — dart:io offers no public lever for it: after arming the
+  package holds only the detached wrapper socket, so `destroy` and
+  `close` on it do not reach the peer and `stop` does not reap it, and
+  no public API hands the raw engine socket back wrapped as the
+  `Socket` shape `HttpServer.listenOn` consumes — so a client that
+  completes its first record (a real ClientHello) and then goes silent
   holds an in-flight slot until the peer closes it. The bound there is
   the ceiling: the TLS feed counts its in-flight handshakes into the
   open-connection cap (`BridgeConfig.maxOpenConnections`) while that
