@@ -195,7 +195,11 @@ async function signProof(tokenHex, pairingId, method, path, correlationId) {
 
 A reused or stale (outside one minute of the server's clock) signature
 reads `403 pair_signature_replay`; sign a fresh request and increment
-nothing - the stamp is the freshness. With the requirement off (the
+nothing - the stamp is the freshness. Five wrong codes absorb a pairing
+session's whole guess budget (`429 pair_budget_exceeded`): any page can
+spend the budget of the code currently displayed, so when the host reads
+that code the host calls `startPairing()` again to display a new one —
+the new session starts with its own full budget. With the requirement off (the
 default), today's behavior stands: the token stays an optional
 independent path, a browser page can send `X-Bridge-Token` wherever its
 preflight is echoed, and headerless local clients keep their token door.

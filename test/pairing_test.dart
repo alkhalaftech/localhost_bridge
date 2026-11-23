@@ -225,6 +225,56 @@ void main() {
     );
   });
 
+  test('a new pairing session after a spent one starts with its full '
+      'five-attempt budget', () async {
+    // رمزٌ خاطئ مضمون المخالفة للرمز المعروض
+    String wrong(String shown, int i) {
+      var code = i.toString().padLeft(6, '0');
+      if (code == shown) code = (i + 500000).toString().padLeft(6, '0');
+      return code;
+    }
+
+    final pr = _listed();
+    final spent = pr.startPairing();
+    for (var i = 0; i < 5; i++) {
+      final out = pr.pair(
+        origin: 'https://portal.example',
+        code: wrong(spent.code, i),
+      );
+      expect(out.rejection?.code, 'pair_code_invalid', reason: 'attempt $i');
+    }
+    expect(
+      pr
+          .pair(origin: 'https://portal.example', code: spent.code)
+          .rejection
+          ?.code,
+      'pair_budget_exceeded',
+      reason: 'the spent session refuses even its own correct code',
+    );
+    // جلسة جديدة برمز جديد: ميزانيتها الكاملة — خمسة أخطاء ثم القفل
+    final fresh = pr.startPairing();
+    for (var i = 0; i < 5; i++) {
+      final out = pr.pair(
+        origin: 'https://portal.example',
+        code: wrong(fresh.code, i),
+      );
+      expect(
+        out.rejection?.code,
+        'pair_code_invalid',
+        reason: 'attempt $i of the new session is still inside its budget',
+      );
+    }
+    final over = pr.pair(
+      origin: 'https://portal.example',
+      code: wrong(fresh.code, 9),
+    );
+    expect(
+      over.rejection?.code,
+      'pair_budget_exceeded',
+      reason: 'the new session has its own five, not the old ones',
+    );
+  });
+
   test('an unqualified origin is refused at the pairing gate by the origin '
       'code - one qualification source', () async {
     final pr = _listed();
