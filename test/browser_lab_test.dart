@@ -27,6 +27,8 @@ import 'dart:io';
 import 'package:localhost_bridge/localhost_bridge.dart';
 import 'package:test/test.dart';
 
+import 'support/tls_cert.dart' show captureClientHello;
+
 final (String?, String?, int?) _labBrowser = _discoverBrowser();
 
 // مسار المتصفح المكتشف، أو null إن لم يوجد — حينها كل الاختبارات تتخطى
@@ -537,6 +539,13 @@ void main() {
   // يُبنى الجسر المقبول بالتوكن وحده بلا قائمة: مسار التوكن هو الباب
   // الوحيد على السلك، والصفحة لا تستطيع عبوره أصلاً (لا صدى يُجاب
   // في هذا الوضع بالعقد الموثق) فالشاهد يثبت الوجهين.
+  // أخطاء مستمع خادم الصفحة (لا أخطاء الطلبات): قطع النظير داخل مصافحة
+  // TLS مع خادم الصفحة الآمن يبلغه المستمع الآمن خطأً في المقبس لا
+  // استثناء مصافحة، وطبقة HTTP تمرر إلى تدفق الطلبات كل ما ليس استثناء
+  // مصافحة — فلا يلتقطه إلا onError المستمع، وبلا معالج يصل منطقة
+  // الاختبار خطأً غير معالج يسقط الشاهد. تسجيله هنا يمنع ذلك، ويسمح
+  // للشاهد المسبق أدناه بقراءة ما وصل فعلاً لا الاكتفاء بالغياب
+  final pageListenerErrors = <Object>[];
   Future<
     (HttpServer, LocalIntakeServer, LocalIntakeServer, int, int, int, String)
   >
@@ -598,7 +607,7 @@ void main() {
       request.response.headers.contentType = ContentType.html;
       request.response.write(html);
       await request.response.close();
-    });
+    }, onError: (Object error) => pageListenerErrors.add(error));
     return (
       pageServer,
       admitted,
@@ -1135,7 +1144,7 @@ function wsScenario() {
       request.response.headers.contentType = ContentType.html;
       request.response.write(html);
       await request.response.close();
-    });
+    }, onError: (Object error) => pageListenerErrors.add(error));
     return (pageServer, bridge, protection, pageServer.port, port, token);
   }
 
@@ -1453,5 +1462,84 @@ function wsScenario() {
                   'usable browser, or one too old to simulate the address '
                   'space the story rides on'
             : null),
+  );
+
+  // قطع النظير داخل مصافحة TLS مع خادم الصفحة الآمن: المتصفح الهامشي
+  // يُقتل بانتهاء التفريغ فتُغلق مقابسه وهي داخل المصافحة بإعادة
+  // تعيين (كروم يفتح اتصالات استباقية مع الأصل نفسه). المستمع الآمن
+  // يبلغ هذا القطع خطأً في المقبس لا استثناء مصافحة، وطبقة HTTP تمرر
+  // إلى تدفق الطلبات كل ما ليس استثناء مصافحة — فبلا onError على
+  // المستمع يصل منطقة الاختبار خطأً غير معالج يسقط الشاهد. القطع هنا
+  // حتمي بالطريقة نفسها: عميل لا يقرأ رحلة الخادم أبداً، وإغلاق مقبس
+  // فيه بيانات غير مقروءة يرسل إعادة تعيين لا FIN
+  test(
+    'a client that resets inside the TLS handshake with the lab page '
+    'server never fails the lab',
+    () async {
+      final (pageServer, bridge, protection, pagePort, _, _) = await channelLab(
+        secure: true,
+      );
+      addTearDown(pageServer.close);
+      addTearDown(bridge.stop);
+      addTearDown(protection.dispose);
+      final hello = await captureClientHello();
+      final seenBefore = pageListenerErrors.length;
+      // مهل متزايدة: رحلة الخادم يجب أن تكون وصلت غير مقروءة قبل إغلاق
+      // العميل وإلا كان الإغلاق FIN عادياً فلا إعادة تعيين تُرسل
+      for (final waitMs in const [40, 80, 160, 320, 640, 1280]) {
+        final s = await Socket.connect(InternetAddress.loopbackIPv4, pagePort);
+        s.add(hello);
+        await s.flush();
+        await Future<void>.delayed(Duration(milliseconds: waitMs));
+        s.destroy();
+        for (var i = 0; i < 20; i++) {
+          await Future<void>.delayed(const Duration(milliseconds: 50));
+          if (pageListenerErrors.length > seenBefore) break;
+        }
+        if (pageListenerErrors.length > seenBefore) break;
+      }
+      final seen = pageListenerErrors.skip(seenBefore).toList();
+      // ويندوز يبلغ القطع ذاته إنهاءً للمصافحة فتسقطه طبقة HTTP قبل أن
+      // يراه المستمع — فالنصف الموجب على مشغلات POSIX وحدها، ونصف الغياب
+      // (لا خطأ غير معالج يسقط الشاهد) نافذ على كل منصة
+      if (!Platform.isWindows) {
+        expect(
+          seen,
+          isNotEmpty,
+          reason:
+              'the cut really reached the page server: its listener saw '
+              'the reset - a witness that only checks absence proves nothing',
+        );
+        expect(
+          seen.every(
+            (e) => e is SocketException && e.toString().contains('reset'),
+          ),
+          isTrue,
+          reason: 'the listener errors are the peer resets, nothing else',
+        );
+      }
+      // والخادم يخدم مصافحة كاملة بعد القطع
+      final client = HttpClient()
+        ..badCertificateCallback = (cert, host, port) => true;
+      try {
+        final res = await client
+            .getUrl(Uri.parse('https://127.0.0.1:$pagePort/'))
+            .then((r) => r.close())
+            .timeout(const Duration(seconds: 5));
+        expect(
+          res.statusCode,
+          200,
+          reason: 'the page server still serves a full handshake',
+        );
+        await res.drain<void>();
+      } finally {
+        client.close(force: true);
+      }
+    },
+    skip: LocalIntakeServer.wsTransportCeilingSupported
+        ? null
+        : 'the lab page server this cut rides is the channel lab, which '
+              'needs Dart 3.13 to arm',
+    timeout: const Timeout(Duration(seconds: 60)),
   );
 }
