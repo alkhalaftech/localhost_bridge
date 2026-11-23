@@ -419,6 +419,31 @@ SecurityContext _labTlsContext() => SecurityContext()
   ..useCertificateChainBytes(utf8.encode(_labTlsCertPem))
   ..usePrivateKeyBytes(utf8.encode(_labTlsKeyPem));
 
+// سقف الالتقاط الذي يُسلَّم للمتصفح نفسه (‏--timeout): بعده يفرغ ما تحمله
+// الصفحة مهما بلغ انتظارها. وجولة المتصفح الواحدة (إقلاعها وسقفها وخروجها)
+// تنتظر [_browserRunWait] كلها قانوناً، فمهلة الاختبار الافتراضية (ثلاثون
+// ثانية) لا تصلح لمشهد ينتظر جولة قد لا تُحسم قبل سقف الالتقاط نفسه:
+// تسقط المشهد قبل وصول ما التقطه، ثم يكتب جسمه بعد سقوطه على جسر أوقفه
+// teardown فيظهر خطأ ثانٍ (اتصال مرفوض) هو أثر السقوط لا علة ثانية.
+// فكل مشهد ينتظر متصفحاً يُعلن بباب [scene] وحده، وهو يسلّم الميزانية
+// [_sceneBudget]، والشاهد في آخر الملف يقرأ المصدر ويُسقط كل مشهد بمتصفح
+// أُعلن بلا الباب
+const Duration _browserCaptureCeiling = Duration(seconds: 30);
+const Duration _browserRunWait = Duration(seconds: 90);
+
+/// The one budget of every browser scene: above the whole wait of the largest
+/// scene the lab has (two browser runs), the wire checks after them, and the
+/// teardown. A run the browser itself bounded is never cut by the test before
+/// its DOM arrives.
+final Timeout _sceneBudget = Timeout(
+  _browserRunWait * 2 + const Duration(seconds: 60),
+);
+
+/// Declares one browser scene: under the scene budget, skipped for the lab's
+/// own reason or for the scene's [skip] when it names one.
+void scene(String name, Future<void> Function() body, {String? skip}) =>
+    test(name, body, skip: skip ?? _skipReason, timeout: _sceneBudget);
+
 /// Drives the real browser headlessly over the lab page and returns the
 /// dumped DOM: scripts run, virtual time advances the page's async work,
 /// then the serialized DOM is printed to stdout. When BRIDGE_LAB_EVIDENCE_DIR
@@ -433,6 +458,10 @@ Future<String> _dumpDom(
   final userDataDir = await Directory.systemTemp.createTemp(
     'bridge-browser-lab-',
   );
+  // زمن الجولة الحقيقي يُعلن وحده حين يبلغ سقف الالتقاط: جولة بطيئة
+  // اكتملت علاماتها تمرّ، وسطرها يبقى في السجل فيسمّي المشهد البطيء
+  // والمقدار — لا يُستنتج من سكون
+  final stopwatch = Stopwatch()..start();
   try {
     final result = await Process.run(
       _browserPath!,
@@ -455,12 +484,21 @@ Future<String> _dumpDom(
         // المرورَ فعلاً فيجري المشهدان على الزمن الحقيقي وسقف
         // الالتقاط الحقيقي يحرسها
         if (virtualTime) '--virtual-time-budget=$virtualTimeBudgetMs',
-        '--timeout=30000',
+        '--timeout=${_browserCaptureCeiling.inMilliseconds}',
         url,
       ],
       stdoutEncoding: utf8,
       stderrEncoding: utf8,
-    ).timeout(const Duration(seconds: 90));
+    ).timeout(_browserRunWait);
+    if (stopwatch.elapsed >= _browserCaptureCeiling) {
+      // ليست فشلاً: العلامات وحدها تحكم الجولة، وهذا السطر يسمّي
+      // بطأها بمقداره كي يُقرأ في سجل المشغّل حيث لا يُقرأ غيره
+      print(
+        'LAB-SLOW-RUN: $evidenceFile returned after '
+        '${stopwatch.elapsed.inMilliseconds} ms, at or beyond the browser '
+        'capture ceiling of ${_browserCaptureCeiling.inMilliseconds} ms',
+      );
+    }
     final dom = result.stdout as String;
     if (result.exitCode != 0) {
       final err = (result.stderr as String).trim();
@@ -620,7 +658,7 @@ void main() {
     );
   }
 
-  test('the token scenario runs on a token-only bridge: the token is the '
+  scene('the token scenario runs on a token-only bridge: the token is the '
       'only wire door, and the browser page cannot cross it (nothing is '
       'echoed)', () async {
     // جسر السيناريو بوضع «توكن فقط»: أصل الصفحة غير مدرج فالعبور على
@@ -668,9 +706,9 @@ void main() {
     );
     expect(wrongStatus, 403, reason: 'a wrong token opens no door');
     expect(wrongBody, contains('"error":"origin_not_listed"'));
-  }, skip: _skipReason);
+  });
 
-  test('an unpaired page is refused: the browser sees no verdict while the '
+  scene('an unpaired page is refused: the browser sees no verdict while the '
       'wire carries the literal code', () async {
     final (pageServer, _, defaultBridge, pagePort, _, defaultPort, _) =
         await lab();
@@ -724,9 +762,9 @@ void main() {
           'the refusal carries no CORS echo - that is why the '
           'browser shows no verdict',
     );
-  }, skip: _skipReason);
+  });
 
-  test('the browser preflight round trip announces the token header and the '
+  scene('the browser preflight round trip announces the token header and the '
       'echo carries the new name alone', () async {
     final (pageServer, admitted, _, pagePort, admittedPort, _, _) = await lab();
     addTearDown(pageServer.close);
@@ -787,9 +825,9 @@ void main() {
     );
     expect(strangerStatus, 204);
     expect(strangerHeaders['access-control-allow-origin'], isNull);
-  }, skip: _skipReason);
+  });
 
-  test(
+  scene(
     'a page Chrome maps to public cannot reach the loopback bridge '
     'without the Local Network Access permission',
     () async {
@@ -848,16 +886,14 @@ void main() {
       expect(status, 200);
       expect(body, contains('"ok":true'));
     },
-    skip:
-        _skipReason ??
-        (_browserMajor == null || _browserMajor! < 146
-            ? 'the Local Network Access scenario is not run below browser '
-                  'version 146 until a run below it is proven: no usable '
-                  'browser, or one below the proven floor'
-            : null),
+    skip: _browserMajor == null || _browserMajor! < 146
+        ? 'the Local Network Access scenario is not run below browser '
+              'version 146 until a run below it is proven: no usable '
+              'browser, or one below the proven floor'
+        : null,
   );
 
-  test(
+  scene(
     'the paired page pairs with the displayed code, signs its command, '
     'and reads the reply; the replay and the proofless page are refused',
     () async {
@@ -917,10 +953,9 @@ void main() {
       expect(sharedStatus, 200, reason: 'the shared token stays a valid proof');
       expect(sharedBody, contains('"ok":true'));
     },
-    skip: _skipReason,
   );
 
-  test(
+  scene(
     'the paired page reports its verdicts through the collector: the '
     'channel the emulator witness reads, proven on a desktop browser',
     () async {
@@ -954,7 +989,6 @@ void main() {
       expect(marks, contains('LAB-PAIRED-REPLAY:403:pair_signature_replay'));
       expect(marks, contains('LAB-STRICT-BARE:403:token_required'));
     },
-    skip: _skipReason,
   );
 
   // صفحة قناة المضيف: الرد المتدفق ثم الويب سوكيت — سيناريوهان
@@ -1149,7 +1183,7 @@ function wsScenario() {
     return (pageServer, bridge, protection, pageServer.port, port, token);
   }
 
-  test('the streaming reply runs in a real browser: three progress frames '
+  scene('the streaming reply runs in a real browser: three progress frames '
       'then the result frame, in the arrival order the page reads', () async {
     final (pageServer, bridge, protection, pagePort, _, _) = await channelLab();
     addTearDown(pageServer.close);
@@ -1196,9 +1230,9 @@ function wsScenario() {
           'the streaming fetch never threw (the newline anchors the '
           'verdict line, not the page source)',
     );
-  }, skip: _skipReason);
+  });
 
-  test('ws://127.0.0.1 from a real page: the handshake upgrades through the '
+  scene('ws://127.0.0.1 from a real page: the handshake upgrades through the '
       'origin gates, the first message authenticates, and the command reply '
       'crosses the channel', () async {
     final (pageServer, bridge, protection, pagePort, bridgePort, token) =
@@ -1290,9 +1324,9 @@ function wsScenario() {
     expect(replies.single, contains('"echo":true'));
     await ws.close();
     expect(token, hasLength(64));
-  }, skip: _skipReason);
+  });
 
-  test(
+  scene(
     'ws://127.0.0.1 from an https page: without the Local Network Access '
     'permission the browser blocks the channel, and with the permission '
     'granted the handshake crosses the acceptance gates',
@@ -1455,13 +1489,11 @@ function wsScenario() {
       expect(replies.single, contains('"echo":true'));
       await ws.close();
     },
-    skip:
-        _skipReason ??
-        (_browserMajor == null || _browserMajor! < 146
-            ? 'the https Local Network Access story is not run below '
-                  'browser version 146 until a run below it is proven: no '
-                  'usable browser, or one below the proven floor'
-            : null),
+    skip: _browserMajor == null || _browserMajor! < 146
+        ? 'the https Local Network Access story is not run below '
+              'browser version 146 until a run below it is proven: no '
+              'usable browser, or one below the proven floor'
+        : null,
   );
 
   // قطع النظير داخل مصافحة TLS مع خادم الصفحة الآمن: المتصفح الهامشي
@@ -1542,4 +1574,88 @@ function wsScenario() {
               'needs Dart 3.13 to arm',
     timeout: const Timeout(Duration(seconds: 60)),
   );
+
+  test('every browser scene runs under one budget, and the budget outlives the '
+      'whole wait of each browser run', () {
+    // الشاهد يقرأ مصدر هذا الملف بلا متصفح: علاقة السقوف بعضها ببعض
+    // (سقف انتظار الجولة فوق سقف الالتقاط، والميزانية فوق انتظار
+    // جولتي أكبر مشهد)، وأن المعين يسلّم السقفين ثابتين لا رقمين
+    // مكتوبين، وأن الباب يسلّم الميزانية لكل مشهد، وأن كل جولة متصفح
+    // في الملف داخل مشهد أُعلن بالباب — فأي مشهد جديد بلا الباب، أو
+    // برقم مكتوب مكان الثابت، أو بثلاث جولات فوق الميزانية، يُسقط
+    // الشاهد قبل أن يصل إلى مشغّل
+    expect(_browserRunWait, greaterThan(_browserCaptureCeiling));
+    expect(
+      _sceneBudget.duration,
+      greaterThanOrEqualTo(_browserRunWait * 2),
+      reason:
+          'the budget covers two whole browser runs, the most any '
+          'scene waits for',
+    );
+    final source = File('test/browser_lab_test.dart').readAsLinesSync();
+    final mainAt = source.indexWhere((line) => line == 'void main() {');
+    expect(mainAt, greaterThan(0), reason: 'the lab entry point is found');
+    final helpers = source.take(mainAt).join('\n');
+    expect(
+      helpers,
+      contains("'--timeout=\${_browserCaptureCeiling.inMilliseconds}'"),
+      reason: 'the browser is handed the capture ceiling constant itself',
+    );
+    expect(
+      helpers,
+      contains('.timeout(_browserRunWait)'),
+      reason: 'the browser run is waited on with its own ceiling constant',
+    );
+    expect(
+      helpers,
+      matches(RegExp(r'timeout:\s*_sceneBudget\b')),
+      reason: 'the scene door hands every scene the budget',
+    );
+    final opening = RegExp(r'^  (test|scene)\(');
+    final runCall = RegExp(r'_dumpDom\(');
+    final blocks = <List<String>>[];
+    for (final line in source) {
+      if (opening.hasMatch(line)) blocks.add(<String>[]);
+      if (blocks.isNotEmpty) blocks.last.add(line);
+    }
+    var runsInScenes = 0;
+    for (final block in blocks) {
+      final runs = block.fold<int>(
+        0,
+        (count, line) => count + runCall.allMatches(line).length,
+      );
+      if (runs == 0) continue;
+      runsInScenes += runs;
+      final declaration = block.first.trim();
+      final door = opening.firstMatch(block.first)!.group(1);
+      expect(
+        door,
+        'scene',
+        reason:
+            'the declaration "$declaration" waits for $runs browser '
+            'run(s): only the scene door budgets a browser scene - a '
+            'plain test runs under the default 30 seconds, below what '
+            'one browser run may legally take',
+      );
+      expect(
+        runs,
+        lessThanOrEqualTo(2),
+        reason:
+            'the declaration "$declaration" waits for $runs browser '
+            'runs and the budget covers two: widen the budget first',
+      );
+    }
+    final runsInFile = source.fold<int>(
+      0,
+      (count, line) => count + runCall.allMatches(line).length,
+    );
+    expect(
+      runsInFile - runsInScenes,
+      1,
+      reason:
+          'every browser run in this file sits inside a declaration '
+          'opened at the scene door - the single run outside them is '
+          'the helper declaration',
+    );
+  });
 }
