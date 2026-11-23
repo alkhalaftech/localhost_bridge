@@ -82,18 +82,18 @@ class TlsHandshakeFeed extends Stream<Socket> implements ServerSocket {
   final void Function(int inFlightNow, int cap) _onOverHandshakeCap;
   final void Function(int openNow, int cap) _onOverConnectionCap;
 
-  /// المقابس قبل التسليح: وصلت ولم يكتمل أول سجل لها بعد — عدّها حي
-  /// ودمارها يصل السلك
+  // المقابس قبل التسليح: وصلت ولم يكتمل أول سجل لها بعد — عدّها حي
+  // ودمارها يصل السلك
   final Set<_PreArm> _pending = <_PreArm>{};
 
-  /// المقابس المسلَّحة: المحرك يتولى مصافحتها ومستقبل التسليح غير محسوم
-  /// بعد — عدّها حي ودمارها لا يصل السلك
+  // المقابس المسلَّحة: المحرك يتولى مصافحتها ومستقبل التسليح غير محسوم
+  // بعد — عدّها حي ودمارها لا يصل السلك
   final Set<_PreArm> _arming = <_PreArm>{};
 
   final StreamController<Socket> _out = StreamController<Socket>();
   bool _closed = false;
 
-  /// عالق ما بعد التسليح لحظة الإغلاق: العدد الذي يعلنه stop بسطر واحد
+  // عالق ما بعد التسليح لحظة الإغلاق: العدد الذي يعلنه stop بسطر واحد
   /// (صفر لا يُعلن) — يُقرأ بعد [close] وحصراً
   int stuckArmingAtClose = 0;
 
@@ -132,8 +132,8 @@ class TlsHandshakeFeed extends Stream<Socket> implements ServerSocket {
     _raw.listen(_onAccepted, onError: (Object error) => _out.addError(error));
   }
 
-  /// المصافحات الجارية الآن: ما قبل التسليح والمسلَّح معاً — والعدّ
-  /// ينتهي لحظة تسليم المقبس إلى HttpServer فلا عدّ مزدوج مع
+  // المصافحات الجارية الآن: ما قبل التسليح والمسلَّح معاً — والعدّ
+  // ينتهي لحظة تسليم المقبس إلى HttpServer فلا عدّ مزدوج مع
   /// connectionsInfo
   int get ongoingHandshakes => _pending.length + _arming.length;
 
@@ -181,9 +181,9 @@ class TlsHandshakeFeed extends Stream<Socket> implements ServerSocket {
     );
   }
 
-  /// فحص الرأس الخماسي على كل وصول: البايت الأول غير 0x16 تدمير فوري،
-  /// والطول المعلن فوق السقف تدمير فوري، واكتمال الرأس والحمولة
-  /// المعلنة تسليح
+  // فحص الرأس الخماسي على كل وصول: البايت الأول غير 0x16 تدمير فوري،
+  // والطول المعلن فوق السقف تدمير فوري، واكتمال الرأس والحمولة
+  // المعلنة تسليح
   void _inspect(_PreArm handshake) {
     if (handshake.armed) {
       return;
@@ -210,8 +210,8 @@ class TlsHandshakeFeed extends Stream<Socket> implements ServerSocket {
     _arm(handshake, bytes);
   }
 
-  /// القطع قبل التسليح حصراً: إلغاء المهلة والاشتراك وتدمير المقبس —
-  /// والعدّ قطع تراكمي من الخادم لا من العميل الذي انصرف وحده
+  // القطع قبل التسليح حصراً: إلغاء المهلة والاشتراك وتدمير المقبس —
+  // والعدّ قطع تراكمي من الخادم لا من العميل الذي انصرف وحده
   void _cut(_PreArm handshake) {
     if (handshake.armed) {
       // بعد التسليح لا قطع يصل السلك — لا يُكتب سلوك لا يفعل شيئاً
@@ -226,11 +226,11 @@ class TlsHandshakeFeed extends Stream<Socket> implements ServerSocket {
     _onCut();
   }
 
-  /// انصراف النظير وحده قبل التسليح (خطأ أو إغلاق): يسحب من العدّ بلا
-  /// قطع محسوب — القطع عدّ ما قطعته التلقيمة لا ما تركه نظيره — ويهدم
-  /// المقبس لحظة الانصراف حصراً: تركه حياً هنا يسرّب مقبض النظام
+  // انصراف النظير وحده قبل التسليح (خطأ أو إغلاق): يسحب من العدّ بلا
+  // قطع محسوب — القطع عدّ ما قطعته التلقيمة لا ما تركه نظيره — ويهدم
+  // المقبس لحظة الانصراف حصراً: تركه حياً هنا يسرّب مقبض النظام
   /// (حلقة «اتصال ثم إغلاق» من خارج العملية تستنزف واصفات الجسر حتى
-  /// نفادها) والهدم هنا يصل السلك قبل التسليح كبقية الأهدمات
+  // نفادها) والهدم هنا يصل السلك قبل التسليح كبقية الأهدمات
   void _abandon(_PreArm handshake) {
     if (_pending.remove(handshake)) {
       handshake.deadline?.cancel();
@@ -239,10 +239,10 @@ class TlsHandshakeFeed extends Stream<Socket> implements ServerSocket {
     }
   }
 
-  /// التسليح: البايتات المقروءة قبل التسليح تعاد للمحرك عبر
+  // التسليح: البايتات المقروءة قبل التسليح تعاد للمحرك عبر
   /// bufferedData، والاشتراك ينتقل للمحرك به بينما مهلة أول سجل تُلغى،
-  /// والعدّ يبقى
-  /// على المقبس حتى يُسلَّم إلى HttpServer أو تفشل المصافحة
+  // والعدّ يبقى
+  // على المقبس حتى يُسلَّم إلى HttpServer أو تفشل المصافحة
   void _arm(_PreArm handshake, List<int> bytes) {
     if (!_pending.remove(handshake)) {
       // سبقه الإغلاق أو الانصراف: لا تسليح بعد لا مرجع
@@ -278,11 +278,11 @@ class TlsHandshakeFeed extends Stream<Socket> implements ServerSocket {
     );
   }
 
-  /// الإغلاق: إيقاف القبول، وحصد كل ما قبل التسليح فوراً (تدمير يصل
-  /// السلك، وقطعٌ محسوب لكل مقبس محصود)، وتسجيل عدد العالق بعد
-  /// التسليح للإعلان، وإنهاء مستقبل التسليم. نداء HttpServer.close لا
-  /// يمر من هنا: المستمع الممرَّر له لا يُغلق من عنده، فالمالك هو من
-  /// يغلق التلقيمة بيده في stop وفي مسار اليتامى.
+  // الإغلاق: إيقاف القبول، وحصد كل ما قبل التسليح فوراً (تدمير يصل
+  // السلك، وقطعٌ محسوب لكل مقبس محصود)، وتسجيل عدد العالق بعد
+  // التسليح للإعلان، وإنهاء مستقبل التسليم. نداء HttpServer.close لا
+  // يمر من هنا: المستمع الممرَّر له لا يُغلق من عنده، فالمالك هو من
+  // يغلق التلقيمة بيده في stop وفي مسار اليتامى.
   @override
   Future<ServerSocket> close() async {
     _closed = true;
@@ -323,8 +323,8 @@ class TlsHandshakeFeed extends Stream<Socket> implements ServerSocket {
   InternetAddress get address => _raw.address;
 }
 
-/// حالة مقبس واحد قبل حسم مصافحته: البايتات المجموعة، ومهلة أول سجل،
-/// واشتراك القراءة، وعلم التسليح الذي يمنع أي قطع بعده
+// حالة مقبس واحد قبل حسم مصافحته: البايتات المجموعة، ومهلة أول سجل،
+// واشتراك القراءة، وعلم التسليح الذي يمنع أي قطع بعده
 class _PreArm {
   final Socket socket;
   final List<int> buffered = <int>[];

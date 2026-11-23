@@ -125,9 +125,9 @@ String _dechunk(String body) {
   return out.toString();
 }
 
-/// قارئ الرد المشترك: يكتب الطلب على المقبس ويجمع الرد حتى اكتماله
+// قارئ الرد المشترك: يكتب الطلب على المقبس ويجمع الرد حتى اكتماله
 /// (حسب طول المحتوى المعلن أو نهاية التأطير المجزأ أو قطع الاتصال) —
-/// ولا يفترض نصاً صالحاً في أي طرف.
+// ولا يفترض نصاً صالحاً في أي طرف.
 Future<Map<String, Object?>> _drive(Socket socket, String request) async {
   final buffer = BytesBuilder();
   final done = Completer<Map<String, Object?>>();
@@ -194,7 +194,7 @@ Future<Map<String, Object?>> _drive(Socket socket, String request) async {
   );
 }
 
-/// مقبض باب عادي: مقبس TCP خام يكتب الطلب المبني يدوياً
+// مقبض باب عادي: مقبس TCP خام يكتب الطلب المبني يدوياً
 Future<Map<String, Object?>> _exchange(
   String address,
   int port,
@@ -206,8 +206,8 @@ Future<Map<String, Object?>> _exchange(
   return reply;
 }
 
-/// مقبض باب آمن: المصافحة TLS كاملة ثم الطلب المبني يدوياً على المقبس
-/// الآمن نفسه — قبول شهادة النصاب الذاتية بعلم badCertificate حصراً.
+// مقبض باب آمن: المصافحة TLS كاملة ثم الطلب المبني يدوياً على المقبس
+// الآمن نفسه — قبول شهادة النصاب الذاتية بعلم badCertificate حصراً.
 Future<Map<String, Object?>> _exchangeTls(
   String address,
   int port,

@@ -18,7 +18,7 @@ import 'support/tls_cert.dart';
 
 const _t64 = 'a3f1c52e94b7d068f5e2a9c4b1d7e8036f9a2c5e8b1d7f04a6c9e2d5f8b3a1c7';
 
-/// مرصد تحذيرات الخادم: أسطر الإيقاف المعلنة هي موضوع الشاهد
+// مرصد تحذيرات الخادم: أسطر الإيقاف المعلنة هي موضوع الشاهد
 class _Rec extends BridgeTelemetry {
   final warns = <String>[];
   @override
@@ -75,7 +75,7 @@ LocalIntakeServer _make({
   );
 }
 
-/// طلب POST حقيقي على الباب الآمن بمصافحة كاملة: الحالة والجسم
+// طلب POST حقيقي على الباب الآمن بمصافحة كاملة: الحالة والجسم
 Future<(int, String)> _tlsPost(int port) async {
   final client = HttpClient()
     ..connectionTimeout = const Duration(seconds: 5)
@@ -96,10 +96,10 @@ Future<(int, String)> _tlsPost(int port) async {
   }
 }
 
-/// قارئ اتصال TLS قائم واحد (keep-alive): اشتراك واحد على المقبس طوال
-/// الحياة — مقبس dart:io جدولٌ واحدي الاشتراك فلا استماع ثانٍ —
-/// وكل طلب ينتظر رده على الطابور نفسه، بتمام الطول المعلن أو تمام
-/// المجزأ (transfer-encoding: chunked بلا طول معلن فـ0\r\n\r\n إتمامه)
+// قارئ اتصال TLS قائم واحد (keep-alive): اشتراك واحد على المقبس طوال
+// الحياة — مقبس dart:io جدولٌ واحدي الاشتراك فلا استماع ثانٍ —
+// وكل طلب ينتظر رده على الطابور نفسه، بتمام الطول المعلن أو تمام
+// المجزأ (transfer-encoding: chunked بلا طول معلن فـ0\r\n\r\n إتمامه)
 class _LiveDoor {
   _LiveDoor(this.socket) {
     socket.listen(
@@ -1063,10 +1063,10 @@ void main() {
   });
 }
 
-/// عدد مقابض/واصفات العملية الحالية حيثما يمكن قراءته محلياً لعملية
-/// الاختبار نفسها: /proc/self/fd على لينكس و/dev/fd على ماك،
-/// وHandleCount عبر PowerShell على ويندوز — وحيث لا يُقرأ أي منها
-/// يعيد null فيتخطى الشاهد صادقاً مسمّياً
+// عدد مقابض/واصفات العملية الحالية حيثما يمكن قراءته محلياً لعملية
+// الاختبار نفسها: /proc/self/fd على لينكس و/dev/fd على ماك،
+// وHandleCount عبر PowerShell على ويندوز — وحيث لا يُقرأ أي منها
+// يعيد null فيتخطى الشاهد صادقاً مسمّياً
 int? _openHandles() {
   if (Platform.isLinux) {
     return Directory('/proc/self/fd').listSync().length;

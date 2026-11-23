@@ -32,16 +32,16 @@ MIGHAgEAMBMGByqGSM49AgEGCCqGSM49AwEHBG0wawIBAQQgpVY43QY5bcNL7dFw
 nyN6J0xydgxOrxy1JT5BQLMWqzPwCl/wMlLzbHNJYEeVpakUB7XNfMeh
 -----END PRIVATE KEY-----''';
 
-/// سياق TLS جاهز من الثابتين المضمّنين حصراً — بلا ملفات وبلا توليد:
-/// هذا عقد الخيار نفسه (المضيف يمرر سياقاً جاهزاً).
+// سياق TLS جاهز من الثابتين المضمّنين حصراً — بلا ملفات وبلا توليد:
+// هذا عقد الخيار نفسه (المضيف يمرر سياقاً جاهزاً).
 SecurityContext tlsContext() => SecurityContext()
   ..useCertificateChainBytes(utf8.encode(certPem))
   ..usePrivateKeyBytes(utf8.encode(keyPem));
 
-/// التقاط أول سجل TLS كامل من عميل حقيقي: مستمع TCP خام يقبل
+// التقاط أول سجل TLS كامل من عميل حقيقي: مستمع TCP خام يقبل
 /// `SecureSocket.connect` من عميل، يقرأ الرأس الخماسي والحمولة المعلنة
 /// (ClientHello)، ثم يغلق — فترجع البايتات لمن يدوّرها على باب آخر.
-/// العميل نفسه تفشل مصافحته حتماً (الماسك لا يجيب) وهذا هو المقصود.
+// العميل نفسه تفشل مصافحته حتماً (الماسك لا يجيب) وهذا هو المقصود.
 Future<List<int>> captureClientHello() async {
   final capture = await ServerSocket.bind(InternetAddress.loopbackIPv4, 0);
   final done = Completer<List<int>>();
@@ -93,8 +93,8 @@ Future<List<int>> captureClientHello() async {
   return hello;
 }
 
-/// إعادة تشغيل ClientHello الملتقط على باب خام: مقبس TCP يكتب السجل
-/// ويصمت — محرك الطرف الآخر يتسلم الرأس ويعلن مصافحة لن يكملها أحد.
+// إعادة تشغيل ClientHello الملتقط على باب خام: مقبس TCP يكتب السجل
+// ويصمت — محرك الطرف الآخر يتسلم الرأس ويعلن مصافحة لن يكملها أحد.
 Future<Socket> replayClientHello(List<int> hello, int port) async {
   final sock = await Socket.connect(InternetAddress.loopbackIPv4, port);
   sock.add(hello);
@@ -103,10 +103,10 @@ Future<Socket> replayClientHello(List<int> hello, int port) async {
   return sock;
 }
 
-/// مسبار الحياة على السلك من العميل نفسه: مصافحة TLS على المقبس الحي
-/// بمهلة قصيرة. خطأ سريع (HandshakeException/SocketException) = المقبس
-/// ميت وصل الإغلاق إلى السلك؛ صمت بالمهلة = حي لا أحد أجاب؛ نجاح TLS =
-/// حي بل يجيب. هذا المسبار هو القياس لا مخطط أطراف متعددة.
+// مسبار الحياة على السلك من العميل نفسه: مصافحة TLS على المقبس الحي
+// بمهلة قصيرة. خطأ سريع (HandshakeException/SocketException) = المقبس
+// ميت وصل الإغلاق إلى السلك؛ صمت بالمهلة = حي لا أحد أجاب؛ نجاح TLS =
+// حي بل يجيب. هذا المسبار هو القياس لا مخطط أطراف متعددة.
 Future<String> wireProbe(Socket client) async {
   try {
     final sec = await SecureSocket.secure(

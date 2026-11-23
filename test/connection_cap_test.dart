@@ -19,7 +19,7 @@ IntakeProtection _allowlist() {
   return pr;
 }
 
-/// مقبس كاذب: ترويسات كاملة وجسم معلن ناقص — اتصال مفتوح يبقى حيا
+// مقبس كاذب: ترويسات كاملة وجسم معلن ناقص — اتصال مفتوح يبقى حيا
 /// (يحمل مقعداً في طور قراءة الجسم) حتى الهدم.
 Future<Socket> _stall(
   int port, {
@@ -58,7 +58,7 @@ Future<(int, String)> _post(int port) async {
   }
 }
 
-/// طلب POST حقيقي على الباب الآمن بمصافحة كاملة: الحالة والجسم
+// طلب POST حقيقي على الباب الآمن بمصافحة كاملة: الحالة والجسم
 Future<(int, String)> _tlsPost(int port) async {
   final client = HttpClient()
     ..connectionTimeout = const Duration(seconds: 5)
@@ -238,7 +238,7 @@ void main() {
         await Future<void>.delayed(const Duration(milliseconds: 600));
 
         // مسبار الحياة: الاتصال الجديد فوق السقف يُقطع قبل التسليح
-        // فيموت على السلك — المصافحة الجارية التي تعدّها التلقمة تركب
+        // فيموت على السلك — المصافحة الجارية التي تعدّها التلقيمة تركب
         // السقف القائم نفسه فلا باب جانبي يحصّنه الباب الآمن
         final refused = await Socket.connect(
           InternetAddress.loopbackIPv4,
