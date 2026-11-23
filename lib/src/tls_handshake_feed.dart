@@ -251,6 +251,11 @@ class TlsHandshakeFeed extends Stream<Socket> implements ServerSocket {
     handshake.armed = true;
     handshake.deadline?.cancel();
     _arming.add(handshake);
+    // إيقاف اشتراك القراءة مؤقتاً قبل نداء التسليح لا إلغاءه أبداً:
+    // عقد التسليح في dart:io أن الاشتراك القائم على المقبس لا يستقبل
+    // بعده أحداً والإيقاف المؤقت هو الشكل الصحيح قبل النداء — وإلغاؤه
+    // قبل التسليح يفشل المصافحة فوراً على السلك
+    handshake.subscription?.pause();
     SecureSocket.secureServer(
       handshake.socket,
       _context,
@@ -274,9 +279,10 @@ class TlsHandshakeFeed extends Stream<Socket> implements ServerSocket {
   }
 
   /// الإغلاق: إيقاف القبول، وحصد كل ما قبل التسليح فوراً (تدمير يصل
-  /// السلك)، وتسجيل عدد العالق بعد التسليح للإعلان، وإنهاء مستقبل
-  /// التسليم. نداء HttpServer.close يمر من هنا فيسلك كل مسارات الإغلاق
-  /// القائمة الحصاد نفسه.
+  /// السلك، وقطعٌ محسوب لكل مقبس محصود)، وتسجيل عدد العالق بعد
+  /// التسليح للإعلان، وإنهاء مستقبل التسليم. نداء HttpServer.close لا
+  /// يمر من هنا: المستمع الممرَّر له لا يُغلق من عنده، فالمالك هو من
+  /// يغلق التلقيمة بيده في stop وفي مسار اليتامى.
   @override
   Future<ServerSocket> close() async {
     _closed = true;
@@ -286,12 +292,11 @@ class TlsHandshakeFeed extends Stream<Socket> implements ServerSocket {
       handshake.deadline?.cancel();
       handshake.subscription?.cancel();
       handshake.socket.destroy();
+      _onCut();
     }
-    for (final handshake in _arming.toList()) {
-      // التدمير هنا لا يصل السلك (المحرك مسلّح) — لكنه ينهي دفاتر
-      // التلقيمة عند حسم مستقبل التسليح، والسطر المعلن حمل العدد قبله
-      handshake.socket.destroy();
-    }
+    // مقابس المسلَّح هنا على الغلاف المنفصل فتدميرها من هنا لا يبلغ
+    // السلك شيئاً — وحسمها على مستقبل التسليح نفسه: ما سلّم بعد
+    // الإغلاق يُدمَّر لحظة وصوله، وما علق يبقى بإعلان العدد قبله
     _arming.clear();
     final closed = await _raw.close();
     await _out.close();
