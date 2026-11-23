@@ -203,9 +203,14 @@ void main() {
     addTearDown(srv.stop);
     final client = await Socket.connect(InternetAddress.loopbackIPv4, srv.port);
     unawaited(client.done.catchError((Object _) {}));
+    // رأس السجل الخماسي دفعة واحدة، ثم البايت الأول بعده يُرسل صراحةً
+    // الآن (الفهرس 5) — توقيته مسمّى بهذا النداء لا بنداء موقّت متعاقب
     client.add(hello.sublist(0, 5));
     await client.flush();
+    client.add(<int>[hello[5]]);
+    await client.flush();
     final drip = Timer.periodic(const Duration(milliseconds: 150), (t) {
+      // أول نداء للموقّت يحمل tick == 1 فيكمل التقطير من الفهرس 6
       final i = 5 + t.tick;
       if (i < hello.length) {
         client.add(<int>[hello[i]]);
@@ -554,8 +559,258 @@ void main() {
     );
     expect(
       stuckLines.single,
-      contains('2'),
-      reason: 'the announced count matches the two armed-stuck handshakes',
+      contains('with 2 TLS handshake(s) stuck past arming'),
+      reason:
+          'the announced line carries the exact phrase with the exact '
+          'count - two armed-stuck handshakes',
+    );
+  });
+
+  test('the pre-arming harvest at stop counts its cuts: two silent '
+      'sockets raise tlsSocketsCut by exactly two across stop', () async {
+    final srv = _make(
+      rec: null,
+      config: BridgeConfig(securityContext: tlsContext()),
+    );
+    await srv.start(preferredPort: 0);
+    // صامتان قبل التسليح حصراً: لا قطع قبل الإيقاف فالفرق يبدأ من صفر
+    final silent1 = await Socket.connect(
+      InternetAddress.loopbackIPv4,
+      srv.port,
+    );
+    final silent2 = await Socket.connect(
+      InternetAddress.loopbackIPv4,
+      srv.port,
+    );
+    unawaited(silent1.done.catchError((Object _) {}));
+    unawaited(silent2.done.catchError((Object _) {}));
+    await Future<void>.delayed(const Duration(milliseconds: 300));
+    final cutBefore = srv.counters.tlsSocketsCut;
+    expect(
+      cutBefore,
+      0,
+      reason:
+          'the two silent sockets only hold pre-arming slots - no cut is '
+          'counted before stop',
+    );
+    await srv.stop().timeout(const Duration(seconds: 5));
+    silent1.destroy();
+    silent2.destroy();
+    expect(
+      srv.counters.tlsSocketsCut - cutBefore,
+      2,
+      reason:
+          'the pre-arming harvest at stop is a cut per harvested socket - '
+          'the counter names what stop cut on the wire, and two silent '
+          'sockets are exactly two',
+    );
+  });
+
+  test('the option cap counts delivered connections too: with the cap of '
+      'two held by two served keep-alive connections, a third TLS '
+      'connection is cut on the wire with the named accept line', () async {
+    final rec = _Rec();
+    final srv = _make(
+      rec: rec,
+      config: BridgeConfig(
+        maxOpenConnections: 2,
+        securityContext: tlsContext(),
+      ),
+    );
+    await srv.start(preferredPort: 0);
+    addTearDown(srv.stop);
+    // اتصالان مكتمل المصافحة يخدمان طلباً حقيقياً ويبقيان حيَّين على
+    // keep-alive: عدّ الاتصالات المفتوحة يمتلئ بالمسلَّم لا بالجاري
+    final liveA = _LiveDoor(
+      await SecureSocket.connect(
+        '127.0.0.1',
+        srv.port,
+        onBadCertificate: (cert) => true,
+      ),
+    );
+    final liveB = _LiveDoor(
+      await SecureSocket.connect(
+        '127.0.0.1',
+        srv.port,
+        onBadCertificate: (cert) => true,
+      ),
+    );
+    final statusA = await liveA.send(
+      _post('127.0.0.1:${srv.port}', '{"data":["PRINT 1"]}'),
+    );
+    final statusB = await liveB.send(
+      _post('127.0.0.1:${srv.port}', '{"data":["PRINT 1"]}'),
+    );
+    expect(
+      statusA,
+      200,
+      reason: 'the first served connection holds its delivered slot',
+    );
+    expect(
+      statusB,
+      200,
+      reason: 'the second served connection holds its delivered slot',
+    );
+    expect(
+      srv.counters.tlsHandshakesDelivered,
+      2,
+      reason:
+          'two completed handshakes were delivered - the cap is full of '
+          'delivered connections, not in-flight handshakes',
+    );
+    // الثالث فوق السقف: يُقطع قبل التسليح فيموت على السلك بالسطر المسمّى
+    final refused = await Socket.connect(
+      InternetAddress.loopbackIPv4,
+      srv.port,
+    );
+    unawaited(refused.done.catchError((Object _) {}));
+    await Future<void>.delayed(const Duration(milliseconds: 300));
+    final probe = await wireProbe(refused);
+    refused.destroy();
+    liveA.socket.destroy();
+    liveB.socket.destroy();
+    expect(
+      probe,
+      startsWith('DEAD'),
+      reason:
+          'the option cap counts delivered connections as well - a third '
+          'TLS connection over the cap of two delivered ones is cut '
+          'before arming and the cut reaches the wire',
+    );
+    expect(
+      rec.warns.where((w) => w.contains('intake TLS accept limit')),
+      hasLength(1),
+      reason: 'exactly one throttled line for the delivered-count accept cut',
+    );
+    expect(
+      rec.warns.singleWhere((w) => w.contains('intake TLS accept limit')),
+      contains('intake TLS accept limit: 3 open connections over the cap of 2'),
+      reason:
+          'the line names the exact count: three open connections over '
+          'the cap of two',
+    );
+  });
+
+  test('the internal ceiling line names its own count: handshakes in '
+      'flight', () async {
+    final rec = _Rec();
+    final srv = _make(
+      rec: rec,
+      config: BridgeConfig(securityContext: tlsContext()),
+    );
+    final hello = await captureClientHello();
+    await srv.start(preferredPort: 0);
+    addTearDown(srv.stop);
+    // الملء كامل 64 صامتة ثم الخامس والستون فوق السقف الداخلي
+    final stuck = <Socket>[];
+    for (var i = 0; i < 64; i++) {
+      stuck.add(await replayClientHello(hello, srv.port));
+    }
+    var waitedMs = 0;
+    while (srv.counters.tlsHandshakesInFlight < 64 && waitedMs < 3000) {
+      await Future<void>.delayed(const Duration(milliseconds: 20));
+      waitedMs += 20;
+    }
+    final refused = await Socket.connect(
+      InternetAddress.loopbackIPv4,
+      srv.port,
+    );
+    unawaited(refused.done.catchError((Object _) {}));
+    await Future<void>.delayed(const Duration(milliseconds: 300));
+    for (final s in stuck) {
+      s.destroy();
+    }
+    refused.destroy();
+    final lines = rec.warns
+        .where((w) => w.contains('intake TLS handshake limit'))
+        .toList();
+    expect(
+      lines,
+      hasLength(1),
+      reason: 'exactly one throttled line for the internal ceiling cut',
+    );
+    expect(
+      lines.single,
+      contains('handshakes in flight'),
+      reason:
+          'the internal ceiling counts in-flight handshakes only and its '
+          'line names that count - it is never mislabeled as open '
+          'connections',
+    );
+  });
+
+  test('after stop begins no new handshake is accepted or armed: a fresh '
+      'silent ClientHello client gets no server bytes while a request '
+      'still holds its seat, and no stuck line is written', () async {
+    final rec = _Rec();
+    final entered = Completer<void>();
+    final gate = Completer<void>();
+    final srv = LocalIntakeServer(
+      telemetry: rec,
+      correlationIdGenerator: _cid,
+      onCommand: (_) async {
+        if (!entered.isCompleted) entered.complete();
+        await gate.future;
+        return const CommandOutcome(ok: true);
+      },
+      protection: IntakeProtection(telemetry: rec)
+        ..update(
+          policy: const OriginPolicy(allowed: ['https://portal.example']),
+          token: _t64,
+        ),
+      config: BridgeConfig(securityContext: tlsContext()),
+    );
+    final hello = await captureClientHello();
+    final port = await srv.start(preferredPort: 0);
+    // طلب حي داخل المعالج يقف عند البوابة فيمتلك فراغ المقاعد
+    unawaited(_tlsPost(port));
+    await entered.future.timeout(const Duration(seconds: 5));
+    // الالتقاط بعد دخول المعالج: مصافحة الطلب الحي نفسها سُلِّمت قبله
+    final deliveredBefore = srv.counters.tlsHandshakesDelivered;
+    // بداية stop بلا انتظار حسمه: التلقيمتان تُغلقان قبل فراغ المقاعد
+    final stopping = srv.stop();
+    await Future<void>.delayed(const Duration(milliseconds: 500));
+    // عميل جديد بعد ClientHello حقيقي: لا بايت من الخادم داخل النافذة —
+    // رفض الاتصال نفسه أو الصمت كلاهما «لا بايت» على كل منصة
+    var serverBytes = -1;
+    try {
+      final fresh = await Socket.connect(
+        InternetAddress.loopbackIPv4,
+        port,
+      ).timeout(const Duration(seconds: 2));
+      var got = 0;
+      late final StreamSubscription<List<int>> sub;
+      sub = fresh.listen((chunk) => got += chunk.length);
+      fresh.add(hello);
+      await fresh.flush();
+      await Future<void>.delayed(const Duration(milliseconds: 1200));
+      unawaited(sub.cancel());
+      fresh.destroy();
+      serverBytes = got;
+    } on Object {
+      serverBytes = 0;
+    }
+    gate.complete();
+    await stopping.timeout(const Duration(seconds: 15));
+    expect(
+      serverBytes,
+      0,
+      reason:
+          'once stop has begun the feeds are closed before the seats '
+          'drain - no new handshake is accepted or armed, so no server '
+          'byte reaches a fresh ClientHello client on any platform',
+    );
+    expect(
+      srv.counters.tlsHandshakesDelivered,
+      deliveredBefore,
+      reason: 'no new handshake completes and is delivered after stop began',
+    );
+    expect(
+      rec.warns.where((w) => w.contains('TLS handshake')),
+      isEmpty,
+      reason:
+          'the fresh client was never armed, so stop announces nothing '
+          'stuck past arming',
     );
   });
 
@@ -763,13 +1018,6 @@ void main() {
 
   test('a socket its peer abandons before arming is destroyed at once: '
       'process handles do not grow with abandon cycles', () async {
-    if (Platform.isMacOS) {
-      markTestSkipped(
-        'no /proc and no PowerShell on macOS - the abandonment handle '
-        'count is read from CI there',
-      );
-      return;
-    }
     final srv = _make(
       rec: null,
       config: BridgeConfig(securityContext: tlsContext()),
@@ -777,6 +1025,13 @@ void main() {
     await srv.start(preferredPort: 0);
     addTearDown(srv.stop);
     final before = _openHandles();
+    if (before == null) {
+      markTestSkipped(
+        'this platform exposes no process handle or descriptor count '
+        'this witness can read locally - the count is read from CI there',
+      );
+      return;
+    }
     // دورات انصراف النظير قبل التسليح: نصفها صامت كامل ونصفها بايتان
     // من رأس السجل ثم انصراف — كلاهما مسار الانصراف ذاته
     for (var i = 0; i < 300; i++) {
@@ -794,7 +1049,7 @@ void main() {
       0,
       reason: 'the abandoned sockets are out of every count at once',
     );
-    final after = _openHandles();
+    final after = _openHandles()!;
     expect(
       after - before,
       lessThan(100),
@@ -808,12 +1063,19 @@ void main() {
   });
 }
 
-/// عدد مقابض/واصفات العملية الحالية: /proc/self/fd على لينكس،
-/// HandleCount عبر PowerShell على ويندوز — وماك بلا واحدة من الاثنتين
-/// فيتخطى شاهد الانصراف هناك صادقاً مسمّياً ويُقرأ من CI
-int _openHandles() {
+/// عدد مقابض/واصفات العملية الحالية حيثما يمكن قراءته محلياً لعملية
+/// الاختبار نفسها: /proc/self/fd على لينكس و/dev/fd على ماك،
+/// وHandleCount عبر PowerShell على ويندوز — وحيث لا يُقرأ أي منها
+/// يعيد null فيتخطى الشاهد صادقاً مسمّياً
+int? _openHandles() {
   if (Platform.isLinux) {
     return Directory('/proc/self/fd').listSync().length;
+  }
+  if (Platform.isMacOS) {
+    return Directory('/dev/fd').listSync().length;
+  }
+  if (!Platform.isWindows) {
+    return null;
   }
   final result = Process.runSync('powershell', <String>[
     '-NoProfile',
