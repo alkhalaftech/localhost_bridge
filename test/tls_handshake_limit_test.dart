@@ -1026,9 +1026,22 @@ void main() {
     addTearDown(srv.stop);
     final before = _openHandles();
     if (before == null) {
+      // في CI لا يتخطى الشاهد: كل منصة تُجري عليها الاختبارات يجب أن تُقرأ
+      // عدّتها، والفشل المسمّى أصدق من نجاحٍ بلا قياس
+      if (Platform.environment['CI'] == 'true') {
+        expect(
+          before,
+          isNotNull,
+          reason:
+              'CI must read a process handle or descriptor count on every '
+              'platform it runs - a skip here would make the green job prove '
+              'nothing',
+        );
+      }
       markTestSkipped(
-        'this platform exposes no process handle or descriptor count '
-        'this witness can read locally - the count is read from CI there',
+        'this platform exposes no process handle or descriptor count this '
+        'witness can read locally - outside CI the witness skips honestly; '
+        'under CI it fails instead of skipping',
       );
       return;
     }
@@ -1066,7 +1079,7 @@ void main() {
 // عدد مقابض/واصفات العملية الحالية حيثما يمكن قراءته محلياً لعملية
 // الاختبار نفسها: /proc/self/fd على لينكس، و/dev/fd على ماك واصفاً
 // واصفاً، وHandleCount عبر PowerShell على ويندوز — وحيث لا يُقرأ أي منها
-// يعيد null فيتخطى الشاهد صادقاً مسمّياً
+// يعيد null: خارج CI يتخطى الشاهد صادقاً مسمّياً، وفي CI يفشل بدل التخطي
 int? _openHandles() {
   if (Platform.isLinux) {
     return Directory('/proc/self/fd').listSync().length;
