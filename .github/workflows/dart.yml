@@ -145,12 +145,23 @@ jobs:
       # API on a green run too - not only from the admin-gated job log.
       # The grep is wrapped before the count: under bash -eo pipefail a
       # grep that finds nothing (an entry without a browser) exits 1, and
-      # an entry with no run is this step's pass condition.
+      # an entry with no run is this step's pass condition. A step keeps
+      # ten notices at most, so the runs past the tenth ride in the step
+      # after.
       - name: browser run durations
         shell: bash
         if: always()
         run: |
-          (grep -E "^LAB-RUN:" "$RUNNER_TEMP/test_out.txt" || true) | head -40 | while IFS= read -r line; do
+          (grep -E "^LAB-RUN:" "$RUNNER_TEMP/test_out.txt" || true) > "$RUNNER_TEMP/lab_runs.txt"
+          sed -n '1,10p' "$RUNNER_TEMP/lab_runs.txt" | while IFS= read -r line; do
+            echo "::notice title=LAB-RUN::${line:0:200}"
+          done
+
+      - name: browser run durations past the tenth
+        shell: bash
+        if: always()
+        run: |
+          (sed -n '11,60p' "$RUNNER_TEMP/lab_runs.txt" || true) | while IFS= read -r line; do
             echo "::notice title=LAB-RUN::${line:0:200}"
           done
 
@@ -215,13 +226,23 @@ jobs:
           exit "$status"
 
       # The lab's own run durations, as notice annotations - the same
-      # lines the matrix job repeats after its suite.
+      # lines the matrix job repeats after its suite, over two steps for
+      # the ten-notice limit of one step.
       - name: browser run durations
         shell: bash
         if: always()
         run: |
-          (grep -E "^LAB-RUN:" "$RUNNER_TEMP/lab_out.txt" || true) | head -40 | while IFS= read -r line; do
-            echo "::notice title=LAB-RUN::${line:0:200}"
+          (grep -E "^LAB-RUN:" "$RUNNER_TEMP/lab_out.txt" || true) > "$RUNNER_TEMP/lab_runs_only.txt"
+          sed -n '1,10p' "$RUNNER_TEMP/lab_runs_only.txt" | while IFS= read -r line; do
+            echo "::notice title=LAB-RUN::${line:0,200}"
+          done
+
+      - name: browser run durations past the tenth
+        shell: bash
+        if: always()
+        run: |
+          (sed -n '11,60p' "$RUNNER_TEMP/lab_runs_only.txt" || true) | while IFS= read -r line; do
+            echo "::notice title=LAB-RUN::${line:0,200}"
           done
 
   release-doc-gate:
