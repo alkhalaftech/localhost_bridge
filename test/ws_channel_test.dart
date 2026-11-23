@@ -133,6 +133,7 @@ Future<(int status, String body)> rawHandshake(
   int? hostPort,
   String origin = 'https://portal.example',
   String path = '/ws',
+  Map<String, String> extra = const {},
 }) async {
   final s = await Socket.connect('127.0.0.1', port);
   final head = StringBuffer()
@@ -145,6 +146,7 @@ Future<(int status, String body)> rawHandshake(
     ..write('Sec-WebSocket-Key: dGhlIHNhbXBsZSBub25jZQ==\r\n')
     ..write('Sec-WebSocket-Version: 13\r\n');
   if (origin.isNotEmpty) head.write('Origin: $origin\r\n');
+  extra.forEach((name, value) => head.write('$name: $value\r\n'));
   head.write('Content-Length: 0\r\n\r\n');
   s.add(utf8.encode(head.toString()));
   final text = await utf8.decoder
@@ -475,6 +477,110 @@ void main() {
       req.headers.set('Origin', 'https://portal.example');
       req.headers.set('Sec-Fetch-Mode', 'websocket');
       req.headers.set('Sec-Fetch-Dest', 'websocket');
+      req.add(utf8.encode('["X"]'));
+      final res = await req.close().timeout(const Duration(seconds: 5));
+      final body = await res.transform(utf8.decoder).join();
+      client.close(force: true);
+      expect(res.statusCode, 403);
+      expect(body, contains('"cross_site_blocked"'));
+    } finally {
+      pr.dispose();
+      await srv.stop();
+    }
+  });
+
+  // ترويسات مصافحة كما يرسلها متصفح حقيقي ثانٍ، ملتقطة خاماً: Mode
+  // بقيمة websocket وDest بقيمة empty — المصافحة من الوجهات التي لا
+  // قيمة خاصة بها، فالمتصفح يضع empty لا websocket. المصافحة بهذا
+  // الشكل باب متصفحي صادق كشكل websocket/websocket، وعلى مساري السياسة
+  // معاً: الافتراضي (مطابقة الترويسات الحاضرة) والمتطلِّب للترويسات
+  test('a handshake carrying the headers a second real browser sends '
+      '(mode websocket, dest empty, over GET) passes the fetch-metadata '
+      'gates on both policy shapes', () async {
+    for (final requireFetchMetadata in [false, true]) {
+      final pr = IntakeProtection(telemetry: const SilentTelemetry())
+        ..update(
+          policy: OriginPolicy(
+            allowed: ['https://portal.example'],
+            requireFetchMetadata: requireFetchMetadata,
+          ),
+          token: _token,
+        );
+      final srv = LocalIntakeServer(
+        telemetry: const SilentTelemetry(),
+        correlationIdGenerator: () => 'ws-shape',
+        protection: pr,
+        onCommand: (cmd) async => const CommandOutcome(ok: true),
+        config: const BridgeConfig(wsPath: '/ws'),
+      );
+      await srv.start(preferredPort: 0);
+      try {
+        final ws = await WebSocket.connect(
+          'ws://127.0.0.1:${srv.port}/ws',
+          headers: {
+            'Origin': 'https://portal.example',
+            'Sec-Fetch-Dest': 'empty',
+            'Sec-Fetch-Mode': 'websocket',
+            'Sec-Fetch-Site': 'same-site',
+          },
+        ).timeout(const Duration(seconds: 5));
+        ws.add(jsonEncode({'token': _token}));
+        await Future<void>.delayed(const Duration(milliseconds: 300));
+        expect(
+          ws.readyState,
+          WebSocket.open,
+          reason:
+              'requireFetchMetadata=$requireFetchMetadata: the empty-dest '
+              'handshake is admitted like the websocket-dest one',
+        );
+        await ws.close();
+      } finally {
+        pr.dispose();
+        await srv.stop();
+      }
+    }
+  });
+
+  // والمعفى لا يتسع لغير الشكلين: Mode websocket مع أي Dest آخر رفضٌ
+  // كما اليوم قبل الترقية، والادعاء على POST رفضٌ ولو كان Dest فارغاً
+  test('mode websocket with a dest other than websocket or empty is '
+      'refused before the upgrade, and a POST claiming the handshake '
+      'shape stays refused', () async {
+    final pr = IntakeProtection(telemetry: const SilentTelemetry())
+      ..update(
+        policy: const OriginPolicy(
+          allowed: ['https://portal.example'],
+          requireFetchMetadata: true,
+        ),
+        token: _token,
+      );
+    final srv = LocalIntakeServer(
+      telemetry: const SilentTelemetry(),
+      correlationIdGenerator: () => 'ws-shape-pin',
+      protection: pr,
+      onCommand: (cmd) async => const CommandOutcome(ok: true),
+      config: const BridgeConfig(wsPath: '/ws'),
+    );
+    await srv.start(preferredPort: 0);
+    try {
+      for (final dest in ['document', 'iframe', 'script']) {
+        final (status, body) = await rawHandshake(
+          srv.port,
+          extra: {'Sec-Fetch-Mode': 'websocket', 'Sec-Fetch-Dest': dest},
+        );
+        expect(
+          status,
+          403,
+          reason: 'mode websocket with dest $dest is no browser handshake',
+        );
+        expect(body, contains('"cross_site_blocked"'));
+      }
+      final client = HttpClient();
+      final req = await client.open('POST', '127.0.0.1', srv.port, '/');
+      req.headers.set('Content-Type', 'application/json');
+      req.headers.set('Origin', 'https://portal.example');
+      req.headers.set('Sec-Fetch-Mode', 'websocket');
+      req.headers.set('Sec-Fetch-Dest', 'empty');
       req.add(utf8.encode('["X"]'));
       final res = await req.close().timeout(const Duration(seconds: 5));
       final body = await res.transform(utf8.decoder).join();

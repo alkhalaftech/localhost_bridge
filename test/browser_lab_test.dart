@@ -45,14 +45,15 @@ final String? _skipReason =
               'Dart 3.13 - every lab scene rides the channel');
 
 // رقم الإصدار الأكبر للمتصفح المكتشف إن قرأ — سيناريو Local Network
-// Access يحتاج علم محاكاة الفضاء الذي وُلد بعد M146
+// Access لا يُشغَّل تحت الإصدار 146 حتى يُثبت تشغيله دونه (اسم العلم
+// موجود في ثنائيي محركي 134 و145، فالحدُّ حدُّ إثباتٍ لا حدُّ وجود)
 final int? _browserMajor = _labBrowser.$3;
 
 /// Locates a real Chrome/Chromium for the lab: the BRIDGE_BROWSER override
 /// first, then PATH, then the standard install locations. Returns the
 /// path, the honest skip reason when nothing is found, and the browser's
 /// major version when it can be read (the Local Network Access scenario
-/// needs the address-space override flag born after M146).
+/// is not run below browser version 146 until a run below it is proven).
 (String?, String?, int?) _discoverBrowser() {
   int? majorOf(String path) {
     try {
@@ -800,8 +801,9 @@ void main() {
       // وإرسالها إلى جسر loopback يحتاج إذن local-network-access
       // الذي لا يمنحه headless فيحجب المتصفح الإرسال كلياً. وبلا العلم
       // تعبر الصفحة نفسها على الجسر نفسه — فالفرق الوحيد بين الجولتين
-      // هو فحص LNA لا الجسر. العلم وُلد بعد M146 فالمتصفح الأقدم يتخطى
-      // الصادق
+      // هو فحص LNA لا الجسر. وتحت الإصدار 146 يتخطى الشاهد الصادق حتى
+      // يُثبت تشغيله دونه — اسم العلم موجود في ثنائيي محركي 134 و145،
+      // فالحدُّ حدُّ إثباتٍ لا حدُّ وجود
       final (pageServer, admitted, _, pagePort, admittedPort, _, token) =
           await lab();
       addTearDown(pageServer.close);
@@ -849,10 +851,9 @@ void main() {
     skip:
         _skipReason ??
         (_browserMajor == null || _browserMajor! < 146
-            ? 'the Local Network Access scenario needs the '
-                  '--ip-address-space-overrides era (born after M146): no '
-                  'usable browser, or one too old to simulate a public page '
-                  'reaching loopback'
+            ? 'the Local Network Access scenario is not run below browser '
+                  'version 146 until a run below it is proven: no usable '
+                  'browser, or one below the proven floor'
             : null),
   );
 
@@ -1457,10 +1458,9 @@ function wsScenario() {
     skip:
         _skipReason ??
         (_browserMajor == null || _browserMajor! < 146
-            ? 'the https Local Network Access story needs the '
-                  '--ip-address-space-overrides era (born after M146): no '
-                  'usable browser, or one too old to simulate the address '
-                  'space the story rides on'
+            ? 'the https Local Network Access story is not run below '
+                  'browser version 146 until a run below it is proven: no '
+                  'usable browser, or one below the proven floor'
             : null),
   );
 

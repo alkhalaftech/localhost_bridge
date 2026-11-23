@@ -3167,9 +3167,11 @@ class IntakeProtection {
   }
 
   // التوقيع الحقيقي لمتصفح على مصافحة ترقية قناة الويب سوكيت: GET
-  // وmode/dest بقيمة websocket — قيم ترويسات يضعها المتصفح لا
-  // الصفحة. الطريقة هي التي تمنع انتحال الشكل: طلب POST يدّعي
-  // websocket يظل رفضاً كأي نموذج مخفي
+  // وMode بقيمة websocket — قيم ترويسات يضعها المتصفح لا الصفحة.
+  // والDest للمصافحة قيمتان شرعيتان بحسب المتصفح: websocket أو empty
+  // (المصافحة من الوجهات التي لا قيمة خاصة بها) — وأي Dest آخر مع
+  // Mode websocket رفضٌ كما أي نموذج مخفي. الطريقة هي التي تمنع
+  // انتحال الشكل: طلب POST يدّعي websocket يظل رفضاً كأي نموذج مخفي
   static bool _isBrowserWsHandshake(
     String? fetchMode,
     String? fetchDest,
@@ -3177,7 +3179,7 @@ class IntakeProtection {
   ) {
     return method.toUpperCase() == 'GET' &&
         fetchMode == 'websocket' &&
-        fetchDest == 'websocket';
+        (fetchDest == 'websocket' || fetchDest == 'empty');
   }
 
   /// The fixed origin and send-method checks - the discovery path shares them before asking the user.
@@ -3219,7 +3221,8 @@ class IntakeProtection {
     // (متصفح قديم أو عميل غير متصفح — هؤلاء على التوكن أصلا)،
     // إلا حين يطلب المضيف الترويسات صراحة فيغلق باب المتصفحات
     // القديمة على المسارين المتصفحيين. ومصافحة القناة الحقيقية
-    // (websocket/websocket على GET) باب متصفحي صادق بذاته.
+    // (Mode websocket على GET، وDest websocket أو empty) باب متصفحي
+    // صادق بذاته.
     // والدرجة الموثقة من المنصة بلا ترويسات أصلا — تحقق المنصة
     // نفسه هو البديل الصادق عنها فيُعفى غيابها من هذه البوابة
     // حصرا، ومن يدّعي درجة الترويسة على قناة بلا ترويسات يبقى
@@ -3253,9 +3256,9 @@ class IntakeProtection {
   /// browser paths reject it behind [OriginPolicy.requireFetchMetadata],
   /// and the listed path keeps accepting it (headerless non-browser
   /// clients listed by the host). The honest browser WebSocket handshake
-  /// (websocket/websocket over GET) is its own real send method and
-  /// passes as such; a claim of websocket on any other method stays a
-  /// refusal.
+  /// (mode websocket over GET, with dest websocket or empty) is its own
+  /// real send method and passes as such; a claim of websocket on any
+  /// other method, or with any other dest, stays a refusal.
   IntakeRejection? _fetchMetadataMismatch(
     String? fetchMode,
     String? fetchDest, [
