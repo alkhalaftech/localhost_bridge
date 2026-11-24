@@ -37,6 +37,7 @@ class BridgeConfig {
     this.wsPath,
     this.localPages,
     this.requestTimeout = const Duration(seconds: 30),
+    this.bodyTimeout,
     this.idleTimeout = const Duration(seconds: 60),
     this.handlerTimeout = defaultHandlerTimeout,
     this.extraHosts = const <String>[],
@@ -379,8 +380,29 @@ class BridgeConfig {
   /// answers `405` like any non-POST).
   final List<BridgeLocalPage>? localPages;
 
-  /// Per-request timeout (anchored at request arrival, not server start).
+  /// Per-request timeout (anchored at request arrival, not server start) -
+  /// the deadline over the whole pre-handler phase: the gates, the policy
+  /// checks, and the body read. The body read alone is cut earlier, at
+  /// [bodyTimeout].
   final Duration requestTimeout;
+
+  /// The deadline over reading one request body - the phase a seat is
+  /// held while the sender is still transmitting. A body that has not
+  /// completed within it is refused `408 request_timeout` and its seat is
+  /// freed, so a sender that drips a body one byte at a time cannot hold
+  /// a seat for the whole [requestTimeout]. `null` - the default -
+  /// selects the shorter of [defaultBodyTimeout] and [requestTimeout]: a
+  /// host that lowered [requestTimeout] below ten seconds without
+  /// touching this option keeps its build and its behaviour, the body
+  /// limit following it down. An explicit value must be positive and no
+  /// longer than [requestTimeout]; otherwise building a
+  /// [LocalIntakeServer] throws [ArgumentError]. Raise it together with
+  /// [maxBodyBytes] for a device whose legitimate uploads need longer
+  /// than ten seconds.
+  final Duration? bodyTimeout;
+
+  /// The default body-phase deadline - see [bodyTimeout].
+  static const Duration defaultBodyTimeout = Duration(seconds: 10);
 
   /// Idle timeout of the HTTP listeners. A connection that carries no
   /// request closes between this value and twice that: the idle timer of

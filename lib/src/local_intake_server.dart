@@ -490,6 +490,23 @@ class LocalIntakeServer {
         requestTimeout,
       );
     }
+    // مهلة طور الجسم: القيمة الصريحة وحدها تُفحص — موجبة ولا تزيد على
+    // مهلة الطلب الكلية، وإلا ما كانت هي التي تنقضي أبداً؛ وبلا قيمة
+    // فالحدّ الأصغر من عشر ثوانٍ ومهلة الطلب، فلا يكسر الافتراضي مضيفاً
+    // خفّض مهلة طلبه تحت العشر بلا أن يمسّ الخيار
+    final bodyTimeout = config.bodyTimeout;
+    if (bodyTimeout != null) {
+      require(bodyTimeout > Duration.zero, 'config.bodyTimeout', bodyTimeout);
+      if (bodyTimeout > effectiveTimeout) {
+        throw ArgumentError.value(
+          bodyTimeout,
+          'config.bodyTimeout',
+          'must not exceed the request timeout ($effectiveTimeout) - a '
+              'body deadline longer than the whole pre-handler deadline '
+              'would never be the one that fires',
+        );
+      }
+    }
     require(
       config.handlerTimeout > Duration.zero,
       'config.handlerTimeout',
@@ -724,14 +741,28 @@ class LocalIntakeServer {
   late final Duration effectiveWsAuthDeadline =
       wsAuthTimeout ?? _wsAuthDeadlineDefault;
 
-  /// The total pre-handler deadline and the full-body receive timeout -
-  /// injected directly for tests; the default comes from
-  /// config.requestTimeout (the value's single source of truth).
+  /// The total pre-handler deadline - injected directly for tests; the
+  /// default comes from config.requestTimeout (the value's single source
+  /// of truth). The body read under it carries its own deadline, never
+  /// longer than this one - [effectiveBodyTimeout].
   final Duration? requestTimeout;
 
   /// The effective timeout: the parameter when given, else the package setting.
   late final Duration effectiveTimeout =
       requestTimeout ?? config.requestTimeout;
+
+  /// The body-phase deadline in force: the explicit
+  /// [BridgeConfig.bodyTimeout] when given, else the shorter of
+  /// [BridgeConfig.defaultBodyTimeout] and [effectiveTimeout] - so a host
+  /// that lowered the request timeout below ten seconds without setting
+  /// the option keeps its build, and the body limit follows it down. It
+  /// is the one value the body read derives its deadline, its timer, and
+  /// its silence timeout from.
+  late final Duration effectiveBodyTimeout =
+      config.bodyTimeout ??
+      (effectiveTimeout < BridgeConfig.defaultBodyTimeout
+          ? effectiveTimeout
+          : BridgeConfig.defaultBodyTimeout);
 
   /// The explicit "no handler deadline" marker: pass it to [handlerTimeout]
   /// to run handlers unbounded - the pre-0.2.0 meaning of null, which now
@@ -816,10 +847,10 @@ class LocalIntakeServer {
   int get _discardBudgetBytes => config.maxBodyBytes * 4;
 
   /// The short yield between the total deadline firing and the connection
-  /// cut: the body's own absolute deadline (the same value, armed moments
-  /// after this one) owns the body-read phase and answers `408` first, so
-  /// the cut waits this long and lands only if the request still hangs
-  /// past it. Internal - no option exposes it.
+  /// cut: the body's own absolute deadline (never longer than this value,
+  /// armed moments after this one) owns the body-read phase and answers
+  /// `408` first, so the cut waits this long and lands only if the
+  /// request still hangs past it. Internal - no option exposes it.
   static const _totalCutYield = Duration(milliseconds: 250);
 
   /// Safety net for every managed close: a close that has not completed
@@ -1787,7 +1818,8 @@ class LocalIntakeServer {
     }
     // الاتصالات بلا طلب نشط (keep-alive صامتة أو توقف المرسل قبل
     // اكتمال الترويسات) تُغلق بعد المهلة بدل حجزها إلى الأبد؛
-    // جسم طلب نشط تحرسه [requestTimeout] أعلى — وعلى كل مستمع
+    // جسم طلب نشط تحرسه مهلة طور الجسم [effectiveBodyTimeout] أعلى —
+    // وعلى كل مستمع
     // مربوط: النقل الثلاثة كلها تخدم نفس المعالج ونفس الحواجز
     for (final listener in [_server!, ?_serverV6, ?_serverUnix]) {
       listener.idleTimeout = config.idleTimeout;
@@ -3542,8 +3574,8 @@ class LocalIntakeServer {
     // معه عمدا.
     // المقعد يتحرر بعودة الانتظار من هنا في طور ما قبل المعالج، أما
     // القطع فتنتظر يَناً قصيراً:
-    // مهلة الجسم المطلقة (القيمة نفسها ومسلحة قبل هذه بلحظة) صاحبة
-    // الحكم في طور قراءة الجسم وردّها 408 أولى من القطع الجاف.
+    // مهلة الجسم المطلقة (لا تزيد على هذه القيمة، ومسلحة بعدها بلحظة)
+    // صاحبة الحكم في طور قراءة الجسم وردّها 408 أولى من القطع الجاف.
     await work.timeout(
       effectiveTimeout,
       onTimeout: () async {
@@ -4456,7 +4488,9 @@ class LocalIntakeServer {
   /// Reads the body with a cumulative byte counter: hitting the cap or the
   /// deadline stops reading at once (never a silent truncation); total silence
   /// is cut by the stream timeout while slow dripping is cut by the absolute
-  /// deadline - one timer armed at the read start settles the timeout on its
+  /// deadline - both derive from [effectiveBodyTimeout], the body-phase
+  /// limit that never exceeds the request timeout, and one timer armed at
+  /// the read start settles the timeout on its
   /// own, and a completion arriving after the deadline is rejected too, so an
   /// event pace under the silence window cannot stretch the read past its
   /// budget. UTF-8 after the size is settled: no string above the cap is ever built.
@@ -4484,8 +4518,11 @@ class LocalIntakeServer {
     // copy:false: لا نسخة عند add — النسخة الوحيدة عند
     // takeBytes؛ ومخازن مقاطس dart:io طازجة لكل حدث فلا مشاركة
     final builder = BytesBuilder(copy: false);
-    // أساس مونوتوني لكل طلب — لا wall-clock يتجمّد أو يقفز.
-    final deadlineMs = _now + effectiveTimeout.inMilliseconds;
+    // أساس مونوتوني لكل طلب — لا wall-clock يتجمّد أو يقفز. وموعد طور
+    // الجسم حدّه [effectiveBodyTimeout]: عشر ثوانٍ افتراضاً لا مهلة الطلب
+    // الكلية، فالمرسل الذي ينقّط جسمه بايتاً كل ثوانٍ لا يمسك مقعده
+    // ثلاثين ثانية
+    final deadlineMs = _now + effectiveBodyTimeout.inMilliseconds;
     final done = Completer<_BodyOutcome>();
     StreamSubscription? subscription;
     // الموعد المطلق مؤقّت واحد يبدأ مع القراءة: فحص onData وحده
@@ -4527,20 +4564,23 @@ class LocalIntakeServer {
 
     // مؤقت الموعد يُسند قبل الاستماع — رده يحسم عبر settle مهما كان
     // إيقاع الأحداث، والفحص داخل onData يبقى مختصراً للإيقاف الباكر.
-    deadlineTimer = Timer(effectiveTimeout, () {
+    deadlineTimer = Timer(effectiveBodyTimeout, () {
       settle(
-        TimeoutException('request body deadline exceeded', effectiveTimeout),
+        TimeoutException(
+          'request body deadline exceeded',
+          effectiveBodyTimeout,
+        ),
       );
     });
     subscription = request
-        .timeout(effectiveTimeout)
+        .timeout(effectiveBodyTimeout)
         .listen(
           (chunk) {
             if (_now >= deadlineMs) {
               settle(
                 TimeoutException(
                   'request body deadline exceeded',
-                  effectiveTimeout,
+                  effectiveBodyTimeout,
                 ),
               );
               return;
@@ -4560,7 +4600,7 @@ class LocalIntakeServer {
               settle(
                 TimeoutException(
                   'request body deadline exceeded',
-                  effectiveTimeout,
+                  effectiveBodyTimeout,
                 ),
               );
               return;
