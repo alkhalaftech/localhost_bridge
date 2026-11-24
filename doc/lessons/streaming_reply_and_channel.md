@@ -86,4 +86,4 @@ What it deliberately does not do
   the bridge's own port and its own admission step.
 - It does not leave a channel open after its check - the client closes
   its end so nothing lingers past the run.
-- No TLS, no `::1`, no real credentials - generated demo token only.
+- No TLS, no real credentials - generated demo token only.

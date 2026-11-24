@@ -69,5 +69,5 @@ What it deliberately does not do
   handler isolation as the private listener.
 - It is not a second web framework; the host here is plain dart:io
   and the package carries no framework dependency.
-- No TLS, no `::1`, no real credentials - abstract demo origin and
+- No TLS, no real credentials - abstract demo origin and
   demo commands only.

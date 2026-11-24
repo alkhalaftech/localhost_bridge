@@ -67,4 +67,4 @@ What it deliberately does not do
   gates as a listed origin.
 - It does not expose raw internal state beyond counters: no tokens,
   no origins, no request contents ever enter the page or the data.
-- No TLS, no `::1`, no real credentials - generated demo token only.
+- No TLS, no real credentials - generated demo token only.

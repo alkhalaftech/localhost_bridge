@@ -71,5 +71,5 @@ What it deliberately does not do
 - It is not a browser page. The client here is a Dart HTTP client that
   plays the page's role, including carrying the page's proof math;
   the real page-side snippet lives in the README's pairing section.
-- No TLS, no `::1`, no real credentials — abstract demo origin and
+- No TLS, no real credentials — abstract demo origin and
   demo commands only.
