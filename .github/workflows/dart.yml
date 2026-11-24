@@ -143,6 +143,7 @@ jobs:
       # evidence file and its wall time. Each line is repeated here as a
       # notice annotation, so the per-scene durations read from the public
       # API on a green run too - not only from the admin-gated job log.
+      # The idle-timeout witness prints one IDLE-BOUNDS line the same way.
       # The grep is wrapped before the count: under bash -eo pipefail a
       # grep that finds nothing (an entry without a browser) exits 1, and
       # an entry with no run is this step's pass condition. A step keeps
@@ -152,9 +153,9 @@ jobs:
         shell: bash
         if: always()
         run: |
-          (grep -E "^LAB-RUN:" "$RUNNER_TEMP/test_out.txt" || true) > "$RUNNER_TEMP/lab_runs.txt"
+          (grep -E "^(LAB-RUN|IDLE-BOUNDS):" "$RUNNER_TEMP/test_out.txt" || true) > "$RUNNER_TEMP/lab_runs.txt"
           sed -n '1,10p' "$RUNNER_TEMP/lab_runs.txt" | while IFS= read -r line; do
-            echo "::notice title=LAB-RUN::${line:0:200}"
+            echo "::notice title=lab timing::${line:0:200}"
           done
 
       - name: browser run durations past the tenth
@@ -162,7 +163,7 @@ jobs:
         if: always()
         run: |
           (sed -n '11,60p' "$RUNNER_TEMP/lab_runs.txt" || true) | while IFS= read -r line; do
-            echo "::notice title=LAB-RUN::${line:0:200}"
+            echo "::notice title=lab timing::${line:0:200}"
           done
 
   browser-lab:
@@ -232,9 +233,9 @@ jobs:
         shell: bash
         if: always()
         run: |
-          (grep -E "^LAB-RUN:" "$RUNNER_TEMP/lab_out.txt" || true) > "$RUNNER_TEMP/lab_runs_only.txt"
+          (grep -E "^(LAB-RUN|IDLE-BOUNDS):" "$RUNNER_TEMP/lab_out.txt" || true) > "$RUNNER_TEMP/lab_runs_only.txt"
           sed -n '1,10p' "$RUNNER_TEMP/lab_runs_only.txt" | while IFS= read -r line; do
-            echo "::notice title=LAB-RUN::${line:0,200}"
+            echo "::notice title=lab timing::${line:0,200}"
           done
 
       - name: browser run durations past the tenth
@@ -242,7 +243,7 @@ jobs:
         if: always()
         run: |
           (sed -n '11,60p' "$RUNNER_TEMP/lab_runs_only.txt" || true) | while IFS= read -r line; do
-            echo "::notice title=LAB-RUN::${line:0,200}"
+            echo "::notice title=lab timing::${line:0,200}"
           done
 
   release-doc-gate:
