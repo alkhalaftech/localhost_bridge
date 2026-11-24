@@ -33,7 +33,9 @@
   same moment and keeps them for its lifetime; a channel whose seat or
   share is gone by its acceptance closes with the same standing code in
   the rejection frame. `stop` closes pooled channels with the live ones
-  and waits for the pool to empty.
+  and waits for the pool to empty. The channel's accepted browser
+  handshake carries `Sec-Fetch-Mode: websocket` on the GET with
+  `Sec-Fetch-Dest` either `websocket` or `empty`.
 - Added: `BridgeConfig.maxOpenConnections` - an optional hard ceiling
   on open connections (`dart:io` never bounds them): a request arriving
   while more sockets than the cap are open answers `503`, and once the

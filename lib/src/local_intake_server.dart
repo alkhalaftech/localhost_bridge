@@ -680,7 +680,9 @@ class LocalIntakeServer {
   /// at construction. Until the credential arrives or this deadline closes
   /// the connection, the connection sits in the internal pre-auth pool - a
   /// bounded set of channels that holds no command seat - so a shorter
-  /// deadline releases its pool slot sooner.
+  /// deadline releases its pool slot sooner. A host serving the allow-all
+  /// mode, where a flood of rotating pages can keep that pool full, can
+  /// pass a shorter deadline here to hand the pool slots back sooner.
   final Duration? wsAuthTimeout;
 
   /// The effective first-message deadline of the WebSocket channel: the
