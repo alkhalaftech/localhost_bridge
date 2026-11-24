@@ -296,9 +296,14 @@ What remains:
   holds its seat until it completes. Credential-less WebSocket
   channels never join this flood: they wait in the internal channel
   pool (8 in total, min(`maxSeatsPerOrigin`, 8) per origin) that holds
-  no seat, so origin rotation fills the pool - further channels are
+  no seat, so origin rotation fills the pool — further channels are
   refused before the upgrade with the standing codes while the
-  commands stay served.
+  commands stay served. Under such a flood the refusal lasts as long
+  as the flood: commands stay served, and a new channel opens only
+  when the flood leaves a slot free. Shortening the auth deadline does
+  not free a slot — each freed slot is taken again at once — so the
+  way out is the policy: serve the channel through the listed or the
+  token policy instead of allow-all.
 - **Peak memory under origin rotation is bounded by the caps** — the
   two 10,000-entry maps plus `dart:io`'s own per-connection buffers,
   which the package does not bound.

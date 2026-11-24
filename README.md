@@ -524,7 +524,12 @@ handshake over either pool cap reads the standing `server_busy` or
 `origin_seat_limit` reply like any other pre-upgrade refusal, so a flood
 of credential-less pages (origin rotation included) can never starve the
 command seats: the worst case is channels refused temporarily while
-commands stay served. The browser cannot add headers to a handshake, so
+commands stay served. Under an allow-all flood that rotates origins the
+refusal lasts as long as the flood — commands stay served, and a new
+channel opens only when the flood leaves a slot free; shortening the
+auth deadline does not free a slot. The way out is the policy: serve the
+channel through the listed or the token policy instead of allow-all. The
+browser cannot add headers to a handshake, so
 the credential - the token or a pairing signature - travels in the first
 message (a JSON object `{"token": "..."} ` or
 `{"pairing": "id.stamp.sig"}`, within the 10 second auth deadline; the

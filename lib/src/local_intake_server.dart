@@ -710,10 +710,11 @@ class LocalIntakeServer {
   /// package internal constant; a non-positive value throws [ArgumentError]
   /// at construction. Until the credential arrives or this deadline closes
   /// the connection, the connection sits in the internal pre-auth pool - a
-  /// bounded set of channels that holds no command seat - so a shorter
-  /// deadline releases its pool slot sooner. A host serving the allow-all
-  /// mode, where a flood of rotating pages can keep that pool full, can
-  /// pass a shorter deadline here to hand the pool slots back sooner.
+  /// bounded set of channels that holds no command seat. Under a flood of
+  /// rotating pages that pool stays full whatever the deadline, because
+  /// each freed slot is taken again at once: a shorter deadline here does
+  /// not keep the pool free, and a host facing that flood serves the
+  /// channel through the listed or the token policy instead of allow-all.
   final Duration? wsAuthTimeout;
 
   /// The effective first-message deadline of the WebSocket channel: the

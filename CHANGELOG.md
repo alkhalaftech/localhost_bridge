@@ -20,33 +20,34 @@
   `Retry-After`. `0` remains the explicit documented opt-out keeping
   listed origins unquotaed. See MIGRATION-0.2.0.md for both default
   changes.
-- Security: a WebSocket channel waiting for its credential no longer
-  holds a command seat. Credential-less channels wait in a small
-  internal pool - 8 channels in total, `maxSeatsPerOrigin` (default 4)
-  per origin - and a handshake over either pool cap is refused before
-  the upgrade with the standing `503 server_busy` / `503
-  origin_seat_limit` codes, so a flood of channels that never
-  authenticates (origin rotation included) can no longer occupy the
-  command seats and answer every POST `503`: the worst case is channels
-  refused temporarily while commands stay served. At credential
-  acceptance the channel takes its seat and its origin share at the
-  same moment and keeps them for its lifetime; a channel whose seat or
-  share is gone by its acceptance closes with the same standing code in
-  the rejection frame. `stop` closes pooled channels with the live ones
-  and waits for the pool to empty. The channel's accepted browser
-  handshake carries `Sec-Fetch-Mode: websocket` on the GET with
-  `Sec-Fetch-Dest` either `websocket` or `empty`.
-- Added: live channel counters on `counters` - `wsChannels` (open
-  WebSocket channel connections right now: pooled and authenticated
-  alike) and `wsPreauthPool` (credential-less channels sitting in the
-  internal pre-auth pool right now), so a host dashboard can watch the
-  pool and a stop's harvest of it; a fully drained stop reads zero on
-  both.
-- Added: `BridgeStopReport.wsChannelsStillLive` - the WebSocket channel
-  connections still live when a stop returned (pooled and authenticated
-  alike) - counted into `stillRunning`, so a stop bounded by its timeout
-  that returns before the pool drained reports the remainder and reads
-  `fullyDrained` false instead of a silent true.
+- Security: a WebSocket channel holds no command seat before its
+  credential. Credential-less channels wait in a small internal pool -
+  8 channels in total, `maxSeatsPerOrigin` (default 4) per origin - and
+  a handshake over either pool cap is refused before the upgrade with
+  the standing `503 server_busy` / `503 origin_seat_limit` codes, so a
+  flood of channels that never authenticates (origin rotation included)
+  never occupies the command seats or turns every POST into a `503`:
+  the worst case is channels refused temporarily while commands stay
+  served. At credential acceptance the channel takes its seat and its
+  origin share at the same moment and keeps them for its lifetime; a
+  channel whose seat or share is gone by its acceptance closes with the
+  same standing code in the rejection frame. `stop` closes pooled
+  channels with the live ones and waits for the pool to empty. The
+  channel's accepted browser handshake carries `Sec-Fetch-Mode:
+  websocket` on the GET with `Sec-Fetch-Dest` either `websocket` or
+  `empty`.
+- API: two counters on `counters` - `wsChannels` (WebSocket channel
+  connections open right now, pooled and authenticated alike) and
+  `wsPreauthPool` (credential-less channels sitting in the internal
+  pre-auth pool right now) - so a host dashboard can watch the pool and
+  a stop's harvest of it; a fully drained stop reads zero on both.
+- API: `BridgeStopReport.wsPreauthPoolStillHeld` - the credential-less
+  channels still holding a pool slot when a stop returned - counted
+  into `stillRunning` beside the seats and the orphans, with no channel
+  counted twice: an authenticated channel is counted by its seat alone.
+  A stop bounded by its timeout that returns before the pool drained
+  reports the remainder and reads `fullyDrained` false instead of a
+  silent true.
 - Added: `BridgeConfig.maxOpenConnections` - an optional hard ceiling
   on open connections (`dart:io` never bounds them): a request arriving
   while more sockets than the cap are open answers `503`, and once the
