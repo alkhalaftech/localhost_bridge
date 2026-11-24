@@ -10,7 +10,7 @@ carries `403 origin_pending` with the honest `Retry-After`, the page
 honors that wait (no hammering), retries once with the same
 correlation id, and the host's answer decides. The host side is a
 deterministic simulated human
-(`example/origin_pending_page.dart:24`): the demo portal origin is
+(`example/origin_pending_page.dart:27`): the demo portal origin is
 granted exactly once on its first question, and every other origin -
 and every later question - is refused.
 
@@ -32,8 +32,10 @@ Self-check (no user, no fixed ports):
 Four checks from a real client: the page serves over http with the
 machine in it; the granted origin walks the full wire - pending,
 honoring Retry-After, one retry, granted; the consent question really
-carried an honest `Retry-After` (one second or more read from the
-wire, not assumed); and the stranger origin ends refused without any
+carried an honest `Retry-After` header on the wire - the check
+reads the header itself and refuses an absent one before parsing, so
+a fallback wait can never pose as a read (verified: with the header
+send removed, this check is the one that goes red); and the stranger origin ends refused without any
 grant. The run ends `SELF-CHECK PASSED (4 checks)` with exit 0.
 
 Interactive:
@@ -51,16 +53,17 @@ Where to look
 
 - `example/origin_pending_page.dart:48` - `_runFlow`: one round of the
   machine over the wire; it reports the states it visited, the final
-  verdict, and the `Retry-After` seconds it read.
-- `example/origin_pending_page.dart:224` - `_runSelfCheck`: the page
+  verdict, and the `Retry-After` header exactly as the wire carried it
+  (absence travels as an empty string, never as a fallback number).
+- `example/origin_pending_page.dart:227` - `_runSelfCheck`: the page
   GET and the two walks, one PASS line per check.
-- `example/origin_pending_page.dart:245` - the wiring: the policy is
+- `example/origin_pending_page.dart:246` - the wiring: the policy is
   nothing but the consent callback, and the question window is sized
   to this demo's human (`askTimeout: _humanAskWindow`, 3 seconds
   against an 1100 ms answer) - a live host keeps the 60-second
   default, but a process that must exit does not want a question
   timer outliving its checks.
-- `example/origin_pending_page.dart:327` - the mode switch that keeps
+- `example/origin_pending_page.dart:332` - the mode switch that keeps
   the interactive walk and the unattended checks on one file.
 
 What it deliberately does not do
@@ -75,4 +78,4 @@ What it deliberately does not do
   once per origin, so the refusal path stays visible every run.
 - It does not open allow-all or shortcut the question: the consent
   callback is the whole policy in this example.
-- No TLS, no `::1`, no real origins - abstract demo origins only.
+- No TLS, no real origins - abstract demo origins only.
