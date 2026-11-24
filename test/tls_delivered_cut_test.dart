@@ -260,6 +260,14 @@ void main() {
         await link.answeredFuture.timeout(const Duration(seconds: 24));
         expect(link.statusLine, contains(' 408 '));
         expect(link.text, contains('"error":"request_timeout"'));
+        expect(
+          sw.elapsed,
+          lessThan(const Duration(seconds: 15)),
+          reason:
+              'the refusal comes at the body limit (10 s on the default '
+              'config), not at the request deadline (30 s) - it came '
+              'after ${sw.elapsed.inMilliseconds} ms over $transport',
+        );
         final cut = await link.cutWithin(
           eofBound: const Duration(seconds: 6),
           resetBound: const Duration(seconds: 3),
@@ -298,7 +306,9 @@ void main() {
           reason: 'the idle timer never closes before one period',
         );
         final late = await link.cutWithin(
-          eofBound: const Duration(seconds: 5),
+          // الحدّان حدود شاهد مهلة الخمول نفسه: لا إغلاق قبل مهلة ناقص
+          // خمسين ملّي (أُثبت أعلاه)، وإغلاق قبل مهلتين وهامش ثانيتين
+          eofBound: const Duration(seconds: 4),
           resetBound: const Duration(seconds: 3),
         );
         expect(
