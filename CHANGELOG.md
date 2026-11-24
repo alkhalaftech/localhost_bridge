@@ -36,6 +36,12 @@
   and waits for the pool to empty. The channel's accepted browser
   handshake carries `Sec-Fetch-Mode: websocket` on the GET with
   `Sec-Fetch-Dest` either `websocket` or `empty`.
+- Added: live channel counters on `counters` - `wsChannels` (open
+  WebSocket channel connections right now: pooled and authenticated
+  alike) and `wsPreauthPool` (credential-less channels sitting in the
+  internal pre-auth pool right now), so a host dashboard can watch the
+  pool and a stop's harvest of it; a fully drained stop reads zero on
+  both.
 - Added: `BridgeConfig.maxOpenConnections` - an optional hard ceiling
   on open connections (`dart:io` never bounds them): a request arriving
   while more sockets than the cap are open answers `503`, and once the

@@ -371,6 +371,19 @@ void main() {
           0,
           reason: 'pooled channels hold no seat before the stop',
         );
+        // العدّادان يُقرآن بانتظار محدود: ترقية العميل تعود قبل أن ينفذ
+        // الخادم سطر تسجيل المقبس بعينه، فالقراءة المتزامنة سباق صادق
+        // مع الخطوة الخادمية لا مع العدادات
+        final pooledSeen = await waitFor(
+          () => srv.counters.wsChannels == 6 && srv.counters.wsPreauthPool == 6,
+        );
+        expect(
+          pooledSeen,
+          isTrue,
+          reason:
+              'the handle counter and the pool counter both see the six '
+              'pooled channels',
+        );
         final probes = [for (final ws in pooled) closeProbe(ws)];
         final report = await srv.stop().timeout(const Duration(seconds: 5));
         stopReportShown = true;
@@ -386,6 +399,18 @@ void main() {
           0,
           reason: 'the counters return to zero at the stop return',
         );
+        expect(
+          srv.counters.wsChannels,
+          0,
+          reason:
+              'the handle counter returns to zero - no channel socket '
+              'survives the stop',
+        );
+        expect(
+          srv.counters.wsPreauthPool,
+          0,
+          reason: 'the pool counter returns to zero at the stop return',
+        );
         expect(srv.isListening, isFalse);
         for (final probe in probes) {
           expect(
@@ -398,7 +423,11 @@ void main() {
         }
       } finally {
         if (!stopReportShown) {
-          await srv.stop().timeout(const Duration(seconds: 5));
+          try {
+            await srv.stop().timeout(const Duration(seconds: 5));
+          } on Object {
+            // فشل التنظيف بعد فشل الجسم: خطأ الجسم الأصلي أولى أن يُرى
+          }
         }
         pr.dispose();
       }

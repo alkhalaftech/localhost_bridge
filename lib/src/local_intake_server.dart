@@ -147,6 +147,8 @@ class BridgeCounters {
     required this.activeSeats,
     required this.orphanHandlers,
     required this.retiredOrphanHandlers,
+    required this.wsChannels,
+    required this.wsPreauthPool,
     required this.tlsHandshakesInFlight,
     required this.tlsSocketsCut,
     required this.tlsHandshakesDelivered,
@@ -165,6 +167,20 @@ class BridgeCounters {
   /// The subset of [orphanHandlers] retired at a previous stop's return -
   /// visible here, never counted against the live-work budget.
   final int retiredOrphanHandlers;
+
+  /// WebSocket channel connections open right now - the pooled
+  /// credential-less ones ([wsPreauthPool]) plus the authenticated ones
+  /// holding their seats. [LocalIntakeServer.stop] closes them all and
+  /// waits for the pool to empty, so a fully drained stop reads zero
+  /// here.
+  final int wsChannels;
+
+  /// Credential-less WebSocket channels sitting in the internal pre-auth
+  /// pool right now - the bounded set that holds no command seat (8 in
+  /// total, min([BridgeConfig.maxSeatsPerOrigin], 8) per origin). Origin
+  /// rotation fills it to the cap, and each pooled channel's auth
+  /// deadline closes it and frees its slot.
+  final int wsPreauthPool;
 
   /// TLS handshakes in flight right now on the secure listener: sockets
   /// accepted but still before their first record completes, plus
@@ -975,6 +991,8 @@ class LocalIntakeServer {
     activeSeats: _activeRequests,
     orphanHandlers: _activeOrphans + _retiredOrphans,
     retiredOrphanHandlers: _retiredOrphans,
+    wsChannels: _liveWsSockets.length,
+    wsPreauthPool: _wsPreauthTotal,
     tlsHandshakesInFlight:
         (_feed?.ongoingHandshakes ?? 0) + (_feedV6?.ongoingHandshakes ?? 0),
     tlsSocketsCut: _tlsSocketsCut,
