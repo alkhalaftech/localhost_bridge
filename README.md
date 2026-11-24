@@ -718,20 +718,16 @@ and a served local page's own origin arms as its `https://` spelling.
 The gate reads the first full TLS record: a first byte that is not a
 handshake record (a plain HTTP client on the TLS port) is cut at once
 with no bytes sent back, a first record declaring a length over the
-transport record maximum is cut at once, and a first record that never
-completes inside `BridgeConfig.tlsFirstRecordTimeout` (five seconds by
-default, bounds one to sixty seconds) is cut at the deadline — every
-one of those cuts lands while the socket is still unarmed, which is
-the one state where the cut reaches the wire, so a silent client and
-a slow-dripping client are destroyed on the wire, not left hanging.
-What the gate cannot do is stated honestly in the limits section
-below: a client that completes its first record and then goes silent
-is armed by then; after arming the package holds only the detached
-wrapper socket, so `destroy` and `close` on it do not reach the peer
-and `stop` does not reap it, and dart:io exposes no public API that
-hands the raw engine socket back wrapped as the `Socket` shape
-`HttpServer.listenOn` consumes — the in-flight handshake ceiling and
-the count are the bound there. This is
+transport record maximum is cut at once, and the whole handshake from
+accept to delivery is bounded by `BridgeConfig.tlsHandshakeTimeout`
+(five seconds by default, bounds one to sixty seconds) — a first
+record that never completes inside it is cut at the deadline, and so
+is a client that completes its first record and then goes silent. The
+deadline is not restarted by arriving bytes or by arming, and every
+cut closes the raw socket the transport holds, so it reaches the wire
+while the socket is unarmed and after arming alike — a silent client,
+a slow-dripping client, and an armed silent client are all cut on the
+wire, not left hanging. This is
 the condition Safari and WebKit name themselves: their
 mixed-content checker treats a plain-HTTP loopback address as insecure
 "unless loaded over HTTPS" (see the browser-support table below). The
@@ -757,9 +753,9 @@ TLS feed's tallies: handshakes in flight, sockets cut on the wire
 (cumulative), and handshakes delivered (cumulative). A socket its own
 peer abandons (connects, then closes or errors before arming) is
 destroyed at the moment of abandonment — no handle lingers — and
-`stop` reaps every socket still before arming at once and announces —
-in one line, only when the count is above zero — how many handshakes
-were left stuck past arming. A practical lab for the real-Safari witness on a mac you
+`stop` reaps every socket still completing its handshake at once —
+pre-arming and armed alike — and every reaped socket is a counted cut,
+so the in-flight count returns to zero at the stop's return. A practical lab for the real-Safari witness on a mac you
 own: `dart run tool/safari_https_loopback_lab.dart --cert <pem> --key
 <pem>` (the tool prints its steps and reads its flags; it never
 generates or installs a certificate).
@@ -1131,33 +1127,25 @@ CLI clients on Linux and macOS.
   (`BridgeConfig.listenIPv6Loopback`) and the optional unix-socket
   listener (`BridgeConfig.unixSocketPath`, Linux/macOS) join only when
   armed — never a non-loopback or network-facing address.
-- The TLS transport bounds its own handshake window, and states
-  honestly what stays outside its reach: the first full TLS record is
-  gated — a non-handshake first byte and an over-cap declared length
-  are cut at once with no bytes sent back, a silent client and a
-  slow-dripping client are cut at `BridgeConfig.tlsFirstRecordTimeout`
-  (five seconds by default, bounds one to sixty seconds), and every
-  one of those cuts lands while the socket is unarmed, which is the
-  one state where the cut reaches the wire. What the package cannot
-  build — dart:io offers no public lever for it: after arming the
-  package holds only the detached wrapper socket, so `destroy` and
-  `close` on it do not reach the peer and `stop` does not reap it, and
-  no public API hands the raw engine socket back wrapped as the
-  `Socket` shape `HttpServer.listenOn` consumes — so a client that
-  completes its first record (a real ClientHello) and then goes silent
-  holds an in-flight slot until the peer closes it. The bound there is
-  the ceiling: the TLS feed counts its in-flight handshakes into the
-  open-connection cap (`BridgeConfig.maxOpenConnections`) while that
-  option is on, and holds its own internal 64-handshake ceiling while
-  the option is off — a ceiling over the in-flight handshakes alone,
-  never over delivered connections (sixty-four completed connections
-  with the option off never refuse the next sender) — cutting the new
-  socket before arming it, and `stop` announces in one
-  line how many handshakes were left stuck past arming. A host serving
-  TLS on a hostile network reads the same honesty front to back:
-  everything before the first record is the package's to bound,
-  everything after it is bounded by ceilings and counted, never
-  silenced.
+- The TLS transport bounds its own handshake window end to end: the
+  first full TLS record is gated — a non-handshake first byte and an
+  over-cap declared length are cut at once with no bytes sent back —
+  and the whole handshake from accept to delivery is bounded by
+  `BridgeConfig.tlsHandshakeTimeout` (five seconds by default, bounds
+  one to sixty seconds): a silent client, a slow drip, and a client
+  that completes its first record and then goes silent are all cut at
+  the deadline, and every cut closes the raw socket the transport
+  holds, so it reaches the wire. The in-flight handshakes count into
+  the open-connection cap (`BridgeConfig.maxOpenConnections`) while
+  that option is on, and with the option off the transport holds its
+  own internal 64-handshake ceiling over the in-flight handshakes
+  alone — never over delivered connections (sixty-four completed
+  connections with the option off never refuse the next sender) —
+  cutting the new socket before arming it. `stop` reaps every socket
+  still completing its handshake — pre-arming and armed alike — and
+  every reaped socket is a counted cut, so the in-flight count returns
+  to zero at the stop's return and the tallies stay visible in
+  `server.counters`.
 - JSON nesting is capped in the same pre-decode pass (`maxJsonDepth`,
   default 32) — deeper bodies get the same `413 payload_too_complex`
   before `jsonDecode` runs.
@@ -1209,8 +1197,9 @@ CLI clients on Linux and macOS.
   open sockets alone; the TLS transport then holds its own internal
   64-handshake ceiling over the in-flight handshakes alone — a
   delivered connection is never counted as an in-flight handshake and
-  never refused for open sockets — because a handshake stuck past
-  arming is the one socket the server can never free by itself.
+  never refused for open sockets — and every in-flight handshake is
+  cut at `tlsHandshakeTimeout` at the latest, so the ceiling bounds a
+  transient handshake window, never a lasting hold.
 - `BridgeConfig.extraHosts` adds host authorities the server answers for
   (a bare name matches `name:boundPort` too, like the built-ins). Every
   entry must be a name you control that resolves to this machine — a

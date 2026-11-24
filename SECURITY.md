@@ -323,34 +323,29 @@ What remains:
   While the option is off the TLS transport holds an internal
   64-handshake ceiling over the in-flight handshakes alone — a
   delivered connection is never counted as an in-flight handshake and
-  is never refused for open sockets — because a handshake stuck past
-  arming is the one socket the server can never free by itself, so it
-  gets the tighter ceiling.
-- **A TLS client that completes its first record and then goes silent
-  holds a socket until the peer closes it — what the package does not
-  build, stated plainly.** The TLS gate bounds the path up to the
-  first record: a non-handshake first byte and an over-cap declared
-  length are cut at once, a silent client and a slow drip are cut at
-  `BridgeConfig.tlsFirstRecordTimeout`, and every such cut lands while
-  the socket is unarmed — the one state where the cut reaches the
-  wire. Once the first record completes, the TLS engine is armed.
-  From that moment the package holds only the detached wrapper socket:
-  `destroy` and `close` on it do not reach such a peer, and `stop`
-  cannot reap it — and dart:io exposes no public API that hands the
-  raw engine socket back wrapped as the `Socket` shape
-  `HttpServer.listenOn` consumes, so the package does not build that
-  cut. The package does not pretend otherwise. Such a client holds one
-  in-flight handshake slot until it closes on its own; the bound on
-  how many slots it can hold is the ceiling — the feed counts its
-  in-flight handshakes into `maxOpenConnections` while that option is
-  on, holds an internal 64-handshake ceiling over the in-flight
-  handshakes alone while the option is off (a delivered connection is
-  never counted as an in-flight handshake), cuts any socket that would
-  push the governing cap past its limit before arming it, and `stop`
-  announces in one line how many handshakes were left stuck past
-  arming (written only when the count is above zero). The tallies are
-  visible in `server.counters`: handshakes in flight, sockets cut on
-  the wire, and handshakes delivered.
+  is never refused for open sockets — and every in-flight handshake is
+  cut at `tlsHandshakeTimeout` at the latest, so the ceiling bounds a
+  transient handshake window, never a lasting hold.
+- **The TLS handshake window is closed at both ends.** The TLS gate
+  bounds the path up to the first record: a non-handshake first byte
+  and an over-cap declared length are cut at once, and the whole
+  handshake from accept to delivery is bounded by
+  `BridgeConfig.tlsHandshakeTimeout` — a silent client, a slow drip,
+  and a client that completes its first record and then goes silent
+  are all cut at the deadline. The deadline is not restarted by
+  arriving bytes or by arming, and every cut closes the raw socket the
+  transport still holds, so it reaches the wire while the socket is
+  unarmed and after arming alike. The in-flight handshakes count into
+  `maxOpenConnections` while that option is on; with the option off
+  the transport holds an internal 64-handshake ceiling over the
+  in-flight handshakes alone (a delivered connection is never counted
+  as an in-flight handshake), cutting any socket that would push the
+  governing cap past its limit before arming it. `stop` reaps every
+  socket still completing its handshake — pre-arming and armed alike —
+  and every reaped socket is a counted cut, so the in-flight count
+  returns to zero at the stop's return. The tallies are visible in
+  `server.counters`: handshakes in flight, sockets cut on the wire,
+  and handshakes delivered.
 
 ## Recommended setup for irreversible commands
 
