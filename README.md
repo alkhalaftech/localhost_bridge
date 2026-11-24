@@ -755,10 +755,11 @@ peer abandons (connects, then closes or errors before arming) is
 destroyed at the moment of abandonment — no handle lingers — and
 `stop` reaps every socket still completing its handshake at once —
 pre-arming and armed alike — and every reaped socket is a counted cut,
-so the in-flight count returns to zero at the stop's return. A practical lab for the real-Safari witness on a mac you
-own: `dart run tool/safari_https_loopback_lab.dart --cert <pem> --key
-<pem>` (the tool prints its steps and reads its flags; it never
-generates or installs a certificate).
+so the in-flight count returns to zero at the stop's return. A
+practical lab for the real-Safari witness on a mac you own: `dart run
+tool/safari_https_loopback_lab.dart --cert <pem> --key <pem>` (the
+tool prints its steps and reads its flags; it never generates or
+installs a certificate).
 
 **`pause()` and `resume()`** — the mobile lifecycle pair: `pause()`
 closes every bound listener under the same graceful drain `stop()` runs
