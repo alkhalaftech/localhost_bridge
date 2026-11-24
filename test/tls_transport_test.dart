@@ -612,11 +612,11 @@ void main() {
         0,
         reason: '[$mode] the plain door has no feed - no handshake tally',
       );
-      // إيقاف نظيف: بلا عالق بعد التسليح فلا سطر إعلان العالقين
+      // إيقاف نظيف: الحصاد كامل بلا سطر إعلان — العدّادات تحمل ما قُطع
       expect(
         recB.warns.where((w) => w.contains('TLS handshake')),
         isEmpty,
-        reason: '[$mode] a clean stop announces no stuck handshakes',
+        reason: '[$mode] a clean stop writes no TLS handshake warning',
       );
 
       await plain.stop();
@@ -775,21 +775,20 @@ void main() {
   );
 
   test('sixteen clients whose TLS handshake never completes hold no seat '
-      'and are cut on the wire by the first-record timeout: the next real '
+      'and are cut on the wire by the handshake deadline: the next real '
       'request is served and stop stays bounded', () async {
     // الحقيقة الجديدة بعد التلقيمة: ما قبل التسليح مملوك للحزمة — الصامت
-    // (بلا أي بايت) يُقطع على السلك عند مهلة أول سجل والتدمير يبلغه،
-    // ولا مقعد ولا عدّ اتصالات لحظه الحي كله. وما بعد التسليح لا يملك
-    // البندُ إلا الغلافَ المنفصل فدماره وإغلاقه لا يبلغان النظير ولا
-    // يحصده stop — حده السقف وسطر الإعلان عند stop، والبقية موثقة في
-    // SECURITY.md
+    // (بلا أي بايت) يُقتل على السلك عند مهلة المصافحة والمرجع الخام
+    // يبلغه، ولا مقعد ولا عدّ اتصالات لحظه الحي كله. والمسلَّح العالق
+    // (أكمل أول سجل ثم صمت) كذلك: الساعة الكاملة تعاود من لحظة التسليح
+    // فالقتل يبلغه على السلك عند المهلة، وstop يحصد الطرفين معاً
     final rec = _Rec();
     final srv = _make(
       rec: rec,
       pr: _protection('token', rec),
       config: BridgeConfig(
         maxSeatsPerOrigin: 16,
-        tlsFirstRecordTimeout: const Duration(seconds: 1),
+        tlsHandshakeTimeout: const Duration(seconds: 1),
         securityContext: _tlsContext(),
       ),
     );
@@ -826,7 +825,7 @@ void main() {
       startsWith('DEAD'),
       reason:
           'the silent client is destroyed on the wire when the '
-          'first-record timeout expires - the cut reaches the peer',
+          'handshake deadline expires - the cut reaches the peer',
     );
     for (final s in stalls) {
       s.destroy();
@@ -1095,4 +1094,104 @@ void main() {
           'plain under a TLS option',
     );
   });
+
+  test(
+    'the wrapper door answers beside the HttpServer.bindSecure '
+    'reference door: the reference reads scheme https, a null '
+    'certificate, and a loopback connectionInfo, and both doors serve',
+    () async {
+      // باب مرجعي من المستمع الآمن العام بلا حزمة بينهما: يقرأ الحقائق
+      // نفسها التي يبنيها باب الحزمة من المقبس — الشكل والموثق ومعلومات
+      // الاتصال — والبابان يخدمان تبادلة حقيقية على الحلقة
+      final ref = await HttpServer.bindSecure(
+        InternetAddress.loopbackIPv4,
+        0,
+        _tlsContext(),
+      );
+      final seen = <String, Object?>{};
+      ref.listen((req) async {
+        seen['scheme'] = req.requestedUri.scheme;
+        final info = req.connectionInfo;
+        seen['remoteIsLoopback'] = info?.remoteAddress.isLoopback;
+        seen['hasLocalPort'] = (info?.localPort ?? 0) > 0;
+        seen['certificate'] = req.certificate;
+        req.response.write('ok');
+        await req.response.close();
+      });
+      addTearDown(() async {
+        await ref.close(force: true);
+      });
+
+      final rec = _Rec();
+      final srv = _make(
+        rec: rec,
+        pr: _protection('token', rec),
+        config: BridgeConfig(
+          maxSeatsPerOrigin: 16,
+          securityContext: _tlsContext(),
+        ),
+      );
+      await srv.start(preferredPort: 0);
+      addTearDown(srv.stop);
+      final port = srv.port;
+      final ok = await _exchangeTls(
+        '127.0.0.1',
+        port,
+        _post(
+          '127.0.0.1:$port',
+          '{"data":["PRINT 1"]}',
+          origin: 'https://portal.example',
+          token: _t64,
+        ),
+      );
+      expect(
+        ok['status'],
+        200,
+        reason: 'the wrapper door serves a real TLS exchange end to end',
+      );
+      expect(ok['body'], contains('"ok":true'));
+      // تبادلة حقيقية على باب المرجع نفسه: حقائقه تُقرأ من طلب عبره حصراً
+      final refReply = await _exchangeTls(
+        '127.0.0.1',
+        ref.port,
+        'GET / HTTP/1.1\r\nHost: 127.0.0.1:${ref.port}\r\n\r\n',
+      );
+      expect(
+        refReply['status'],
+        200,
+        reason: 'the bindSecure reference door serves its own exchange',
+      );
+      expect(
+        seen['scheme'],
+        'https',
+        reason:
+            'the bindSecure reference door reads the https scheme - the '
+            'same surface the wrapper door is delivered to answer with',
+      );
+      expect(
+        seen['certificate'],
+        isNull,
+        reason:
+            'no client certificate exists on either door - the reference '
+            'request certificate is null and so is the wrapper door fact',
+      );
+      expect(
+        seen['remoteIsLoopback'],
+        true,
+        reason: 'the reference connectionInfo reads a loopback peer',
+      );
+      expect(
+        seen['hasLocalPort'],
+        true,
+        reason: 'the reference connectionInfo carries a real local port',
+      );
+      expect(
+        srv.counters.tlsHandshakesDelivered,
+        1,
+        reason:
+            'the wrapper door rode the handshake feed - the delivery path '
+            'itself is the one under test',
+      );
+    },
+  );
 }

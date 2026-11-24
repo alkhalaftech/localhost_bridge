@@ -208,10 +208,11 @@ class BridgeCounters {
 
   /// Sockets the TLS feed has cut on the wire since the server was
   /// built, cumulative: the non-handshake first byte, the over-cap
-  /// declared record length, the first-record timeout, the over-cap
-  /// accept, and stop's pre-arming harvest all land here. A peer that
-  /// disconnects on its own is not a cut, and a delivered handshake is
-  /// never a cut.
+  /// declared record length, the handshake timeout (before arming and
+  /// past it alike), the over-cap accept, and stop's harvest - the
+  /// pre-arming and the armed sockets together - all land here. A peer
+  /// that disconnects on its own is not a cut, and a delivered
+  /// handshake is never a cut.
   final int tlsSocketsCut;
 
   /// TLS handshakes completed and delivered to the intake since the
@@ -439,14 +440,15 @@ class LocalIntakeServer {
         'must not be negative - 0 is the named off value',
       );
     }
-    // مهلة أول سجل TLS بنطاق صريح: تحت الثانية يقطع مصافحات حقيقية على
-    // شبكة بطيئة، وفوق الدقيقة يعيد فتح نافذة الصامت التي أغلقها الحد —
-    // والقيمة خارج النطاق خطأ إعداد يُقال عند البناء لا مفاجأة على السلك
-    if (config.tlsFirstRecordTimeout < const Duration(seconds: 1) ||
-        config.tlsFirstRecordTimeout > const Duration(seconds: 60)) {
+    // ساعة المصافحة الكاملة بنطاق صريح: تحت الثانية يقطع مصافحات حقيقية
+    // على شبكة بطيئة، وفوق الدقيقة يعيد فتح نافذة الصامت التي أغلقها
+    // الحد — والقيمة خارج النطاق خطأ إعداد يُقال عند البناء لا مفاجأة
+    // على السلك
+    if (config.tlsHandshakeTimeout < const Duration(seconds: 1) ||
+        config.tlsHandshakeTimeout > const Duration(seconds: 60)) {
       throw ArgumentError.value(
-        config.tlsFirstRecordTimeout,
-        'config.tlsFirstRecordTimeout',
+        config.tlsHandshakeTimeout,
+        'config.tlsHandshakeTimeout',
         'must be between one second and sixty seconds - below the floor it '
             'cuts real handshakes on slow networks, above the ceiling it '
             're-opens the silent-client window the bound exists to close',
@@ -1512,13 +1514,13 @@ class LocalIntakeServer {
       (_feed?.ongoingHandshakes ?? 0) + (_feedV6?.ongoingHandshakes ?? 0);
 
   // تلقيمة جديدة فوق مستمع خام: سقفا القبول — سقف الخيار فوق المجموع
-  // الكلي مسلَّفاً، والسقف الداخلي 64 فوق الجاري حصراً والخيار مطفأً
-  // (العالق بعد التسليح لا يقدر الخادم على تحريره أبداً فيستحق سقفاً
-  // أضيق من المقابس القابلة للكنس)
-  TlsHandshakeFeed _newTlsFeed(ServerSocket raw) => TlsHandshakeFeed(
+  // الكلي مسلَّفاً، والسقف الداخلي 64 فوق المصافحات الجارية حصراً
+  // والخيار مطفأً: نافذة مصافحة عابرة يسقفها وقتها ساعة المصافحة نفسها
+  // فتستحق سقفاً أضيق من اتصالات الخدمة القائمة
+  TlsHandshakeFeed _newTlsFeed(RawServerSocket raw) => TlsHandshakeFeed(
     raw: raw,
     context: config.securityContext!,
-    firstRecordTimeout: config.tlsFirstRecordTimeout,
+    handshakeTimeout: config.tlsHandshakeTimeout,
     openConnectionCap: config.maxOpenConnections,
     inFlightHandshakeCap: TlsHandshakeFeed.internalHandshakeCap,
     openConnectionTotal: _openConnectionTotal,
@@ -1601,7 +1603,10 @@ class LocalIntakeServer {
               candidate,
             );
           } else {
-            final raw = await ServerSocket.bind(
+            // القبول الخام: RawServerSocket يسلّم التلقيمة مقابس RawSocket
+            // — المقبض الذي تبقى في يد التلقيمة حتى التسليم فيصل القتل
+            // إلى السلك في كل حالاته
+            final raw = await RawServerSocket.bind(
               InternetAddress.loopbackIPv4,
               candidate,
             );
@@ -1705,7 +1710,8 @@ class LocalIntakeServer {
             v6Only: true,
           );
         } else {
-          final rawV6 = await ServerSocket.bind(
+          // القبول الخام نفسه على باب الـ::1: نقل الباب الأول حرفاً
+          final rawV6 = await RawServerSocket.bind(
             InternetAddress.loopbackIPv6,
             _port,
             v6Only: true,
@@ -2007,28 +2013,15 @@ class LocalIntakeServer {
       await _closeListener(serverUnix, deadlineMs);
       // والمرجعان الخامان يُغلقان بيد الحزمة حصراً: listenOn لا يغلق
       // ServerSocket الممرَّر له (_closeServer=false في dart:io) — فإغلاق
-      // التلقيمة هو الذي يوقف القبول ويحصد ما قبل التسليح في كل مسار
+      // التلقيمة هو الذي يوقف القبول ويحصد ما قبل التسليح والمسلَّح
+      // معاً في كل مسار: المرجع الخام باقٍ في اليد بعد التسليح فالقتل
+      // يبلغ النظير وكل حصاد قطعةٌ معدودة
       await feed?.close();
       await feedV6?.close();
       if (serverUnix != null) {
         // ملف المقبس الذي أنشأته الحالة هذه يُرفع بعد الإغلاق: بداية
         // تالية على المسار نفسه تعيد الربط نظيفة بلا ملف عالق
         await _removeUnixSocketFile();
-      }
-      // العالق بعد التسليح: الإعلان لا الصمت — بعد التسليح لا يملك
-      // البندُ إلا الغلافَ المنفصل فدماره وإغلاقه لا يبلغان النظير
-      // ولا يحصده stop (وما قبل التسليح حصدته التلقيمة بإغلاقها
-      // بيدها)، والعدّ الصاخب هو الحقيقة الكاملة المتاحة، وسطر واحد
-      // يُكتب فقط حين العدد فوق الصفر
-      final stuckHandshakes =
-          (feed?.stuckArmingAtClose ?? 0) + (feedV6?.stuckArmingAtClose ?? 0);
-      if (stuckHandshakes > 0) {
-        telemetry.warn(
-          'intake stopped with $stuckHandshakes TLS handshake(s) stuck '
-          'past arming - the package holds only the detached wrapper and '
-          'its cut does not reach them',
-          category: BridgeCategory.network,
-        );
       }
       // قناة الويب سوكيت الحية: كل مقبس مفتوح — معتمداً يمسك مقعده
       // من المقاعد أو غير معتمد يجلس في خانة الحوض — يُغلق هنا

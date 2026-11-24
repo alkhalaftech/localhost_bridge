@@ -22,7 +22,7 @@ class BridgeConfig {
     this.listenIPv6Loopback = false,
     this.unixSocketPath,
     this.securityContext,
-    this.tlsFirstRecordTimeout = defaultTlsFirstRecordTimeout,
+    this.tlsHandshakeTimeout = defaultTlsHandshakeTimeout,
     this.healthPath,
     this.maxJsonElements = 10_000,
     this.maxJsonDepth = 32,
@@ -147,7 +147,7 @@ class BridgeConfig {
 
   /// The optional TLS transport - when non-null, the bridge's TCP listeners
   /// (the `127.0.0.1` listener and the optional `::1` listener) bind a
-  /// plain listening socket and feed it through the package's TLS
+  /// raw listening socket and feed it through the package's TLS
   /// handshake gate with this exact context, so the address the browser
   /// uses becomes `https://127.0.0.1:<port>` (and `wss://` for the
   /// WebSocket channel), and the served local pages' own origin arms as
@@ -155,10 +155,12 @@ class BridgeConfig {
   /// record: a first byte that is not a handshake record (a plain HTTP
   /// client on the TLS port) is cut at once with no bytes sent back, a
   /// first record declaring a length over the transport record maximum
-  /// is cut at once, and a first record that never completes inside
-  /// [tlsFirstRecordTimeout] is cut at the deadline - each cut lands
-  /// while the socket is unarmed, which is the one state where the cut
-  /// reaches the wire. The host supplies a ready [SecurityContext] - one
+  /// is cut at once, and the whole handshake from accept to delivery is
+  /// bounded by [tlsHandshakeTimeout] - the silent client, the slow
+  /// drip, and the client that completes its first record and then goes
+  /// silent are all cut at the deadline, and the cut closes the raw
+  /// socket the transport still holds, so it reaches the peer. The host
+  /// supplies a ready [SecurityContext] - one
   /// that already carries a certificate chain and its private key: this
   /// package never generates a certificate, never installs or trusts one,
   /// and never reads or writes any file for it; device trust in the
@@ -174,36 +176,29 @@ class BridgeConfig {
   /// - the one exception is the connection cap itself: with
   /// [maxOpenConnections] on, a new TLS connection over the cap is cut
   /// before arming with no reply, where the plain door answers `503`; TLS
-  /// terminates below the HTTP layer. One transport-level residual is
-  /// inherited from dart:io and stated honestly: after arming the package
-  /// holds only the detached wrapper socket, so `destroy` and `close` on
-  /// it do not reach the peer and `stop` does not reap it, and dart:io
-  /// exposes no public API that hands the raw engine socket back wrapped
-  /// as the `Socket` shape `HttpServer.listenOn` consumes - so a client
-  /// that sends its ClientHello and then goes silent holds its in-flight
-  /// slot until the peer closes it, bounded by the connection
-  /// cap ([maxOpenConnections] over the whole listener set while it is
-  /// on, or by the internal ceiling over the in-flight handshakes alone
-  /// while it is off), the count is visible in the counters, and `stop`
-  /// announces how many were left stuck. A context without a certificate
+  /// terminates below the HTTP layer. `stop` reaps every socket still
+  /// completing its handshake - pre-arming and armed alike - and every
+  /// reaped socket is a counted cut, so the in-flight count returns to
+  /// zero at the stop's return. A context without a certificate
   /// chain fails at connection time with dart:io's own handshake error.
   final SecurityContext? securityContext;
 
-  /// The first TLS record deadline for the TLS transport - how long a
-  /// socket accepted on the secure listener may take to complete its
-  /// first TLS record ([securityContext]'s handshake gate) before it is
-  /// cut on the wire. This bounds the silent client (connects, sends
-  /// nothing) and the slow drip (sends the record header, then trickles
-  /// bytes) - both are destroyed unarmed, so the cut reaches the peer.
-  /// The bound is the whole first record, not per byte: the deadline is
-  /// not restarted by arriving bytes. The default is five seconds, far
-  /// above any measured loopback handshake and wide enough for real
-  /// network RTT; values below one second or above sixty seconds throw
-  /// [ArgumentError] at server construction.
-  final Duration tlsFirstRecordTimeout;
+  /// The whole-handshake deadline for the TLS transport - how long a
+  /// socket accepted on the secure listener may take from its accept
+  /// to its delivery ([securityContext]'s handshake window) before it
+  /// is cut on the wire. This bounds the silent client (connects,
+  /// sends nothing), the slow drip (sends the record header, then
+  /// trickles bytes), and the armed silent client (completes its first
+  /// record, then goes quiet) alike - the deadline is not restarted by
+  /// arriving bytes or by arming, and the cut closes the raw socket the
+  /// transport still holds, so it reaches the peer in every state. The
+  /// default is five seconds, far above any measured loopback handshake
+  /// and wide enough for real network RTT; values below one second or
+  /// above sixty seconds throw [ArgumentError] at server construction.
+  final Duration tlsHandshakeTimeout;
 
-  /// The default first-record budget - see [tlsFirstRecordTimeout].
-  static const Duration defaultTlsFirstRecordTimeout = Duration(seconds: 5);
+  /// The default whole-handshake budget - see [tlsHandshakeTimeout].
+  static const Duration defaultTlsHandshakeTimeout = Duration(seconds: 5);
 
   /// The health page - when non-null, a `GET` on exactly this path is
   /// answered `200` with the literal body `{"ok":true}`: no version

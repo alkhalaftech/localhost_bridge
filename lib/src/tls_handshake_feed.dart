@@ -1,78 +1,94 @@
-// تلقيمة مصافحة TLS: باب النقل الآمن للجسر. المستمع الخام يُربط عادياً
-// والتلقيمة تحرس قبوله ثم تغذي HttpServer.listenOn بالمقابس التي أكملت
-// مصافحتها. البوابة على أول سجل TLS كاملاً لا أول بايت: البايت الأول
-// غير بدء المصافحة (0x16) عميل HTTP عادي على المنفذ الآمن فيُدمَّر
-// فوراً، والطول المعلن فوق السقف يُدمَّر فوراً، وعدم اكتمال أول سجل
-// داخل مهلة [firstRecordTimeout] يُدمَّر عند المهلة — والدمار هنا يصل
-// السلك لأنه قبل تسليح محرك TLS: تدمير المقبس يبلغ النظير قبل التسليح
-// حصراً، وبعد التسليح لا يملك البندُ إلا الغلافَ المنفصل فدماره
-// وإغلاقه لا يبلغان النظير ولا يحصده stop، ولا يقدم dart:io واجهة
-// عامة تعيد مقبس المحرك الخام إلى صورة Socket التي يستهلكها
-// HttpServer.listenOn فالبند لا يبني ذلك القتل — حده السقف الداخلي
-// والسقف الاختياري وسطر الإعلان عند stop.
+// تلقيمة مصافحة TLS: باب النقل الآمن للجسر. القبول ينزل إلى
+// RawServerSocket فتصل التلقيمة مقابس RawSocket — وهذا هو المقبض الذي
+// يُقتل: المرجع الخام يبقى في اليد من لحظة القبول حتى التسليم، فالقتل
+// (إغلاق المقبس الخام تحت المحرك) يبلغ النظير في الحالات الثلاث حصراً:
+// مهلة المصافحة، وحصاد stop، وما تجاوز مهلة الإغلاق بعدها. البوابة على
+// أول سجل TLS كاملاً لا أول بايت: البايت الأول غير بدء المصافحة (0x16)
+// عميل HTTP عادي على المنفذ الآمن فيُقتل فوراً، والطول المعلن فوق
+// السقف يُقتل فوراً — والتدميران الفوريان خارج الساعة لا تحكمهما
+// مهلة. القراءة في البوابة واحدة لكل حدث قراءة: نداء read ثانٍ بلا
+// بيانات يصطدم بتوكيد المحرك فيغلق المقبس، والنداء الواحد يأخذ كل
+// المتاح فلا بايت يفقد. التسليح بـRawSecureSocket.secureServer والاشتراك
+// القائم ينتقل للمحرك بينما البايتات المقروءة تعود إليه عبر
+// bufferedData، والتسليم محوّل فوق RawSecureSocket يرتدي شكل SecureSocket
+// لأن HttpServer.listenOn لا يستهلك غيره — بعقد إغلاق يطابق ما يبنيه
+// SecureSocket العام فوق الخام نفسه: flush يسلّم البايتات المعلقة
+// للمحرك ولا ينتظر السلك، وclose يغلق جهة الكتابة وحدها بعد التسليم
+// (shutdown(send) — جهة القراءة لا تُمسّ فوق جسم غير مقروء)، وdestroy
+// إغلاق مفاجئ للخام — وما بقي من السطح يمرّر إلى الخام، والأعضاء التي
+// لم يقسها الاستهلاك ترمي UnsupportedError باسم عضوها لا سلوكاً صامتاً
 import 'dart:async';
+import 'dart:convert';
 import 'dart:io';
+import 'dart:typed_data' show BytesBuilder, Uint8List;
 
-/// The bridge's TLS transport feed: the plain [ServerSocket] the bridge
-/// binds is wrapped here, and every accepted socket must complete the
-/// first TLS record before it is armed with `SecureSocket.secureServer`
-/// (the bytes read before arming are handed back to the TLS engine
-/// through `bufferedData`) and delivered to `HttpServer.listenOn`.
+/// The bridge's TLS transport feed: the plain [RawServerSocket] the
+/// bridge binds is wrapped here, and every accepted raw socket must
+/// complete the first TLS record before it is armed with
+/// `RawSecureSocket.secureServer` (the bytes read before arming are
+/// handed back to the TLS engine through `bufferedData`, and the
+/// existing read subscription moves to the engine with it) and
+/// delivered to `HttpServer.listenOn` wrapped as the `SecureSocket`
+/// shape that consumer requires.
 ///
 /// The gate is the first full TLS record, not the first byte: a first
-/// byte that is not a handshake record (a plain HTTP client on the TLS
-/// port) is destroyed at once, a first record declaring a length over
-/// the cap is destroyed at once, and a first record that does not
-/// complete inside the given deadline is destroyed at the deadline -
-/// all three while the socket is still unarmed, which is the one state
-/// where destroying it reaches the wire. A socket whose handshake fails
-/// after arming, or that stays silent past arming (a client that sent
-/// its ClientHello and went quiet), cannot be cut by this package:
-/// after arming the package holds only the detached wrapper socket, so
-/// destroying or closing it does not reach the peer and `stop` does not
-/// reap it, and dart:io exposes no public API that hands the raw engine
-/// socket back wrapped as the `Socket` shape `HttpServer.listenOn`
-/// consumes. Those sockets are bounded by the
-/// accept-time ceilings this feed enforces: the host's
-/// `maxOpenConnections` over the whole listener set while that option is
-/// on, or [internalHandshakeCap] over the in-flight handshakes alone
-/// while it is off - a delivered connection never counts as an in-flight
-/// handshake. They are counted while in flight and announced by the
-/// count at stop.
+/// byte that is not a handshake record (a plain HTTP client on the
+/// TLS port) is cut at once, and a first record declaring a length
+/// over the cap is cut at once - both outside the clock, at the
+/// moment of the fact. The whole handshake - from accept to delivery
+/// - is bounded by one deadline ([handshakeTimeout]): a client that
+/// sends nothing, drips its first record slowly, or completes its
+/// first record and then goes silent is cut at the deadline. The cut
+/// closes the raw socket the feed still holds, so it reaches the wire
+/// in every state: before arming, after arming, and through `stop`'s
+/// harvest. `destroy` on a delivered connection also closes the raw
+/// socket (the adapter maps it so), which is what makes the past-
+/// close-deadline cut reach the wire too.
+///
+/// The gate reads exactly once per read event: a second `read()` call
+/// without data trips the engine's own assertion and closes the raw
+/// socket, and the single call already takes everything available.
+///
+/// The accept-time ceilings stay: the host's `maxOpenConnections`
+/// over the whole listener set while that option is on, or
+/// [internalHandshakeCap] over the in-flight handshakes alone while
+/// it is off - a delivered connection never counts as an in-flight
+/// handshake. Every cut lands in the cumulative cut counter through
+/// [onCut]; every delivered handshake lands in the delivered counter
+/// through [onDelivered].
 ///
 /// The class shape is the measured narrow one: `extends Stream<Socket>`
 /// `implements ServerSocket`, and `HttpServer.listenOn` consumes exactly
 /// [listen], [port], [address], and [close]. Closing the feed stops the
-/// accept loop, destroys every socket still before arming (the harvest
-/// that reaches the wire), and closes the delivered-socket stream.
-/// `HttpServer.close` does not pass through this feed: `listenOn` never
-/// closes the socket handed to it, so the owning server closes the feed
-/// by its own hand - in `stop`, after closing the listeners and before
-/// the seats drain, and in the orphan path.
+/// accept loop, cuts every socket still in flight (pre-arming and
+/// armed alike - the raw handle is held in both states), and closes
+/// the delivered-socket stream. `HttpServer.close` does not pass
+/// through this feed: `listenOn` never closes the socket handed to
+/// it, so the owning server closes the feed by its own hand - in
+/// `stop`, after closing the listeners and before the seats drain,
+/// and in the orphan path.
 class TlsHandshakeFeed extends Stream<Socket> implements ServerSocket {
   /// The in-flight handshake ceiling while the host's
   /// `maxOpenConnections` option is off. It counts handshakes in flight
   /// only - a socket accepted but undelivered - and never a delivered
-  /// connection: a completed handshake is the intake's connection, bounded
-  /// by the host's own option and never by this ceiling. The value is
-  /// deliberately tighter than the destructible-socket ceilings: a socket
-  /// stuck past arming can never be freed by the server (after arming the
-  /// package holds only the detached wrapper socket, and destroying it
-  /// does not reach the peer), so it holds its slot forever;
-  /// one page opens at most a handful of connections to one origin; and
-  /// the ceiling stays well under an OS default file-descriptor budget
-  /// such as macOS's 256.
+  /// connection: a completed handshake is the intake's connection,
+  /// bounded by the host's own option and never by this ceiling. The
+  /// ceiling bounds the transient handshake window (every in-flight
+  /// handshake is cut at [handshakeTimeout] at the latest), so it stays
+  /// well under an OS default file-descriptor budget such as macOS's
+  /// 256 while sixty-four completed connections with the option off
+  /// never refuse the next sender.
   static const int internalHandshakeCap = 64;
 
   /// The largest first record the gate accepts: the TLS record maximum
   /// (16,384) plus the maximum expansion a handshake record may carry.
-  /// A first record declaring more is hostile or broken - destroyed
-  /// before arming, never buffered toward the engine.
+  /// A first record declaring more is hostile or broken - cut before
+  /// arming, never buffered toward the engine.
   static const int maxFirstRecordBytes = 16384 + 256;
 
-  final ServerSocket _raw;
+  final RawServerSocket _raw;
   final SecurityContext _context;
-  final Duration _firstRecordTimeout;
+  final Duration _handshakeTimeout;
   final int _openConnectionCap;
   final int _inFlightHandshakeCap;
   final int Function() _openConnectionTotal;
@@ -83,19 +99,15 @@ class TlsHandshakeFeed extends Stream<Socket> implements ServerSocket {
   final void Function(int openNow, int cap) _onOverConnectionCap;
 
   // المقابس قبل التسليح: وصلت ولم يكتمل أول سجل لها بعد — عدّها حي
-  // ودمارها يصل السلك
+  // وقطعها يصل السلك
   final Set<_PreArm> _pending = <_PreArm>{};
 
   // المقابس المسلَّحة: المحرك يتولى مصافحتها ومستقبل التسليح غير محسوم
-  // بعد — عدّها حي ودمارها لا يصل السلك
+  // بعد — عدّها حي والمرجع الخام باقٍ في اليد فالقطع يصل السلك
   final Set<_PreArm> _arming = <_PreArm>{};
 
   final StreamController<Socket> _out = StreamController<Socket>();
   bool _closed = false;
-
-  // عالق ما بعد التسليح لحظة الإغلاق: العدد الذي يعلنه stop بسطر واحد
-  // (صفر لا يُعلن) — يُقرأ بعد [close] وحصراً
-  int stuckArmingAtClose = 0;
 
   /// Builds the feed over [raw]. The callbacks are the seam to the
   /// owning server: [openConnectionTotal] reads the whole listener set -
@@ -107,9 +119,9 @@ class TlsHandshakeFeed extends Stream<Socket> implements ServerSocket {
   /// counters; the two on-over callbacks carry the rejected accept to
   /// the throttled warning line of its own position.
   TlsHandshakeFeed({
-    required ServerSocket raw,
+    required RawServerSocket raw,
     required SecurityContext context,
-    required Duration firstRecordTimeout,
+    required Duration handshakeTimeout,
     required int openConnectionCap,
     required int inFlightHandshakeCap,
     required int Function() openConnectionTotal,
@@ -120,7 +132,7 @@ class TlsHandshakeFeed extends Stream<Socket> implements ServerSocket {
     required void Function(int openNow, int cap) onOverConnectionCap,
   }) : _raw = raw,
        _context = context,
-       _firstRecordTimeout = firstRecordTimeout,
+       _handshakeTimeout = handshakeTimeout,
        _openConnectionCap = openConnectionCap,
        _inFlightHandshakeCap = inFlightHandshakeCap,
        _openConnectionTotal = openConnectionTotal,
@@ -134,24 +146,24 @@ class TlsHandshakeFeed extends Stream<Socket> implements ServerSocket {
 
   // المصافحات الجارية الآن: ما قبل التسليح والمسلَّح معاً — والعدّ
   // ينتهي لحظة تسليم المقبس إلى HttpServer فلا عدّ مزدوج مع
-  /// connectionsInfo
+  // connectionsInfo
   int get ongoingHandshakes => _pending.length + _arming.length;
 
-  void _onAccepted(Socket socket) {
+  void _onAccepted(RawSocket socket) {
     if (_closed) {
       // قبول كان في الطريق عند الإغلاق: بلا مرجع بعد الإغلاق
-      socket.destroy();
+      socket.close();
       return;
     }
     // سقفا القبول بالترتيب: سقف الخيار فوق المجموع الكلي (اتصالات
     // مسلَّمة ومصافحات جارية معاً) حين يكون مسلَّحاً، وسقف المصافحات
     // الجارية الداخلي حين يكون الخيار مطفأً حصراً — فالمسلَّم ليس
-    // مصافحة جارية أبداً ولا يعدّه السقف الداخلي — وفوق أي سقف يُدمَّر
-    // المقبس الجديد قبل تسليحه حيث يصل التدمير إلى السلك
+    // مصافحة جارية أبداً ولا يعدّه السقف الداخلي — وفوق أي سقف يُقتل
+    // المقبس الجديد قبل تسليحه حيث يصل القتل إلى السلك
     if (_openConnectionCap > 0) {
       final openNow = _openConnectionTotal();
       if (openNow + 1 > _openConnectionCap) {
-        socket.destroy();
+        socket.close();
         _onCut();
         _onOverConnectionCap(openNow + 1, _openConnectionCap);
         return;
@@ -159,7 +171,7 @@ class TlsHandshakeFeed extends Stream<Socket> implements ServerSocket {
     } else {
       final inFlightNow = _inFlightHandshakesTotal();
       if (inFlightNow + 1 > _inFlightHandshakeCap) {
-        socket.destroy();
+        socket.close();
         _onCut();
         _onOverHandshakeCap(inFlightNow + 1, _inFlightHandshakeCap);
         return;
@@ -167,23 +179,51 @@ class TlsHandshakeFeed extends Stream<Socket> implements ServerSocket {
     }
     final handshake = _PreArm(socket);
     _pending.add(handshake);
-    // المهلة على اكتمال أول سجل كاملاً من لحظة القبول: الصامت يُقطع
-    // عندها، وقاطر بايتات بطيء كذلك — والقطع لا يعاد تشغيله لكل بايت
-    handshake.deadline = Timer(_firstRecordTimeout, () => _cut(handshake));
-    handshake.subscription = socket.listen(
-      (chunk) {
-        handshake.buffered.addAll(chunk);
-        _inspect(handshake);
-      },
-      onError: (Object _) => _abandon(handshake),
-      onDone: () => _abandon(handshake),
-      cancelOnError: true,
-    );
+    // الساعة الكاملة للمصافحة من لحظة القبول: الصامت وقاطر السجل
+    // البطيء يُقتلان عندها قبل التسليح — والقطع لا يعاد تشغيله لكل بايت
+    handshake.deadline = Timer(_handshakeTimeout, () => _cut(handshake));
+    try {
+      socket.readEventsEnabled = true;
+      handshake.subscription = socket.listen(
+        (event) {
+          if (handshake.armed) {
+            // المحرك يملك المقبس بعد التسليح: لا تولٍّ ثانية
+            return;
+          }
+          if (event == RawSocketEvent.readClosed ||
+              event == RawSocketEvent.closed) {
+            // إغلاق النظير على الخام حدثٌ في الدفق لا onDone: الانصراف
+            // نفسه يسحب من العدّ ويهدم المرجع
+            _abandon(handshake);
+            return;
+          }
+          if (event != RawSocketEvent.read) {
+            return;
+          }
+          // قراءة واحدة لكل حدث قراءة: نداء read ثانٍ بلا بيانات يصطدم
+          // بتوكيد المحرك (assert(available > 0)) فيغلق المقبس عبر مسار
+          // الخطأ — والنداء الواحد يُصرِّف بنفسه كل المتاح فلا بايت يفقد
+          final chunk = socket.read();
+          if (chunk != null && chunk.isNotEmpty) {
+            handshake.buffered.addAll(chunk);
+          }
+          _inspect(handshake);
+        },
+        onError: (Object _) => _abandon(handshake),
+        onDone: () => _abandon(handshake),
+        cancelOnError: true,
+      );
+    } on Object {
+      // قبول وصل ميتاً (النظير هدم قبل إقلاع قراءته): خصائص الخام على
+      // مقبس مغلق ترمي فيضيع onDone — الانصرافُ نفسهُ يسحب من العدّ
+      // ويهدم المرجع فلا مقبض يتسرب من سباق الولادة والموت
+      _abandon(handshake);
+    }
   }
 
-  // فحص الرأس الخماسي على كل وصول: البايت الأول غير 0x16 تدمير فوري،
-  // والطول المعلن فوق السقف تدمير فوري، واكتمال الرأس والحمولة
-  // المعلنة تسليح
+  // فحص الرأس الخماسي على كل وصول: البايت الأول غير 0x16 قتل فوري،
+  // والطول المعلن فوق السقف قتل فوري، واكتمال الرأس والحمولة
+  // المعلنة تسليح — والتدميران الفوريان خارج الساعة لا تحكمهما مهلة
   void _inspect(_PreArm handshake) {
     if (handshake.armed) {
       return;
@@ -207,14 +247,14 @@ class TlsHandshakeFeed extends Stream<Socket> implements ServerSocket {
     if (bytes.length < 5 + declared) {
       return;
     }
-    _arm(handshake, bytes);
+    _arm(handshake);
   }
 
-  // القطع قبل التسليح حصراً: إلغاء المهلة والاشتراك وتدمير المقبس —
-  // والعدّ قطع تراكمي من الخادم لا من العميل الذي انصرف وحده
+  // القتل قبل التسليح حصراً: إلغاء المهلة والاشتراك وإغلاق المقبس
+  // الخام — والعدّ قطع تراكمي من الخادم لا من العميل الذي انصرف وحده
   void _cut(_PreArm handshake) {
     if (handshake.armed) {
-      // بعد التسليح لا قطع يصل السلك — لا يُكتب سلوك لا يفعل شيئاً
+      // المسلَّح قطعه موقّت المهلة المعاد أو الحصاد لا هذا المسار
       return;
     }
     if (!_pending.remove(handshake)) {
@@ -222,7 +262,7 @@ class TlsHandshakeFeed extends Stream<Socket> implements ServerSocket {
     }
     handshake.deadline?.cancel();
     handshake.subscription?.cancel();
-    handshake.socket.destroy();
+    handshake.raw.close();
     _onCut();
   }
 
@@ -235,15 +275,16 @@ class TlsHandshakeFeed extends Stream<Socket> implements ServerSocket {
     if (_pending.remove(handshake)) {
       handshake.deadline?.cancel();
       handshake.subscription?.cancel();
-      handshake.socket.destroy();
+      handshake.raw.close();
     }
   }
 
   // التسليح: البايتات المقروءة قبل التسليح تعاد للمحرك عبر
-  // bufferedData، والاشتراك ينتقل للمحرك به بينما مهلة أول سجل تُلغى،
-  // والعدّ يبقى
-  // على المقبس حتى يُسلَّم إلى HttpServer أو تفشل المصافحة
-  void _arm(_PreArm handshake, List<int> bytes) {
+  // bufferedData والاشتراك ينتقل إليه به، والساعة تعاود من لحظة
+  // التسليح: القتل الخام للمسلَّح هو الذي يصل السلك — العالق بعد
+  // التسليح يُقتل عند المهلة لا يُترك بلا سقف، والعدّ يبقى على المقبس
+  // حتى يُسلَّم إلى HttpServer أو تفشل المصافحة
+  void _arm(_PreArm handshake) {
     if (!_pending.remove(handshake)) {
       // سبقه الإغلاق أو الانصراف: لا تسليح بعد لا مرجع
       return;
@@ -251,56 +292,70 @@ class TlsHandshakeFeed extends Stream<Socket> implements ServerSocket {
     handshake.armed = true;
     handshake.deadline?.cancel();
     _arming.add(handshake);
-    // إيقاف اشتراك القراءة مؤقتاً قبل نداء التسليح لا إلغاءه أبداً:
-    // عقد التسليح في dart:io أن الاشتراك القائم على المقبس لا يستقبل
-    // بعده أحداً والإيقاف المؤقت هو الشكل الصحيح قبل النداء — وإلغاؤه
-    // قبل التسليح يفشل المصافحة فوراً على السلك
-    handshake.subscription?.pause();
-    SecureSocket.secureServer(
-      handshake.socket,
+    handshake.deadline = Timer(_handshakeTimeout, () {
+      if (_arming.remove(handshake)) {
+        // القتل: إغلاق المقبس الخام تحت المحرك — يبلغ النظير على السلك
+        handshake.raw.close();
+        _onCut();
+      }
+    });
+    RawSecureSocket.secureServer(
+      handshake.raw,
       _context,
-      bufferedData: bytes,
+      subscription: handshake.subscription,
+      bufferedData: handshake.buffered,
     ).then<void>(
       (secure) {
-        _arming.remove(handshake);
+        if (!_arming.remove(handshake)) {
+          // حسم وصل بعد قتل المهلة أو الحصاد: لا تسليم بعد لا مرجع
+          unawaited(secure.close());
+          return;
+        }
+        handshake.deadline?.cancel();
         if (_closed) {
-          // تسليم وصل بعد الإغلاق: بلا مستمع — تدمير فوري
-          secure.destroy();
+          // تسليم وصل بعد الإغلاق: بلا مستمع — إغلاق فوري
+          unawaited(secure.close());
           return;
         }
         // العدّ ينتهي هنا لحظة التسليم: يُعدّ من الآن في connectionsInfo
         // وحده، والتلقيمة لا تعدّه ثانية
         _onDelivered();
-        _out.add(secure);
+        _out.add(_RawSecureAdapter(secure));
       },
-      // المصافحة الفاشلة تنقص العدّ: المقعد تحرر للمرسل التالي
-      onError: (Object _) => _arming.remove(handshake),
+      onError: (Object _) {
+        // المصافحة الفاشلة تنقص العدّ: المقعد تحرر للمرسل التالي —
+        // والمحرك أغلق الخام عند الخطأ بنفسه
+        _arming.remove(handshake);
+      },
     );
   }
 
-  // الإغلاق: إيقاف القبول، وحصد كل ما قبل التسليح فوراً (تدمير يصل
-  // السلك، وقطعٌ محسوب لكل مقبس محصود)، وتسجيل عدد العالق بعد
-  // التسليح للإعلان، وإنهاء مستقبل التسليم. نداء HttpServer.close لا
-  // يمر من هنا: المستمع الممرَّر له لا يُغلق من عنده، فالمالك هو من
-  // يغلق التلقيمة بيده في stop وفي مسار اليتامى.
+  // الإغلاق: إيقاف القبول، وحصد كل ما في الطريق — ما قبل التسليح
+  // والمسلَّح معاً: المرجع الخام باقٍ في اليد في الحالتين فالقتل يبلغ
+  // النظير، وكل حصاد قطعةٌ معدودة. نداء HttpServer.close لا يمر من
+  // هنا: المستمع الممرَّر له لا يُغلق من عنده، فالمالك هو من يغلق
+  // التلقيمة بيده في stop وفي مسار اليتامى.
   @override
   Future<ServerSocket> close() async {
     _closed = true;
-    stuckArmingAtClose = _arming.length;
     for (final handshake in _pending.toList()) {
       _pending.remove(handshake);
       handshake.deadline?.cancel();
       handshake.subscription?.cancel();
-      handshake.socket.destroy();
+      handshake.raw.close();
       _onCut();
     }
-    // مقابس المسلَّح هنا على الغلاف المنفصل فتدميرها من هنا لا يبلغ
-    // السلك شيئاً — وحسمها على مستقبل التسليح نفسه: ما سلّم بعد
-    // الإغلاق يُدمَّر لحظة وصوله، وما علق يبقى بإعلان العدد قبله
-    _arming.clear();
-    final closed = await _raw.close();
+    for (final handshake in _arming.toList()) {
+      _arming.remove(handshake);
+      handshake.deadline?.cancel();
+      handshake.raw.close();
+      _onCut();
+    }
+    await _raw.close();
     await _out.close();
-    return closed;
+    // العائد عقد ServerSocket.close نفسه: التلقيمة ذاتها المغلقة —
+    // فالخام ليس ServerSocket (عنصرا دفقه مختلفان)
+    return this;
   }
 
   @override
@@ -323,14 +378,280 @@ class TlsHandshakeFeed extends Stream<Socket> implements ServerSocket {
   InternetAddress get address => _raw.address;
 }
 
-// حالة مقبس واحد قبل حسم مصافحته: البايتات المجموعة، ومهلة أول سجل،
-// واشتراك القراءة، وعلم التسليح الذي يمنع أي قطع بعده
+// حالة مقبس واحد قبل حسم مصافحته: البايتات المجموعة، وساعة المصافحة
+// الكاملة، واشتراك القراءة، وعلم التسليح الذي يمنع أي قطع من بوابة
+// القراءة بعده
 class _PreArm {
-  final Socket socket;
+  final RawSocket raw;
   final List<int> buffered = <int>[];
   Timer? deadline;
-  StreamSubscription<List<int>>? subscription;
+  StreamSubscription<RawSocketEvent>? subscription;
   bool armed = false;
 
-  _PreArm(this.socket);
+  _PreArm(this.raw);
+}
+
+/// A `SecureSocket`-shaped adapter over a `RawSecureSocket` - the
+/// delivery shape `HttpServer.listenOn` consumes, since `RawSecureSocket`
+/// itself is neither a `Socket` nor wrapped by any public dart:io API.
+/// Reads flow through a pausable controller that honors the consumer's
+/// backpressure by toggling the raw read events; writes go through the
+/// non-blocking raw write and wait for WRITE events when the kernel
+/// buffer is full. The closing contract mirrors what the public
+/// `SecureSocket` builds over the same raw socket: `flush` hands every
+/// buffered byte to the engine and completes without waiting for the
+/// wire, `close` shuts the write side alone after the hand-off (the
+/// read side stays open over an unread body), and `destroy` closes the
+/// raw socket outright. Members no consumption ever invoked throw an
+/// `UnsupportedError` naming the member - a named error, never silent
+/// behavior - and everything else passes through to the raw socket.
+class _RawSecureAdapter implements SecureSocket {
+  _RawSecureAdapter(this.raw) : _rp = raw.remotePort {
+    _out = StreamController<Uint8List>(
+      sync: true,
+      onListen: () {
+        _g(() => raw.readEventsEnabled = true);
+      },
+      onPause: () {
+        _g(() => raw.readEventsEnabled = false);
+      },
+      onResume: () {
+        _g(() => raw.readEventsEnabled = true);
+      },
+      onCancel: () {
+        _g(() => raw.readEventsEnabled = false);
+        unawaited(_sub.cancel());
+      },
+    );
+    _sub = raw.listen(
+      _onRawEvent,
+      onError: (Object e, StackTrace s) {
+        _out.addError(e, s);
+      },
+      onDone: () {
+        _out.close();
+      },
+    );
+  }
+
+  final RawSecureSocket raw;
+
+  // منفذ النظير يُلتقط عند البناء: قراءة الخام بعد إغلاقه ترمي، والتقطيع
+  // المبكر يجعل أعضاء العنوان تقرأ حقها من اليد لا من مقبس ميت
+  final int _rp;
+  late final StreamController<Uint8List> _out;
+  late final StreamSubscription<RawSocketEvent> _sub;
+  final Encoding _encoding = utf8;
+  Completer<void>? _writeReady;
+  bool _rawDead = false;
+
+  /// A raw access after the raw closed throws SocketException.closed;
+  /// inside a controller callback that would surface as an unhandled
+  /// error. The guard marks the adapter dead and swallows that one
+  /// exception shape.
+  T? _g<T>(T Function() f) {
+    if (_rawDead) return null;
+    try {
+      return f();
+    } on SocketException catch (_) {
+      _rawDead = true;
+      return null;
+    }
+  }
+
+  void _onRawEvent(RawSocketEvent event) {
+    if (_rawDead) return;
+    if (event == RawSocketEvent.read) {
+      // الصب حتى null داخل حدث القراءة الواحد: المحرك الآمن يعيد null
+      // بلا توكيد قاتل على عكس الخام قبل التسليح
+      Uint8List? chunk;
+      while ((chunk = _g<Uint8List?>(() => raw.read())) != null) {
+        if (chunk!.isNotEmpty) _out.add(chunk);
+      }
+    } else if (event == RawSocketEvent.write) {
+      final ready = _writeReady;
+      _writeReady = null;
+      if (_rest.isNotEmpty && !_writing) {
+        unawaited(_drainRest());
+      }
+      ready?.complete();
+    } else if (event == RawSocketEvent.readClosed ||
+        event == RawSocketEvent.closed) {
+      _out.close();
+    }
+  }
+
+  final BytesBuilder _rest = BytesBuilder(copy: false);
+  bool _writing = false;
+
+  // الكتابة العابرة: ما أخذته عازلة النواة يخرج فوراً والبقية تنتظر
+  // حدث الكتابة — مسارات القطع تدمّر المقبس بعد كتابة ردها مباشرة فالرد
+  // يجب أن يبلغ السلك داخل add لا بعدها
+  void _enqueue(List<int> data) {
+    if (_rest.isEmpty && !_writing) {
+      final n = raw.write(data);
+      if (n >= data.length) return;
+      _rest.add(data.sublist(n));
+    } else {
+      _rest.add(data);
+    }
+    raw.writeEventsEnabled = true;
+  }
+
+  Future<void> _drainRest() async {
+    while (_rest.isNotEmpty) {
+      final buf = _rest.takeBytes();
+      var off = 0;
+      _writing = true;
+      while (off < buf.length) {
+        final n = raw.write(buf, off, buf.length - off);
+        off += n;
+        if (off < buf.length) {
+          raw.writeEventsEnabled = true;
+          _writeReady ??= Completer<void>();
+          await _writeReady!.future;
+          _writeReady = null;
+        }
+      }
+      _writing = false;
+      if (_rest.isEmpty) break;
+    }
+  }
+
+  @override
+  StreamSubscription<Uint8List> listen(
+    void Function(Uint8List event)? onData, {
+    Function? onError,
+    void Function()? onDone,
+    bool? cancelOnError,
+  }) => _out.stream.listen(
+    onData,
+    onError: onError,
+    onDone: onDone,
+    cancelOnError: cancelOnError,
+  );
+
+  @override
+  Future<Socket> close() async {
+    await _drainRest();
+    // عقد الإغلاق العادي: تسليم كل بايت معلّق للمحرك ثم إغلاق جهة
+    // الكتابة وحدها (shutdown(send)) — وجهة القراءة لا تُمسّ فوق جسم
+    // غير مقروء فلا إعادة تعيين تقتل الرد الذي سلّمه المحرك للتو
+    _g(() => raw.shutdown(SocketDirection.send));
+    return this;
+  }
+
+  @override
+  void destroy() {
+    // الإغلاق المفاجئ: إغلاق الخام بلا ترتيب — الحزمة لا تنادي إلا بعد
+    // تفريغها المحدود للجسم غير المقروء فلا شيء يبقى غير مقروء عندها
+    _rawDead = true;
+    _g(() => raw.close());
+  }
+
+  @override
+  Future<void> flush() async {
+    // تسليم كل بايت معلّق للمحرك بلا انتظار السلك: المحرك يُخرج ما
+    // سُلّم إليه أثناء معالجة أحداثه
+    await _drainRest();
+  }
+
+  @override
+  void add(List<int> data) {
+    _enqueue(Uint8List.fromList(data));
+  }
+
+  @override
+  void addError(Object error, [StackTrace? stackTrace]) =>
+      throw UnsupportedError('_RawSecureAdapter.addError is not supported');
+
+  @override
+  Future<void> addStream(Stream<List<int>> stream) async {
+    await for (final chunk in stream) {
+      _enqueue(Uint8List.fromList(chunk));
+      await _drainRest();
+    }
+  }
+
+  @override
+  void write(Object? object) =>
+      throw UnsupportedError('_RawSecureAdapter.write is not supported');
+
+  @override
+  void writeAll(Iterable objects, [String separator = '']) =>
+      throw UnsupportedError('_RawSecureAdapter.writeAll is not supported');
+
+  @override
+  void writeln([Object? object = '']) =>
+      throw UnsupportedError('_RawSecureAdapter.writeln is not supported');
+
+  @override
+  void writeCharCode(int charCode) => throw UnsupportedError(
+    '_RawSecureAdapter.writeCharCode is not supported',
+  );
+
+  @override
+  Encoding get encoding => _encoding;
+
+  @override
+  set encoding(Encoding value) =>
+      throw UnsupportedError('_RawSecureAdapter.encoding is not supported');
+
+  @override
+  Future<Socket> get done =>
+      throw UnsupportedError('_RawSecureAdapter.done is not supported');
+
+  /// Not part of the `SecureSocket` surface - declared to keep any
+  /// dynamic call on the named error path instead of a silent miss.
+  void shutdown(SocketDirection direction) =>
+      throw UnsupportedError('_RawSecureAdapter.shutdown is not supported');
+
+  @override
+  bool setOption(SocketOption option, bool enabled) =>
+      raw.setOption(option, enabled);
+
+  @override
+  Uint8List getRawOption(RawSocketOption option) => raw.getRawOption(option);
+
+  @override
+  void setRawOption(RawSocketOption option) => raw.setRawOption(option);
+
+  @override
+  int get port => raw.port;
+
+  @override
+  int get remotePort => _rp;
+
+  @override
+  InternetAddress get remoteAddress => raw.remoteAddress;
+
+  @override
+  InternetAddress get address => raw.address;
+
+  @override
+  X509Certificate? get peerCertificate => raw.peerCertificate;
+
+  @override
+  String? get selectedProtocol => raw.selectedProtocol;
+
+  @override
+  // ignore: deprecated_member_use
+  void renegotiate({
+    bool useSessionCache = true,
+    bool requestClientCertificate = false,
+    bool requireClientCertificate = false,
+  }) =>
+      // ignore: deprecated_member_use
+      raw.renegotiate(
+        useSessionCache: useSessionCache,
+        requestClientCertificate: requestClientCertificate,
+        requireClientCertificate: requireClientCertificate,
+      );
+
+  @override
+  dynamic noSuchMethod(Invocation invocation) {
+    throw UnsupportedError(
+      '_RawSecureAdapter: ${invocation.memberName} is not implemented',
+    );
+  }
 }

@@ -541,14 +541,21 @@
   accepts one request and one pairing proof passes once, whatever the
   concurrency. Records whose facts are unchanged settle exactly as
   before.
-- API: `BridgeConfig.tlsFirstRecordTimeout` (default five seconds,
+- Security: the TLS handshake window is closed at both ends - the
+  whole handshake from accept to delivery is bounded by the transport
+  deadline, so a client that completes its first record and then goes
+  silent is cut on the wire at the deadline exactly like the never-
+  started and the slow-dripping client, and `stop` reaps every socket
+  still completing its handshake - pre-arming and armed alike - so the
+  in-flight count returns to zero at the stop's return and every
+  reaped socket is a counted cut.
+- API: `BridgeConfig.tlsHandshakeTimeout` (default five seconds,
   bounds one to sixty seconds, `ArgumentError` outside at
-  construction) bounds the TLS transport's first-record window; the
+  construction) bounds the TLS transport's whole-handshake window; the
   three TLS counters on `server.counters` are named
   `tlsHandshakesInFlight`, `tlsSocketsCut`, and
-  `tlsHandshakesDelivered`; while `maxOpenConnections` is on it counts
-  in-flight TLS handshakes too; and `stop` announces in one line the
-  TLS handshakes left stuck past arming.
+  `tlsHandshakesDelivered`; and while `maxOpenConnections` is on it
+  counts in-flight TLS handshakes too.
 
 ## 0.1.3
 

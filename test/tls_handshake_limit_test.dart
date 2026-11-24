@@ -1,11 +1,14 @@
-// حدّ مصافحة TLS على باب الجسر الآمن: التلقيمة تلف المستمع الخام وتغذي
-// HttpServer.listenOn بعد بوابة أول سجل — أول بايت غير بدء مصافحة يُقطع
-// فوراً بلا أي بايت من الخادم، والسجل المعلن فوق السقف يُقطع فوراً،
-// والصامت وقاطر السجل البطيء يُقطعان عند المهلة والقطع يبلغ السلك
-// (التدمير يصل السلك قبل تسليح المحرك حصراً)، والسقف يمنع المقبس الجديد
-// قبل التسليح، وstop يحصد ما قبل التسليح فوراً ويعلن العالق بعد التسليح
-// سطراً واحداً. المسبار الحاكم في كلها من العميل نفسه: خطأ سريع = ميت
-// على السلك، صمت = حي، نجاح TLS = حي ويجيب.
+// حدّ مصافحة TLS على باب الجسر الآمن: التلقيمة تقبل خاماً وتغذي
+// HttpServer.listenOn بعد بوابة أول سجل — أول بايت غير بدء مصافحة يُقتل
+// فوراً بلا أي بايت من الخادم، والسجل المعلن فوق السقف يُقتل فوراً،
+// والساعة الكاملة للمصافحة (من القبول إلى التسليم) تقتل الصامت وقاطر
+// السجل البطيء والعالق بعد التسليح معاً عند المهلة — والمرجع الخام باقٍ
+// في يد التلقيمة حتى التسليم فالقتل يبلغ السلك في كل حالاته، والسقف
+// يمنع المقبس الجديد قبل التسليح، وstop يحصد ما قبل التسليح والمسلَّح
+// معاً. المسبار الحاكم في كلها من العميل نفسه: خطأ سريع = ميت على
+// السلك، صمت = حي، نجاح TLS = حي ويجيب — وعلى المسلَّح حصراً الإنصات
+// السلبي هو القياس الصادق (المسبار المرسل يستفزّ المحرك فيغلق بروتوكول-
+// خطأ فيقرأ ميتاً والمقبس حيّ).
 import 'dart:async';
 import 'dart:convert';
 import 'dart:io';
@@ -160,12 +163,12 @@ String _post(String host, String body) =>
     '\r\n$body';
 
 void main() {
-  test('a silent TLS client is cut on the wire when the first-record '
-      'timeout expires: the client-side probe dies fast', () async {
+  test('a silent TLS client is cut on the wire when the handshake '
+      'deadline expires: the client-side probe dies fast', () async {
     final srv = _make(
       rec: null,
       config: BridgeConfig(
-        tlsFirstRecordTimeout: const Duration(seconds: 1),
+        tlsHandshakeTimeout: const Duration(seconds: 1),
         securityContext: tlsContext(),
       ),
     );
@@ -182,17 +185,17 @@ void main() {
       probe,
       startsWith('DEAD'),
       reason:
-          'the first-record timeout cut reaches the wire while the TLS '
+          'the handshake deadline cut reaches the wire while the TLS '
           'engine never armed - the probe fails fast, it never hangs',
     );
   });
 
-  test('a ClientHello dripped slower than the first-record timeout is cut '
+  test('a ClientHello dripped slower than the handshake deadline is cut '
       'before arming: the probe dies', () async {
     final srv = _make(
       rec: null,
       config: BridgeConfig(
-        tlsFirstRecordTimeout: const Duration(seconds: 1),
+        tlsHandshakeTimeout: const Duration(seconds: 1),
         securityContext: tlsContext(),
       ),
     );
@@ -229,7 +232,7 @@ void main() {
     expect(
       srv.counters.tlsSocketsCut,
       1,
-      reason: 'the drip was cut exactly once at the first-record deadline',
+      reason: 'the drip was cut exactly once at the handshake deadline',
     );
     expect(
       srv.counters.tlsHandshakesInFlight,
@@ -282,7 +285,7 @@ void main() {
       lessThan(const Duration(milliseconds: 2500)),
       reason:
           'the non-handshake first byte is destroyed immediately - the '
-          'close reaches the client inside half the first-record timeout',
+          'close reaches the client inside half the handshake deadline',
     );
     // مهلة تسوية: أي بايتات متأخرة من الخادم لو كانت قادمة لوصلت الآن
     await Future<void>.delayed(const Duration(milliseconds: 300));
@@ -321,10 +324,10 @@ void main() {
     );
   });
 
-  test('tlsFirstRecordTimeout bounds are enforced at construction: below '
+  test('tlsHandshakeTimeout bounds are enforced at construction: below '
       'one second and above sixty seconds throw ArgumentError, the bounds '
       'themselves construct', () {
-    BridgeConfig build(Duration d) => BridgeConfig(tlsFirstRecordTimeout: d);
+    BridgeConfig build(Duration d) => BridgeConfig(tlsHandshakeTimeout: d);
     expect(
       () => LocalIntakeServer(
         telemetry: const SilentTelemetry(),
@@ -377,7 +380,7 @@ void main() {
       rec: rec,
       config: BridgeConfig(
         maxOpenConnections: 2,
-        tlsFirstRecordTimeout: const Duration(seconds: 1),
+        tlsHandshakeTimeout: const Duration(seconds: 1),
         securityContext: tlsContext(),
       ),
     );
@@ -451,8 +454,9 @@ void main() {
     final srv = _make(
       rec: null,
       config: BridgeConfig(
-        // maxOpenConnections مطفأ: السقف الداخلي هو الحاكم
-        tlsFirstRecordTimeout: const Duration(seconds: 1),
+        // maxOpenConnections مطفأ: السقف الداخلي هو الحاكم — والملء
+        // بالمهلة الافتراضية: الساعة الكاملة تقتل المسلَّح أيضاً فالملء
+        // كله يبقى داخل نافذتها
         securityContext: tlsContext(),
       ),
     );
@@ -503,16 +507,15 @@ void main() {
     );
   });
 
-  test('stop reaps the pre-arming sockets at once and announces the stuck '
-      'past-arming count in exactly one line with the exact count', () async {
-    final rec = _Rec();
+  test('stop reaps the pre-arming and the armed sockets on the wire at '
+      'once: every held client reads dead once stop returns', () async {
     final srv = _make(
-      rec: rec,
+      rec: null,
       config: BridgeConfig(securityContext: tlsContext()),
     );
     final hello = await captureClientHello();
     await srv.start(preferredPort: 0);
-    // صامتان قبل التسليح وعالقان بعد التسليح
+    // صامتان قبل التسليح وعالقان بعد التسليح: الحصاد يشمل الطرفين
     final silent1 = await Socket.connect(
       InternetAddress.loopbackIPv4,
       srv.port,
@@ -525,11 +528,25 @@ void main() {
     unawaited(silent2.done.catchError((Object _) {}));
     final stuck1 = await replayClientHello(hello, srv.port);
     final stuck2 = await replayClientHello(hello, srv.port);
+    // مسبار الإغلاق السلبي على العالقين المسلَّحين: يُلحق مبكراً ولا
+    // يرسل بايتاً — المسبار الاستفزازي يستفزّ محرك TLS فيقرأ ميتاً
+    // والمقبس حيّ، فالإنصات لوصول إغلاق النظير هو القياس الصادق هنا
+    final close1 = watchPeerClose(stuck1);
+    final close2 = watchPeerClose(stuck2);
     await Future<void>.delayed(const Duration(milliseconds: 600));
     await srv.stop().timeout(const Duration(seconds: 5));
-    // ما قبل التسليح ميت على السلك فور عودة stop
+    // كل المقبول ميت على السلك فور عودة stop: ما قبل التسليح والمسلَّح
+    // معاً — المقبض الخام باقٍ في اليد بعد التسليح فالحصاد يبلغه
     final probe1 = await wireProbe(silent1);
     final probe2 = await wireProbe(silent2);
+    final sawClose1 = await close1.future.timeout(
+      const Duration(milliseconds: 2000),
+      onTimeout: () => false,
+    );
+    final sawClose2 = await close2.future.timeout(
+      const Duration(milliseconds: 2000),
+      onTimeout: () => false,
+    );
     silent1.destroy();
     silent2.destroy();
     stuck1.destroy();
@@ -546,25 +563,194 @@ void main() {
       startsWith('DEAD'),
       reason: 'every pre-arming socket is harvested, not only the first',
     );
-    // سطر واحد بالضبط يعلن العالق بعد التسليح بعدد صحيح مطابق
-    final stuckLines = rec.warns
-        .where((w) => w.contains('TLS handshake'))
-        .toList();
     expect(
-      stuckLines,
-      hasLength(1),
+      sawClose1,
+      true,
       reason:
-          'exactly one line announces the stuck past-arming count - no '
-          'per-socket spam and no silence',
+          'stop reaps the armed sockets on the wire too - the raw handle '
+          'is still held after arming, so the harvest reaches the peer '
+          'and its connection closes',
     );
     expect(
-      stuckLines.single,
-      contains('with 2 TLS handshake(s) stuck past arming'),
-      reason:
-          'the announced line carries the exact phrase with the exact '
-          'count - two armed-stuck handshakes',
+      sawClose2,
+      true,
+      reason: 'every armed socket is reaped, not only the first',
     );
   });
+
+  test('a silent armed client is cut on the wire at the handshake '
+      'deadline: the client-side probe dies fast', () async {
+    final srv = _make(
+      rec: null,
+      config: BridgeConfig(
+        tlsHandshakeTimeout: const Duration(seconds: 1),
+        securityContext: tlsContext(),
+      ),
+    );
+    final hello = await captureClientHello();
+    await srv.start(preferredPort: 0);
+    addTearDown(srv.stop);
+    // سجل أول كامل ثم صمت للأبد: الساعة الكاملة للمصافحة تسري على
+    // المسلَّح أيضاً فيُقطع على السلك عند المهلة لا يُترك حيّاً —
+    // والقياس بالمسبار السلبي: وصول إغلاق النظير هو الميت على السلك
+    final stuck = await replayClientHello(hello, srv.port);
+    unawaited(stuck.done.catchError((Object _) {}));
+    final close = watchPeerClose(stuck);
+    await Future<void>.delayed(const Duration(milliseconds: 2200));
+    final sawClose = await close.future.timeout(
+      const Duration(milliseconds: 500),
+      onTimeout: () => false,
+    );
+    stuck.destroy();
+    expect(
+      sawClose,
+      true,
+      reason:
+          'the whole-handshake deadline keeps running past arming - the '
+          'armed silent client is cut on the wire at the deadline, so '
+          'its connection closes instead of hanging open',
+    );
+  }, timeout: const Timeout(Duration(seconds: 20)));
+
+  test('the feed count returns to zero after stop reaps the armed '
+      'sockets: the armed harvest counts its cuts', () async {
+    final srv = _make(
+      rec: null,
+      config: BridgeConfig(securityContext: tlsContext()),
+    );
+    final hello = await captureClientHello();
+    await srv.start(preferredPort: 0);
+    // عالقان مسلَّحان ما يزالان موصولين: العدّ ينزل صفراً لحظة عودة
+    // stop بالحصاد لا بمسح أعمى — وكل مقبس محصود قطعةٌ معدودة
+    final stuck1 = await replayClientHello(hello, srv.port);
+    final stuck2 = await replayClientHello(hello, srv.port);
+    await Future<void>.delayed(const Duration(milliseconds: 600));
+    final cutBefore = srv.counters.tlsSocketsCut;
+    await srv.stop().timeout(const Duration(seconds: 5));
+    expect(
+      srv.counters.tlsHandshakesInFlight,
+      0,
+      reason:
+          'the count returns to zero at the stop return - the arming set '
+          'is drained by the harvest',
+    );
+    expect(
+      srv.counters.tlsSocketsCut - cutBefore,
+      2,
+      reason:
+          'the armed harvest is a counted cut per reaped socket - the '
+          'count returns to zero because the sockets were cut on the '
+          'wire, never by a silent clear',
+    );
+    stuck1.destroy();
+    stuck2.destroy();
+  });
+
+  test('cycling stop and start three times with the internal cap filled '
+      'by two armed-stuck clients keeps process handles at their '
+      'pre-flood level and reads every old armed client dead', () async {
+    final srv = _make(
+      rec: null,
+      config: BridgeConfig(
+        // مهلة السقف الكاملة: القاتل الوحيد في هذا الشاهد هو stop —
+        // ساعة المصافحة لا تُسبقه إلى العالقين المسلَّحين
+        tlsHandshakeTimeout: const Duration(seconds: 60),
+        securityContext: tlsContext(),
+      ),
+    );
+    final hello = await captureClientHello();
+    await srv.start(preferredPort: 0);
+    addTearDown(srv.stop);
+    final before = _openHandles();
+    if (before == null) {
+      // في CI لا يتخطى الشاهد: كل منصة تُجري عليها الاختبارات يجب أن تُقرأ
+      // عدّتها، والفشل المسمّى أصدق من نجاحٍ بلا قياس
+      if (Platform.environment['CI'] == 'true') {
+        expect(
+          before,
+          isNotNull,
+          reason:
+              'CI must read a process handle or descriptor count on every '
+              'platform it runs - a skip here would make the green job prove '
+              'nothing',
+        );
+      }
+      markTestSkipped(
+        'this platform exposes no process handle or descriptor count this '
+        'witness can read locally - outside CI the witness skips honestly; '
+        'under CI it fails instead of skipping',
+      );
+      return;
+    }
+    // ثلاث دورات: كل دورة تملأ السقف الداخلي بعالقين مسلَّحين و62 صامتة
+    // (64 مصافحة جارية) ثم stop يحصد الكل ثم start جيل جديد — المقابض
+    // المفتوحة تعود لمستواها قبل الطوفان ولا يتجاوز مجموعها السقف أبداً
+    for (var cycle = 1; cycle <= 3; cycle++) {
+      final armedA = await replayClientHello(hello, srv.port);
+      final armedB = await replayClientHello(hello, srv.port);
+      final silents = <Socket>[];
+      for (var i = 0; i < 62; i++) {
+        silents.add(
+          await Socket.connect(InternetAddress.loopbackIPv4, srv.port),
+        );
+      }
+      unawaited(armedA.done.catchError((Object _) {}));
+      unawaited(armedB.done.catchError((Object _) {}));
+      // المسبار السلبي على العالقين المسلَّحين: وصول إغلاق النظير بعد
+      // stop هو الميت على السلك — بلا استفزازٍ يغلق المحرك وحده
+      final closeA = watchPeerClose(armedA);
+      final closeB = watchPeerClose(armedB);
+      var waitedMs = 0;
+      while (srv.counters.tlsHandshakesInFlight < 64 && waitedMs < 3000) {
+        await Future<void>.delayed(const Duration(milliseconds: 20));
+        waitedMs += 20;
+      }
+      expect(
+        srv.counters.tlsHandshakesInFlight,
+        lessThanOrEqualTo(64),
+        reason:
+            'cycle $cycle: the in-flight count never passes the internal '
+            'ceiling - the open handles stay bounded by the cap',
+      );
+      await srv.stop().timeout(const Duration(seconds: 10));
+      final sawCloseA = await closeA.future.timeout(
+        const Duration(milliseconds: 2000),
+        onTimeout: () => false,
+      );
+      final sawCloseB = await closeB.future.timeout(
+        const Duration(milliseconds: 2000),
+        onTimeout: () => false,
+      );
+      armedA.destroy();
+      armedB.destroy();
+      for (final s in silents) {
+        s.destroy();
+      }
+      expect(
+        sawCloseA,
+        true,
+        reason:
+            'cycle $cycle: the armed client reaped by stop reads its '
+            'connection closed on the wire - no stuck socket outlives '
+            'the stop',
+      );
+      expect(
+        sawCloseB,
+        true,
+        reason:
+            'cycle $cycle: every armed socket is reaped, not only the first',
+      );
+      expect(
+        _openHandles()!,
+        lessThanOrEqualTo(before + 64),
+        reason:
+            'cycle $cycle: the process handle count returns to its '
+            'pre-flood level - a stop that left its sockets stuck would '
+            'grow the handles by the whole cap every cycle',
+      );
+      await srv.start(preferredPort: 0);
+    }
+  }, timeout: const Timeout(Duration(seconds: 90)));
 
   test('the pre-arming harvest at stop counts its cuts: two silent '
       'sockets raise tlsSocketsCut by exactly two across stop', () async {
@@ -739,83 +925,86 @@ void main() {
     );
   });
 
-  test('after stop begins no new handshake is accepted or armed: a fresh '
-      'silent ClientHello client gets no server bytes while a request '
-      'still holds its seat, and no stuck line is written', () async {
-    final rec = _Rec();
-    final entered = Completer<void>();
-    final gate = Completer<void>();
-    final srv = LocalIntakeServer(
-      telemetry: rec,
-      correlationIdGenerator: _cid,
-      onCommand: (_) async {
-        if (!entered.isCompleted) entered.complete();
-        await gate.future;
-        return const CommandOutcome(ok: true);
-      },
-      protection: IntakeProtection(telemetry: rec)
-        ..update(
-          policy: const OriginPolicy(allowed: ['https://portal.example']),
-          token: _t64,
-        ),
-      config: BridgeConfig(securityContext: tlsContext()),
-    );
-    final hello = await captureClientHello();
-    final port = await srv.start(preferredPort: 0);
-    // طلب حي داخل المعالج يقف عند البوابة فيمتلك فراغ المقاعد
-    unawaited(_tlsPost(port));
-    await entered.future.timeout(const Duration(seconds: 5));
-    // الالتقاط بعد دخول المعالج: مصافحة الطلب الحي نفسها سُلِّمت قبله
-    final deliveredBefore = srv.counters.tlsHandshakesDelivered;
-    // بداية stop بلا انتظار حسمه: التلقيمتان تُغلقان قبل فراغ المقاعد
-    final stopping = srv.stop();
-    await Future<void>.delayed(const Duration(milliseconds: 500));
-    // عميل جديد بعد ClientHello حقيقي: لا بايت من الخادم داخل النافذة —
-    // رفض الاتصال نفسه أو الصمت كلاهما «لا بايت» على كل منصة
-    var serverBytes = -1;
-    try {
-      final fresh = await Socket.connect(
-        InternetAddress.loopbackIPv4,
-        port,
-      ).timeout(const Duration(seconds: 2));
-      var got = 0;
-      late final StreamSubscription<List<int>> sub;
-      sub = fresh.listen((chunk) => got += chunk.length);
-      fresh.add(hello);
-      await fresh.flush();
-      await Future<void>.delayed(const Duration(milliseconds: 1200));
-      unawaited(sub.cancel());
-      fresh.destroy();
-      serverBytes = got;
-    } on Object {
-      serverBytes = 0;
-    }
-    gate.complete();
-    await stopping.timeout(const Duration(seconds: 15));
-    expect(
-      serverBytes,
-      0,
-      reason:
-          'once stop has begun the feeds are closed before the seats '
-          'drain - no new handshake is accepted or armed, so no server '
-          'byte reaches a fresh ClientHello client on any platform',
-    );
-    expect(
-      srv.counters.tlsHandshakesDelivered,
-      deliveredBefore,
-      reason: 'no new handshake completes and is delivered after stop began',
-    );
-    expect(
-      rec.warns.where((w) => w.contains('TLS handshake')),
-      isEmpty,
-      reason:
-          'the fresh client was never armed, so stop announces nothing '
-          'stuck past arming',
-    );
-  });
+  test(
+    'after stop begins no new handshake is accepted or armed: a fresh '
+    'silent ClientHello client gets no server bytes while a request '
+    'still holds its seat, and no TLS handshake warning is written',
+    () async {
+      final rec = _Rec();
+      final entered = Completer<void>();
+      final gate = Completer<void>();
+      final srv = LocalIntakeServer(
+        telemetry: rec,
+        correlationIdGenerator: _cid,
+        onCommand: (_) async {
+          if (!entered.isCompleted) entered.complete();
+          await gate.future;
+          return const CommandOutcome(ok: true);
+        },
+        protection: IntakeProtection(telemetry: rec)
+          ..update(
+            policy: const OriginPolicy(allowed: ['https://portal.example']),
+            token: _t64,
+          ),
+        config: BridgeConfig(securityContext: tlsContext()),
+      );
+      final hello = await captureClientHello();
+      final port = await srv.start(preferredPort: 0);
+      // طلب حي داخل المعالج يقف عند البوابة فيمتلك فراغ المقاعد
+      unawaited(_tlsPost(port));
+      await entered.future.timeout(const Duration(seconds: 5));
+      // الالتقاط بعد دخول المعالج: مصافحة الطلب الحي نفسها سُلِّمت قبله
+      final deliveredBefore = srv.counters.tlsHandshakesDelivered;
+      // بداية stop بلا انتظار حسمه: التلقيمتان تُغلقان قبل فراغ المقاعد
+      final stopping = srv.stop();
+      await Future<void>.delayed(const Duration(milliseconds: 500));
+      // عميل جديد بعد ClientHello حقيقي: لا بايت من الخادم داخل النافذة —
+      // رفض الاتصال نفسه أو الصمت كلاهما «لا بايت» على كل منصة
+      var serverBytes = -1;
+      try {
+        final fresh = await Socket.connect(
+          InternetAddress.loopbackIPv4,
+          port,
+        ).timeout(const Duration(seconds: 2));
+        var got = 0;
+        late final StreamSubscription<List<int>> sub;
+        sub = fresh.listen((chunk) => got += chunk.length);
+        fresh.add(hello);
+        await fresh.flush();
+        await Future<void>.delayed(const Duration(milliseconds: 1200));
+        unawaited(sub.cancel());
+        fresh.destroy();
+        serverBytes = got;
+      } on Object {
+        serverBytes = 0;
+      }
+      gate.complete();
+      await stopping.timeout(const Duration(seconds: 15));
+      expect(
+        serverBytes,
+        0,
+        reason:
+            'once stop has begun the feeds are closed before the seats '
+            'drain - no new handshake is accepted or armed, so no server '
+            'byte reaches a fresh ClientHello client on any platform',
+      );
+      expect(
+        srv.counters.tlsHandshakesDelivered,
+        deliveredBefore,
+        reason: 'no new handshake completes and is delivered after stop began',
+      );
+      expect(
+        rec.warns.where((w) => w.contains('TLS handshake')),
+        isEmpty,
+        reason:
+            'the fresh client was never armed and the stop writes no TLS '
+            'handshake warning on any path - the harvest is silent, the '
+            'counters carry it',
+      );
+    },
+  );
 
-  test('a stop with nothing stuck past arming writes no stuck '
-      'announcement line', () async {
+  test('a clean stop writes no TLS handshake warning line', () async {
     final rec = _Rec();
     final srv = _make(
       rec: rec,
@@ -829,8 +1018,8 @@ void main() {
       rec.warns.where((w) => w.contains('TLS handshake')),
       isEmpty,
       reason:
-          'the stuck line is written only when the count is above zero - '
-          'a clean stop stays quiet',
+          'the stop harvest needs no warning line on any path - the '
+          'reap is complete and the counters carry what it cut',
     );
   });
 
@@ -1074,6 +1263,25 @@ void main() {
           'file descriptors of the bridge process',
     );
   });
+}
+
+// مسبار الإغلاق السلبي على مقبس عميل: يُلحق مبكراً ولا يرسل بايتاً —
+// يعدّ وصول إغلاق النظير (EOF أو خطأ) متى ما وقع. المسبار الذي يرسل
+// ClientHello يستفزّ محرك TLS المسلَّح فيغلق بروتوكول-خطأ فيقرأ ميتاً
+// والمقبس حيّ — فالإنصات الصامت هو القياس الصادق على المسلَّح
+Completer<bool> watchPeerClose(Socket client) {
+  final closed = Completer<bool>();
+  client.listen(
+    (_) {},
+    onDone: () {
+      if (!closed.isCompleted) closed.complete(true);
+    },
+    onError: (Object _) {
+      if (!closed.isCompleted) closed.complete(true);
+    },
+    cancelOnError: true,
+  );
+  return closed;
 }
 
 // عدد مقابض/واصفات العملية الحالية حيثما يمكن قراءته محلياً لعملية
