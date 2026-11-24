@@ -250,20 +250,23 @@ class TlsHandshakeFeed extends Stream<Socket> implements ServerSocket {
     _arm(handshake);
   }
 
-  // القتل قبل التسليح حصراً: إلغاء المهلة والاشتراك وإغلاق المقبس
-  // الخام — والعدّ قطع تراكمي من الخادم لا من العميل الذي انصرف وحده
+  // القتل بمساره: ما قبل التسليح قتله فوري عند الحقيقة (أول بايت غير
+  // 0x16 أو طول معلن فوق السقف) وعند انقضاء ساعة المصافحة، والمسلَّح
+  // يقطعه انقضاء الساعة نفسها — ساعة واحدة من القبول لا تُعاد بالتسليح
+  // — بإغلاق المقبس الخام تحت المحرك فهو الذي يبلغ النظير على السلك،
+  // والعدّ قطع تراكمي من الخادم لا من العميل الذي انصرف وحده
   void _cut(_PreArm handshake) {
-    if (handshake.armed) {
-      // المسلَّح قطعه موقّت المهلة المعاد أو الحصاد لا هذا المسار
+    if (_pending.remove(handshake)) {
+      handshake.deadline?.cancel();
+      handshake.subscription?.cancel();
+      handshake.raw.close();
+      _onCut();
       return;
     }
-    if (!_pending.remove(handshake)) {
-      return;
+    if (_arming.remove(handshake)) {
+      handshake.raw.close();
+      _onCut();
     }
-    handshake.deadline?.cancel();
-    handshake.subscription?.cancel();
-    handshake.raw.close();
-    _onCut();
   }
 
   // انصراف النظير وحده قبل التسليح (خطأ أو إغلاق): يسحب من العدّ بلا
@@ -280,25 +283,17 @@ class TlsHandshakeFeed extends Stream<Socket> implements ServerSocket {
   }
 
   // التسليح: البايتات المقروءة قبل التسليح تعاد للمحرك عبر
-  // bufferedData والاشتراك ينتقل إليه به، والساعة تعاود من لحظة
-  // التسليح: القتل الخام للمسلَّح هو الذي يصل السلك — العالق بعد
-  // التسليح يُقتل عند المهلة لا يُترك بلا سقف، والعدّ يبقى على المقبس
-  // حتى يُسلَّم إلى HttpServer أو تفشل المصافحة
+  // bufferedData والاشتراك ينتقل إليه به، وساعة المصافحة باقية على
+  // دورتها من لحظة القبول لا تُعاد بالتسليح: انقضاءها والمقبس ما يزال
+  // مسلَّحاً غير مسلَّم يقتله خاماً فيبلغ النظير على السلك، والعدّ يبقى
+  // على المقبس حتى يُسلَّم إلى HttpServer أو تفشل المصافحة
   void _arm(_PreArm handshake) {
     if (!_pending.remove(handshake)) {
       // سبقه الإغلاق أو الانصراف: لا تسليح بعد لا مرجع
       return;
     }
     handshake.armed = true;
-    handshake.deadline?.cancel();
     _arming.add(handshake);
-    handshake.deadline = Timer(_handshakeTimeout, () {
-      if (_arming.remove(handshake)) {
-        // القتل: إغلاق المقبس الخام تحت المحرك — يبلغ النظير على السلك
-        handshake.raw.close();
-        _onCut();
-      }
-    });
     RawSecureSocket.secureServer(
       handshake.raw,
       _context,
