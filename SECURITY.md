@@ -310,8 +310,10 @@ What remains:
 - **`dart:io` sets no limit on a single header's length.** The package
   caps the headers it reads (`Origin` over 1,024 characters,
   `X-Bridge-Token` over 1,024 bytes); the seats bound requests in
-  flight, and idle connections close after `idleTimeout` (60 s
-  default). The count of open connections is unbounded by `dart:io`
+  flight, and a connection that carries no request closes between
+  `idleTimeout` and twice that (60 s default): the idle timer runs once
+  per period, marking a connection on one pass and destroying it on the
+  next. The count of open connections is unbounded by `dart:io`
   itself — a host that wants a hard ceiling sets
   `BridgeConfig.maxOpenConnections` above zero, and a request arriving
   over the cap answers `503` until the count drops; `0` (the default)

@@ -1199,8 +1199,9 @@ CLI clients on Linux and macOS.
   so a host that wants a hard ceiling on open connections sets
   `BridgeConfig.maxOpenConnections` above zero: a request arriving while
   more sockets than the cap are open answers `503 server_busy`, and
-  once the count drops (senders finish, idle sockets close after
-  `idleTimeout`) the next request is served. The count is the sum over
+  once the count drops (senders finish, idle sockets close between
+  `idleTimeout` and twice that) the next request is served. The count is
+  the sum over
   every bound listener plus the TLS transport's in-flight handshakes,
   and on the TLS door the cap cuts the new socket before arming it —
   the one cut that reaches the wire — instead of answering it. `0` —

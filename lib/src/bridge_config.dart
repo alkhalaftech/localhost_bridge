@@ -92,7 +92,8 @@ class BridgeConfig {
   /// that wants a hard ceiling on open connections sets this above zero:
   /// a request arriving while more sockets than the cap are open answers
   /// `503 server_busy`, and once the count drops (senders finish, idle
-  /// sockets time out) the next request is served. The count is the sum
+  /// sockets close between [idleTimeout] and twice that) the next request
+  /// is served. The count is the sum
   /// over every bound listener plus the TLS feed's in-flight handshakes
   /// (sockets accepted on the TLS transport whose handshake has not yet
   /// been delivered - while this cap is on, the feed cuts a socket that
@@ -386,7 +387,12 @@ class BridgeConfig {
   /// Per-request timeout (anchored at request arrival, not server start).
   final Duration requestTimeout;
 
-  /// Idle timeout - an occupied seat outlives it by the close-handling grace.
+  /// Idle timeout of the HTTP listeners. A connection that carries no
+  /// request closes between this value and twice that: the idle timer of
+  /// `dart:io` runs once per period, marking a connection on one pass and
+  /// destroying it on the next. An occupied seat outlives it by the
+  /// close-handling grace. The WebSocket channel keeps its own idle timer
+  /// and its own code (`ws_idle_timeout`).
   final Duration idleTimeout;
 
   /// The default handler budget - the deadline over the host's command
