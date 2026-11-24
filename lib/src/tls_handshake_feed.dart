@@ -421,10 +421,12 @@ class _RawSecureAdapter implements SecureSocket {
     _sub = raw.listen(
       _onRawEvent,
       onError: (Object e, StackTrace s) {
-        _out.addError(e, s);
+        // خطأ يصل بعد إغلاق دفق التسليم لا مستقبل له، وإضافته على دفق
+        // مغلق ترمي داخل هذا النداء الراجع — فيُترك والنداء يعود
+        if (!_out.isClosed) _out.addError(e, s);
       },
       onDone: () {
-        _out.close();
+        if (!_out.isClosed) _out.close();
       },
     );
   }
@@ -461,7 +463,7 @@ class _RawSecureAdapter implements SecureSocket {
       // بلا توكيد قاتل على عكس الخام قبل التسليح
       Uint8List? chunk;
       while ((chunk = _g<Uint8List?>(() => raw.read())) != null) {
-        if (chunk!.isNotEmpty) _out.add(chunk);
+        if (chunk!.isNotEmpty && !_out.isClosed) _out.add(chunk);
       }
     } else if (event == RawSocketEvent.write) {
       final ready = _writeReady;
@@ -472,7 +474,7 @@ class _RawSecureAdapter implements SecureSocket {
       ready?.complete();
     } else if (event == RawSocketEvent.readClosed ||
         event == RawSocketEvent.closed) {
-      _out.close();
+      if (!_out.isClosed) _out.close();
     }
   }
 
