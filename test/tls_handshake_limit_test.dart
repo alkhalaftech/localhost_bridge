@@ -1290,7 +1290,20 @@ Completer<bool> watchPeerClose(Socket client) {
 // يعيد null: خارج CI يتخطى الشاهد صادقاً مسمّياً، وفي CI يفشل بدل التخطي
 int? _openHandles() {
   if (Platform.isLinux) {
-    return Directory('/proc/self/fd').listSync().length;
+    // على لينكس إدراج /proc/self/fd يصنّف كل مدخل بفحصه، والواصف الذي
+    // يُغلق بين قراءة المدخل وفحصه يُسقط الإدراج كله بخطأ واصف غائب —
+    // ومقابس المشهد نفسه تُقتل في أثناء العدّ (حصاد stop ومهله المصافحة)
+    // فالسباق حقيقي لا نظري. تُعاد القراءة مرات محدودة بفاصل قصير
+    // يوقف مؤقتات المشهد لحظة القراءة التالية، وإن تعذر العدّ كله عاد
+    // null كإخوته: خارج CI تخطٍّ صادق، وفي CI فشل مسمّى
+    for (var attempt = 0; attempt < 50; attempt++) {
+      try {
+        return Directory('/proc/self/fd').listSync().length;
+      } on FileSystemException {
+        sleep(const Duration(milliseconds: 2));
+      }
+    }
+    return null;
   }
   if (Platform.isMacOS) {
     // على ماك إدراج /dev/fd يعمل stat لكل مدخل، والواصف الذي يُغلق بين
