@@ -319,7 +319,10 @@ class TlsHandshakeFeed extends Stream<Socket> implements ServerSocket {
       },
       onError: (Object _) {
         // المصافحة الفاشلة تنقص العدّ: المقعد تحرر للمرسل التالي —
-        // والمحرك أغلق الخام عند الخطأ بنفسه
+        // والمحرك أغلق الخام عند الخطأ بنفسه. وساعة المصافحة تُلغى هنا
+        // كما في مسار التسليم: المقبس خرج من القائمتين فلن تجد قطعاً
+        // لو انقضت، وبقاؤها حياً إلى أجله مؤقتٌ بلا عمل
+        handshake.deadline?.cancel();
         _arming.remove(handshake);
       },
     );
