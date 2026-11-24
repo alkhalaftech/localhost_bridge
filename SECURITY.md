@@ -261,8 +261,12 @@ What the bridge guards now:
   origin_seat_limit` while the server still has room for others.
   The total request deadline (`requestTimeout`, 30 s default) bounds
   the pre-handler phase — the gates, the policy checks, and the body
-  read — so no pre-handler seat outlives it; a handler without a
-  budget holds its seat until it completes. WebSocket channels count
+  read — so no pre-handler seat outlives it, and the body read alone is
+  cut earlier: a body that has not completed within
+  `BridgeConfig.bodyTimeout` (10 s default, or the request timeout when
+  that is shorter) is refused `408 request_timeout` and its seat freed.
+  A handler without a budget holds its seat until it completes. WebSocket
+  channels count
   against this budget only after their credential: a channel still
   waiting for its credential sits in a small internal pool (8 channels
   in total, min(`maxSeatsPerOrigin`, 8) per origin) that holds no
@@ -304,6 +308,14 @@ What remains:
   not free a slot — each freed slot is taken again at once — so the
   way out is the policy: serve the channel through the listed or the
   token policy instead of allow-all.
+- **A local program that drips request bodies can still hold seats — each
+  one only up to the body limit.** A sender that opens requests from
+  rotating origins and trickles each body a byte every few seconds holds
+  a seat for as long as the body limit allows and no longer:
+  `BridgeConfig.bodyTimeout` (10 s default) cuts the read, answers `408
+  request_timeout`, and frees the seat, after which the server recovers.
+  Raise the limit only for uploads that genuinely need longer than ten
+  seconds, and weigh it against the seat budget.
 - **Peak memory under origin rotation is bounded by the caps** — the
   two 10,000-entry maps plus `dart:io`'s own per-connection buffers,
   which the package does not bound.
@@ -317,7 +329,10 @@ What remains:
   itself — a host that wants a hard ceiling sets
   `BridgeConfig.maxOpenConnections` above zero, and a request arriving
   over the cap answers `503` until the count drops; `0` (the default)
-  keeps the option off. On the TLS door the count includes the feed's
+  keeps the option off. The cap bounds resources, not availability: under
+  a local flood that keeps more connections open than the cap, every new
+  request answers `503` until the count drops. On the TLS door the count
+  includes the feed's
   in-flight handshakes, and while the cap is on an accept over it cuts
   the new socket before arming it (the one cut that reaches the wire).
   While the option is off the TLS transport holds an internal

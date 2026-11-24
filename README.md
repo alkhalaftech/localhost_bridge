@@ -447,7 +447,7 @@ Stable error codes:
 | 403 | `pair_signature_replay` | A pairing signature whose stamp was already used, or lies outside the accepted one-minute clock-skew window — the same stamp never proves twice. Sign a fresh request. |
 | 403 | `cross_site_blocked` | Fetch-mode hardening: `Sec-Fetch-Mode` not `cors`. |
 | 403 | `blocked_by_protection` | Host-authority rejection (DNS-rebinding defense). |
-| 408 | `request_timeout` | Body did not arrive in time. |
+| 408 | `request_timeout` | Body did not complete within the body limit (`BridgeConfig.bodyTimeout`, 10 s by default). |
 | 413 | `payload_too_large` / `payload_too_complex` / `reply_data_too_large` | Body over the byte cap (default 1 MiB) / JSON body over the element cap (default 10,000 structural elements, counted before parsing) / the command succeeded but its `CommandOutcome.data` is over the internal page cap (64 KiB after JSON encoding) - the whole result is refused, never truncated, and the command stays executed. |
 | 415 | `unsupported_media_type` | POST body carries a `Content-Type` outside `BridgeConfig.allowedContentTypes` (default `application/json` and `text/plain`, which covers JSON clients and textual gateways; an absent header passes for raw-socket integrations). Hidden-HTML-form types (`application/x-www-form-urlencoded`, `multipart/form-data`) are refused. Checked after intake admission, so an untrusted origin still sees its origin rejection. Note: `text/plain` itself is a valid HTML form enctype, so it passes this gate — the browser-facing form defense is the fetch-mode hardening (`cross_site_blocked`), with `OriginPolicy.requireFetchMetadata` extending it to headerless requests. With `BridgeConfig.acceptBinaryBodies` on, `application/octet-stream` joins the admitted types: the raw bytes reach your handler as `TrustedCommand.binaryPayload` (`payloads` stays empty; the command name rides the `X-Command` header into `TrustedCommand.headers`) under the package's internal binary ceiling — a fixed 256 KiB constant, deliberately not an option; a binary body over it answers `413 payload_too_large` naming the binary cap, and a binary body without its `X-Command` name (blank name or empty body alike) answers `400 command_required`. |
 | 429 | `origin_rate_limited` / `token_locked` | Per-origin budget exhausted / too many **wrong** token attempts in the last 60 seconds from this origin — the wrong-guess budget is 5 attempts per window (originless attempts share one window). The budget is a signal about wrong guesses, never a refusal of the verified sender: the correct token is compared and accepted whatever the failure history, and a match clears the window. |
@@ -1184,12 +1184,28 @@ CLI clients on Linux and macOS.
   protection-state limits, not seats: a paired page's signed requests
   count into its origin's seat share like any other request. Past the
   share the sender reads `503 origin_seat_limit`.
+- A request body must make progress: `BridgeConfig.bodyTimeout` (10
+  seconds by default) is the deadline over reading one request body. A
+  sender that trickles its body a byte at a time is refused `408
+  request_timeout` at the limit and its seat is freed, instead of holding
+  the seat for the whole `requestTimeout` (30 seconds); the total
+  request deadline still bounds everything before the handler. With the
+  option unset the body limit is the shorter of ten seconds and
+  `requestTimeout`, so lowering `requestTimeout` below ten seconds
+  carries the body limit down with it. An explicit `bodyTimeout` must be
+  positive and no longer than `requestTimeout`, otherwise building the
+  server throws `ArgumentError`; raise it together with `maxBodyBytes`
+  for uploads that genuinely need longer than ten seconds. The limit in
+  force reads as `server.effectiveBodyTimeout`.
 - `dart:io` never bounds the sockets a listening server has accepted,
   so a host that wants a hard ceiling on open connections sets
   `BridgeConfig.maxOpenConnections` above zero: a request arriving while
   more sockets than the cap are open answers `503 server_busy`, and
   once the count drops (senders finish, idle sockets close between
-  `idleTimeout` and twice that) the next request is served. The count is
+  `idleTimeout` and twice that) the next request is served. The cap
+  bounds resources, not availability: under a local flood that keeps
+  more connections open than the cap, every new request answers `503`
+  until the count drops. The count is
   the sum over
   every bound listener plus the TLS transport's in-flight handshakes,
   and on the TLS door the cap cuts the new socket before arming it —

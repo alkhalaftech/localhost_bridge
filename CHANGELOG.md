@@ -45,6 +45,17 @@
   A stop bounded by its timeout that returns before the pool drained
   reports the remainder and reads `fullyDrained` false instead of a
   silent true.
+- API: `BridgeConfig.bodyTimeout` - the deadline over reading one
+  request body (10 seconds by default). A body that has not completed
+  within it is refused `408 request_timeout` and its seat is freed, so a
+  sender that drips a body one byte at a time holds a seat for at most
+  that long, while the total `requestTimeout` (30 seconds) still bounds
+  everything before the handler. `null` - the default - selects the
+  shorter of ten seconds and `requestTimeout`: a host that lowered
+  `requestTimeout` below ten seconds keeps its behaviour, the body limit
+  following it down. An explicit value must be positive and no longer
+  than `requestTimeout`, else `ArgumentError` at server construction,
+  and the limit in force reads as `server.effectiveBodyTimeout`.
 - Added: `BridgeConfig.maxOpenConnections` - an optional hard ceiling
   on open connections (`dart:io` never bounds them): a request arriving
   while more sockets than the cap are open answers `503`, and once the

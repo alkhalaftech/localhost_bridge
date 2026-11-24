@@ -94,7 +94,9 @@ class BridgeConfig {
   /// a request arriving while more sockets than the cap are open answers
   /// `503 server_busy`, and once the count drops (senders finish, idle
   /// sockets close between [idleTimeout] and twice that) the next request
-  /// is served. The count is the sum
+  /// is served. The cap bounds resources, not availability: under a local
+  /// flood that keeps more connections open than the cap, every new
+  /// request answers `503` until the count drops. The count is the sum
   /// over every bound listener plus the TLS feed's in-flight handshakes
   /// (sockets accepted on the TLS transport whose handshake has not yet
   /// been delivered - while this cap is on, the feed cuts a socket that
