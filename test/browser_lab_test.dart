@@ -307,6 +307,92 @@ async function signProof(tokenHex, pairingId, method, path, correlationId) {
 </html>
 ''';
 
+/// The streaming-body lab page: a page on the lab's page origin first sends
+/// an ordinary tokened POST - the control, which must read 200 on the same
+/// browser for the refusals to mean anything - and then tries to send a
+/// `ReadableStream` request body (`duplex: 'half'`) to the admitted bridge
+/// twice: once with headers that force a CORS preflight, once as a simple
+/// request. Each attempt writes one verdict line: `THREW:` and the error
+/// name when the browser refused the call itself, or `READ:` and the
+/// status when the request crossed and came back - the crossing this page
+/// exists to detect. In `?report=1` mode the marks return to the lab's
+/// collector.
+String _streamBodyPage({required int bridgePort, required String token}) =>
+    '''
+<!DOCTYPE html>
+<html lang="en">
+<head><meta charset="utf-8"><title>localhost_bridge streaming body lab</title></head>
+<body>
+<pre id="lab-results"></pre>
+<script>
+'use strict';
+const BRIDGE = 'http://127.0.0.1:$bridgePort';
+const TOKEN = '$token';
+// وضع التقرير (?report=1): القناة التي يقرأها شاهد المحاكي
+const REPORT = new URLSearchParams(location.search).get('report') === '1';
+const results = document.getElementById('lab-results');
+const marks = [];
+function mark(line) { marks.push(line); results.textContent += line + '\\n'; }
+function streamed(text) {
+  const bytes = new TextEncoder().encode(text);
+  return new ReadableStream({
+    start(controller) { controller.enqueue(bytes); controller.close(); }
+  });
+}
+async function attempt(label, init) {
+  try {
+    const res = await fetch(BRIDGE, init);
+    let body = null;
+    try { body = await res.json(); } catch (e) {}
+    mark('LAB-STREAMBODY-' + label + ':READ:' + res.status + ':' +
+         (body && body.error ? body.error
+                             : (body && body.ok === true ? 'ok' : 'unreadable')));
+  } catch (browserError) {
+    mark('LAB-STREAMBODY-' + label + ':THREW:' +
+         (browserError && browserError.name ? browserError.name : 'unknown'));
+  }
+}
+(async () => {
+  mark('LAB-STREAMBODY-PAGE-ORIGIN:' + location.origin);
+  // الشاهد الموجب: جسم عادي بالترويسات نفسها يعبر ويقرأ 200 — بدونه لا
+  // يعني رفضُ الجسم المتدفق شيئاً
+  await attempt('CONTROL', {
+    method: 'POST',
+    headers: {'Content-Type': 'application/json', 'X-Bridge-Token': TOKEN},
+    body: '["BROWSER-LAB"]',
+  });
+  // بترويسات تفرض خيار CORS أولاً
+  await attempt('PREFLIGHT', {
+    method: 'POST',
+    headers: {'Content-Type': 'application/json', 'X-Bridge-Token': TOKEN},
+    body: streamed('["BROWSER-LAB"]'),
+    duplex: 'half',
+  });
+  // وطلب بسيط بلا ترويسات مخصصة
+  await attempt('SIMPLE', {
+    method: 'POST',
+    headers: {'Content-Type': 'text/plain'},
+    body: streamed('["BROWSER-LAB"]'),
+    duplex: 'half',
+  });
+  if (REPORT) {
+    try {
+      await fetch('/lab-report', {
+        method: 'POST',
+        headers: {'Content-Type': 'application/json'},
+        body: JSON.stringify({marks: marks}),
+      });
+      mark('LAB-REPORTED');
+    } catch (browserError) {
+      mark('LAB-REPORT:THREW');
+    }
+  }
+})();
+</script>
+</body>
+</html>
+''';
+
 // مرصد أسطر الأمن والشبكة أثناء تحقيقات القناة — يطبع لسجل الاختبار
 // كي تُقرأ قصة الخادم جانب المتصفح
 class _RecordingTelemetry extends BridgeTelemetry {
@@ -360,6 +446,7 @@ Future<(LocalIntakeServer, int)> _startBridge({
   String? allowedOrigin,
   String? token,
   bool paired = false,
+  void Function()? onCommand,
 }) async {
   final protection = IntakeProtection(telemetry: const SilentTelemetry());
   protection.update(
@@ -371,7 +458,10 @@ Future<(LocalIntakeServer, int)> _startBridge({
   );
   if (paired) protection.enablePairing();
   final bridge = LocalIntakeServer(
-    onCommand: (_) async => const CommandOutcome(ok: true),
+    onCommand: (_) async {
+      onCommand?.call();
+      return const CommandOutcome(ok: true);
+    },
     telemetry: const SilentTelemetry(),
     correlationIdGenerator: _labCorrelationId,
     protection: protection,
@@ -588,6 +678,7 @@ void main() {
     bool tokenOnlyAdmitted = false,
     bool pairedAdmitted = false,
     List<Map<String, Object?>>? collectedReports,
+    void Function()? onCommand,
   }) async {
     final token = generateBridgeToken();
     // الجسر المقبول يُبنى على أصل الصفحة قبل أن تُخدم الصفحة: المنفذ
@@ -601,6 +692,7 @@ void main() {
           : 'http://127.0.0.1:${pageServer.port}',
       token: token,
       paired: pairedAdmitted,
+      onCommand: onCommand,
     );
     final (defaultBridge, defaultPort) = await _startBridge();
     final pairingOffer = pairedAdmitted
@@ -631,6 +723,16 @@ void main() {
         }
         request.response.headers.contentType = ContentType.json;
         request.response.write(jsonEncode(reports));
+        await request.response.close();
+        return;
+      }
+      if (request.uri.path == '/stream-body') {
+        // صفحة محاولة الجسم المتدفق: باب مستقل كي لا تغيّر علامات صفحة
+        // المختبر العامة ولا تحرّك شهودها
+        request.response.headers.contentType = ContentType.html;
+        request.response.write(
+          _streamBodyPage(bridgePort: admittedPort, token: token),
+        );
         await request.response.close();
         return;
       }
@@ -821,6 +923,70 @@ void main() {
     );
     expect(strangerStatus, 204);
     expect(strangerHeaders['access-control-allow-origin'], isNull);
+  });
+
+  scene('on this browser a page cannot stream a request body while an ordinary '
+      'body crosses: both streaming calls are refused before the request '
+      'leaves, and only the control command reaches the handler', () async {
+    // صفحة على أصل صفحة المختبر ترسل أولاً جسماً عادياً (الشاهد الموجب:
+    // يعبر ويقرأ 200) ثم تحاول fetch بجسم ReadableStream وduplex half على
+    // الجسر المقبول مرتين — والجسر بعدّاد أوامر: عبورُ الجسم المتدفق
+    // يظهر من الطرفين معاً، بحكم مقروء في الصفحة وبأمر يصل المعالج.
+    // والحكم هنا سلوك متصفح المختبر نفسه لا قانون: متصفح آخر قد يرسل
+    // كائن التدفق كسلسلة بطول ثابت بدل أن يرفض — فالشاهد يثبّت هذا
+    // المتصفح، ويُعاد قياسه قبل أن يتغير متصفح المختبر
+    var entered = 0;
+    final (pageServer, admitted, _, pagePort, _, _, _) = await lab(
+      onCommand: () => entered++,
+    );
+    addTearDown(pageServer.close);
+    addTearDown(admitted.stop);
+    final dom = _flat(
+      await _dumpDom(
+        'http://127.0.0.1:$pagePort/stream-body',
+        'stream-body-dom.txt',
+      ),
+    );
+    final verdicts = RegExp(
+      r'^LAB-STREAMBODY-(PREFLIGHT|SIMPLE):.*$',
+      multiLine: true,
+    ).allMatches(dom).map((m) => m.group(0)!).toList()..sort();
+    expect(verdicts, hasLength(2), reason: 'both attempts report a verdict');
+    for (final verdict in verdicts) {
+      expect(
+        verdict,
+        contains(':THREW:'),
+        reason:
+            'a streaming body must be refused by the browser before the '
+            'request leaves - a readable status here means the body '
+            'crossed: $verdict',
+      );
+    }
+    expect(
+      dom,
+      isNot(
+        contains(
+          RegExp(r'^LAB-STREAMBODY-(PREFLIGHT|SIMPLE):READ:', multiLine: true),
+        ),
+      ),
+      reason: 'no streaming attempt may read a status from the bridge',
+    );
+    // والشاهد الموجب في الصفحة نفسها: الجسم العادي بالترويسات نفسها
+    // يعبر ويقرأ 200 — فالرفضان قرار المتصفح لا جسر لا يصل
+    expect(
+      dom,
+      contains('LAB-STREAMBODY-CONTROL:READ:200:ok\n'),
+      reason:
+          'the control must cross on this browser - without it the two '
+          'refusals would prove nothing',
+    );
+    expect(
+      entered,
+      1,
+      reason:
+          'exactly the control command reached the handler on the wire - '
+          'no streaming body did',
+    );
   });
 
   scene(
