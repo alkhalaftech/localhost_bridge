@@ -162,8 +162,29 @@ int _countTableLines(String stripped) =>
 int _countLevel3Headings(String stripped) =>
     RegExp(r'^### ', multiLine: true).allMatches(stripped).length;
 
-int _countListItems(String stripped) =>
-    RegExp(r'^\s*- ', multiLine: true).allMatches(stripped).length;
+/// Counts list items as dash lines that actually open a list block: the
+/// previous kept line is blank, or itself a counted list item, or the
+/// line opens the section. A prose line that happens to wrap onto a
+/// dash at column zero is punctuation, not a list item.
+int _countListItems(String stripped) {
+  final lines = stripped.split('\n');
+  var count = 0;
+  var inList = false;
+  for (var i = 0; i < lines.length; i++) {
+    if (!RegExp(r'^\s*- ').hasMatch(lines[i])) {
+      inList = false;
+      continue;
+    }
+    final previous = i > 0 ? lines[i - 1].trim() : '';
+    if (i == 0 || previous.isEmpty || inList) {
+      count++;
+      inList = true;
+    } else {
+      inList = false;
+    }
+  }
+  return count;
+}
 
 Set<String> _inlineSpans(String stripped) => RegExp(
   '`([^`]+)`',
