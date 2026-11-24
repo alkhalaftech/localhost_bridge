@@ -971,6 +971,9 @@ blocking requirement and are not needed as a fallback» ([دليل Chrome: Local
 
   تحقق 2026-11-23 —
   [‏Android: إعداد أمن الشبكة](https://developer.android.com/privacy-and-security/security-config)
+
+  هذا التصريح يغطي الاسمين `127.0.0.1` و`localhost` وحدهما؛ ووصول
+  صفحة WebView إلى مستمع `::1` الاختياري فوق النص الصريح لم يُقَس.
 - الحلقة الراجعة بين الملفات الشخصية: اعتباراً من Android 17 حركة
   الحلقة الراجعة بين ملفين شخصيين لم تعد مسموحة افتراضياً لكل تطبيق
   يعمل على Android 17 فأعلى مهما كان مستوى الهدف؛ وحركة الحلقة داخل

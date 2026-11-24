@@ -1052,6 +1052,10 @@ the source and that date ride the line. Lines that name no vendor fact
 
   Verified 2026-11-23 —
   [Android: Network security configuration](https://developer.android.com/privacy-and-security/security-config)
+
+  This declaration covers the two names `127.0.0.1` and `localhost`
+  alone; whether a WebView page can reach the optional `::1` listener
+  over that explicit text has not been measured.
 - Cross-profile loopback: beginning with Android 17, cross-profile
   loopback traffic is no longer permitted by default, for every app
   running on Android 17 or higher regardless of target API level;
