@@ -32,10 +32,7 @@
   origin share at the same moment and keeps them for its lifetime; a
   channel whose seat or share is gone by its acceptance closes with the
   same standing code in the rejection frame. `stop` closes pooled
-  channels with the live ones and waits for the pool to empty. The
-  channel's accepted browser handshake carries `Sec-Fetch-Mode:
-  websocket` on the GET with `Sec-Fetch-Dest` either `websocket` or
-  `empty`.
+  channels with the live ones and waits for the pool to empty.
 - API: two counters on `counters` - `wsChannels` (WebSocket channel
   connections open right now, pooled and authenticated alike) and
   `wsPreauthPool` (credential-less channels sitting in the internal
