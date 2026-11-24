@@ -7,6 +7,9 @@
 // ما فيها تعليقات ورموز لغات لا معرّفات عقد سلك. علامات الاتجاه
 // الحرفية تُنزع قبل المقارنة، والمسافات المتتالية تنطبق إلى مسافة
 // واحدة فلا يكسر لفُّ السطر تطابقَ معرّف.
+// وكل كتلة مسوّرة نظيرتُها في الدليل الآخر مثالٌ واحد: سمة اللغة على
+// السور متساوية، وأسطر الكود متساوية واحداً واحداً بعد إسقاط
+// التعليقات — فلا ينفصل مثالٌ في دليل عن مثاله في الآخر.
 import 'dart:io';
 
 import 'package:test/test.dart';
@@ -156,6 +159,66 @@ String _stripFenced(String raw) {
 int _fenceMarkerCount(String raw) =>
     raw.split('\n').where((line) => line.trimLeft().startsWith('```')).length;
 
+/// One fenced block: the language tag on its opening fence and the lines
+/// inside it.
+typedef _Block = ({String tag, List<String> lines});
+
+/// The fenced blocks of a section body, in order.
+List<_Block> _fencedBlocks(String raw) {
+  final blocks = <_Block>[];
+  String? tag;
+  var lines = <String>[];
+  for (final line in raw.split('\n')) {
+    final trimmed = line.trimLeft();
+    if (trimmed.startsWith('```')) {
+      if (tag == null) {
+        tag = trimmed.substring(3).trim();
+        lines = <String>[];
+      } else {
+        blocks.add((tag: tag, lines: lines));
+        tag = null;
+      }
+      continue;
+    }
+    if (tag != null) lines.add(line);
+  }
+  return blocks;
+}
+
+/// The code of one block with its comments removed: a `//` or `#` comment
+/// that opens the line or follows whitespace, and a `/* … */` comment on
+/// one line or spanning lines. A `//` glued to a non-space character - the
+/// `https://` inside a string - is code and stays. Blank lines go too, so
+/// only what the reader would run is compared.
+List<String> _codeOf(List<String> block) {
+  final code = <String>[];
+  final lineComment = RegExp(r'(^|\s)(//|#)');
+  var inBlockComment = false;
+  for (final raw in block) {
+    var line = raw.trim();
+    if (inBlockComment) {
+      final end = line.indexOf('*/');
+      if (end < 0) continue;
+      line = line.substring(end + 2).trim();
+      inBlockComment = false;
+    }
+    final start = line.indexOf('/*');
+    if (start >= 0) {
+      final end = line.indexOf('*/', start + 2);
+      if (end < 0) {
+        line = line.substring(0, start).trim();
+        inBlockComment = true;
+      } else {
+        line = '${line.substring(0, start)}${line.substring(end + 2)}'.trim();
+      }
+    }
+    final comment = lineComment.firstMatch(line);
+    if (comment != null) line = line.substring(0, comment.start).trim();
+    if (line.isNotEmpty) code.add(line);
+  }
+  return code;
+}
+
 int _countTableLines(String stripped) =>
     RegExp(r'^\|', multiLine: true).allMatches(stripped).length;
 
@@ -212,6 +275,37 @@ void main() {
   });
 
   for (final pair in sectionPairs) {
+    test(
+      'section pair "${pair.$1}" carries one code example on both sides',
+      () {
+        final englishBody = english.bodyOf(pair.$1);
+        final arabicBody = arabic.bodyOf(pair.$2);
+        if (englishBody == null || arabicBody == null) {
+          fail(
+            'the section is missing on one side: "${pair.$1}" / "${pair.$2}"',
+          );
+        }
+        final englishBlocks = _fencedBlocks(englishBody);
+        final arabicBlocks = _fencedBlocks(arabicBody);
+        expect(arabicBlocks.length, englishBlocks.length);
+        for (var i = 0; i < englishBlocks.length; i++) {
+          final which = 'block ${i + 1} of this section';
+          expect(
+            arabicBlocks[i].tag,
+            englishBlocks[i].tag,
+            reason: '$which: the two guides fence the same language',
+          );
+          expect(
+            _codeOf(arabicBlocks[i].lines),
+            _codeOf(englishBlocks[i].lines),
+            reason:
+                '$which: the Arabic guide shows the example the English one '
+                'shows - every code line equal once the comments are dropped',
+          );
+        }
+      },
+    );
+
     test('section pair "${pair.$1}" matches in shape and identifiers', () {
       final englishBody = english.bodyOf(pair.$1);
       final arabicBody = arabic.bodyOf(pair.$2);
