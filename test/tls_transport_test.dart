@@ -352,6 +352,12 @@ void main() {
       ) async {
         final a = await _exchange(plainDoor, pa, requestForPlain);
         final b = await _exchangeTls(plainDoor, pb, requestForTls);
+        // سطر واحد لكل حالة على السلك يُقرأ بلا تسجيل دخول: الحالة على
+        // البابين برقمَي حالتها — ودليل السيناريو 04 فوق الغلاف على كل
+        // مشغّل CI (ومنها ماك) يُقرأ من التعليقات العلنية على تشغيل أخضر
+        print(
+          'TLS-CORPUS: $mode $name plain=${a['status']} tls=${b['status']}',
+        );
         _expectSameWire(a, b, '[$mode] $name');
         expect(b['status'], isNot(-2), reason: '[$mode] $name must answer');
       }
