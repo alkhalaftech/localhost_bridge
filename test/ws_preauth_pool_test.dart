@@ -502,9 +502,16 @@ void main() {
               'claims a fully drained stop',
         );
         expect(
-          report.wsChannelsStillLive,
+          report.wsPreauthPoolStillHeld,
           1,
-          reason: 'the report names the channel socket that outlived the stop',
+          reason:
+              'the report names the pool slot the silent channel still '
+              'holds after the stop returned',
+        );
+        expect(
+          report.stillRunning,
+          1,
+          reason: 'the pooled channel holds no seat: one unit of live work',
         );
         expect(
           srv.counters.wsChannels,
@@ -512,6 +519,106 @@ void main() {
           reason:
               'the handle counter still reads the channel socket that '
               'outlived the stop',
+        );
+      } finally {
+        pr.dispose();
+      }
+    },
+  );
+
+  test(
+    'stop(timeout) that returns while an authenticated channel still '
+    'holds its seat counts that channel once in stillRunning',
+    timeout: const Timeout(Duration(seconds: 40)),
+    () async {
+      // قناة معتمدة لا تجيب إطار الإغلاق: مقعده محسوب في seatsStillActive،
+      // وليست في الحوض — فلا تُعدّ ثانية في مجموع العمل الحي
+      final (srv, pr) = await startPool();
+      try {
+        final peer = await Socket.connect('127.0.0.1', srv.port);
+        addTearDown(peer.destroy);
+        final key = base64Encode(List<int>.filled(16, 0xcd));
+        peer.add(
+          utf8.encode(
+            'GET /ws HTTP/1.1\r\n'
+            'Host: 127.0.0.1:${srv.port}\r\n'
+            'Upgrade: websocket\r\n'
+            'Connection: Upgrade\r\n'
+            'Sec-WebSocket-Key: $key\r\n'
+            'Sec-WebSocket-Version: 13\r\n'
+            'Origin: https://portal.example\r\n'
+            'Sec-Fetch-Mode: websocket\r\n'
+            'Sec-Fetch-Dest: websocket\r\n'
+            '\r\n',
+          ),
+        );
+        final upgraded = Completer<void>();
+        final head = StringBuffer();
+        late final StreamSubscription<List<int>> sub;
+        sub = peer.listen(
+          (chunk) {
+            head.write(utf8.decode(chunk, allowMalformed: true));
+            if (!upgraded.isCompleted && head.toString().contains('\r\n\r\n')) {
+              upgraded.complete();
+            }
+          },
+          onError: (Object _) {
+            if (!upgraded.isCompleted) upgraded.completeError('socket error');
+          },
+          onDone: () {
+            if (!upgraded.isCompleted) upgraded.completeError('socket closed');
+          },
+        );
+        await upgraded.future.timeout(const Duration(seconds: 5));
+        expect(head.toString(), contains('101'));
+        // إطار اعتماد نصي مقنَّع كما يفرضه البروتوكول على العميل: التوكن في
+        // أول رسالة، ثم صمت أبدي لا يجيب إطار الإغلاق
+        final payload = utf8.encode(
+          jsonEncode({'token': _token, 'correlationId': 'ws-auth'}),
+        );
+        const mask = <int>[0x11, 0x22, 0x33, 0x44];
+        peer.add(<int>[
+          0x81,
+          0x80 | payload.length,
+          ...mask,
+          for (var i = 0; i < payload.length; i++) payload[i] ^ mask[i % 4],
+        ]);
+        sub.pause();
+        expect(
+          await waitFor(
+            () =>
+                srv.counters.activeSeats == 1 &&
+                srv.counters.wsPreauthPool == 0,
+          ),
+          isTrue,
+          reason:
+              'the credential was accepted: the channel left the pool '
+              'and holds one seat',
+        );
+        final report = await srv
+            .stop(timeout: const Duration(milliseconds: 900))
+            .timeout(const Duration(seconds: 8));
+        expect(
+          report.seatsStillActive,
+          1,
+          reason: 'the authenticated channel outlived the stop on its seat',
+        );
+        expect(
+          report.wsPreauthPoolStillHeld,
+          0,
+          reason: 'an authenticated channel holds a seat, not a pool slot',
+        );
+        expect(
+          report.stillRunning,
+          1,
+          reason:
+              'one live authenticated channel is one unit of live work: its '
+              'seat - never counted again as a channel',
+        );
+        expect(
+          report.fullyDrained,
+          isFalse,
+          reason: 'a bounded stop with a live channel never reads drained',
         );
       } finally {
         pr.dispose();
