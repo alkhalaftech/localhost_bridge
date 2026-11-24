@@ -465,9 +465,9 @@ reads `progress_data_too_large` as the final `event: result` frame. The
 `HTTP` column on these rows names the same-failure HTTP family the fact
 would answer with on the HTTP wire - it is the registry status, not a
 status line the code actually writes. A refusal that happens BEFORE the
-WebSocket upgrade (origin policy, host authority, seat caps) is a plain
-HTTP reply with the standing codes above - no channel-specific rows exist
-for it.
+WebSocket upgrade (origin policy, host authority, seat caps, and the
+channel's own pre-auth pool caps) is a plain HTTP reply with the standing
+codes above - no channel-specific rows exist for it.
 
 | HTTP | `error` code | Meaning |
 |---|---|---|
@@ -516,20 +516,29 @@ nor socket behind.
 
 **The WebSocket channel** - `BridgeConfig.wsPath: '/ws'` (any path but
 `/pair`) upgrades a browser handshake through the same admission step as
-every request: origin, fetch metadata, host authority, and the seat caps
-answer their standing codes BEFORE the upgrade. The browser cannot add
-headers to a handshake, so the credential - the token or a pairing
-signature - travels in the first message (a JSON object
-`{"token": "..."} ` or `{"pairing": "id.stamp.sig"}`, within the 10
-second auth deadline; the pairing signature signs `WS`, the channel
-path, and a correlation id you choose). Every inbound message is a
-command under the same payload checks; every reply is an event shaped by
-the standing reply contract. The connection holds one concurrency seat
-for its lifetime, so `maxConcurrentRequests` and `maxSeatsPerOrigin`
-bound the live connections per origin exactly like live commands; a
-heartbeat keeps the path alive, silence past `idleTimeout` closes it,
-and messages over the internal 256 KiB cap close it
-(`ws_message_too_large`).
+every request: origin, fetch metadata, host authority, and the pool caps
+answer their standing codes BEFORE the upgrade. Before its credential a
+connection waits in a small internal pool that holds no command seat -
+8 channels in total, `min(maxSeatsPerOrigin, 8)` per origin - and a
+handshake over either pool cap reads the standing `server_busy` or
+`origin_seat_limit` reply like any other pre-upgrade refusal, so a flood
+of credential-less pages (origin rotation included) can never starve the
+command seats: the worst case is channels refused temporarily while
+commands stay served. The browser cannot add headers to a handshake, so
+the credential - the token or a pairing signature - travels in the first
+message (a JSON object `{"token": "..."} ` or
+`{"pairing": "id.stamp.sig"}`, within the 10 second auth deadline; the
+pairing signature signs `WS`, the channel path, and a correlation id you
+choose). At credential acceptance the connection takes one concurrency
+seat and its origin share - the same seat budget the HTTP commands hold
+- and keeps both for the channel's lifetime, so `maxConcurrentRequests`
+and `maxSeatsPerOrigin` bound the authenticated connections per origin
+exactly like live commands; a channel whose seat or share is gone by its
+acceptance closes with the same standing code. Every inbound message is
+a command under the same payload checks; every reply is an event shaped
+by the standing reply contract; a heartbeat keeps the path alive,
+silence past `idleTimeout` closes it, and messages over the internal
+256 KiB cap close it (`ws_message_too_large`).
 
 ```javascript
 const ws = new WebSocket('ws://127.0.0.1:' + BRIDGE_PORT + '/ws');

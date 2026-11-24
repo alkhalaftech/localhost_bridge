@@ -344,10 +344,23 @@ class BridgeConfig {
   /// frame memory limit never happens, so an older SDK throws
   /// [ArgumentError] at server construction and every non-channel path
   /// works unchanged.
-  /// An open connection holds one concurrency seat - the same seat budget
-  /// the HTTP commands hold - for its whole lifetime, so the seat caps
-  /// bound the live connections per origin exactly like they bound the
-  /// live commands.
+  /// Before its credential, a connection waits in a small internal pool
+  /// that holds no command seat: a total cap of 8 channels, and a
+  /// per-origin cap of min([maxSeatsPerOrigin], 8) keyed by the
+  /// normalized origin. A handshake over either pool cap is refused
+  /// before the upgrade with the standing codes (`503 server_busy` for
+  /// the total cap, `503 origin_seat_limit` for the origin cap), so a
+  /// flood of credential-less channels - origin rotation included - can
+  /// never starve the command seats: the worst case is channels refused
+  /// temporarily while commands stay served. At credential acceptance
+  /// the connection takes one concurrency seat and its origin share -
+  /// the same seat budget the HTTP commands hold - and holds both for
+  /// the channel's lifetime, so the seat caps bound the authenticated
+  /// connections per origin exactly like they bound the live commands.
+  /// A channel whose seat or share is gone by its acceptance closes
+  /// with the same standing code inside the rejection frame, and its
+  /// pool slot is freed. [LocalIntakeServer.stop] closes pooled channels
+  /// with the live ones and waits for the pool to empty.
   final String? wsPath;
 
   /// The local pages - when non-null, a `GET` on exactly one of the

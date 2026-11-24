@@ -677,7 +677,10 @@ class LocalIntakeServer {
   /// The WebSocket auth-deadline override (tests inject it) - the deadline
   /// the first message of a connection must arrive within. Null selects the
   /// package internal constant; a non-positive value throws [ArgumentError]
-  /// at construction.
+  /// at construction. Until the credential arrives or this deadline closes
+  /// the connection, the connection sits in the internal pre-auth pool - a
+  /// bounded set of channels that holds no command seat - so a shorter
+  /// deadline releases its pool slot sooner.
   final Duration? wsAuthTimeout;
 
   /// The effective first-message deadline of the WebSocket channel: the
@@ -1991,11 +1994,12 @@ class LocalIntakeServer {
           category: BridgeCategory.network,
         );
       }
-      // قناة الويب سوكيت الحية: كل مقبس مفتوح يمسك مقعداً كطلب حي —
-      // الإغلاق بالتوازي كله، وكل قناة تحت ما تبقى من الموعد الكلي:
-      // قناة لا تحسم إغلاقها بانقضاء ما تبقى لا تمسك الإيقاف خارج
-      // مهلته — تُرك إغلاقها في الخلفية وتُعلن عدّاً صاخباً بدل انتظار
-      // بلا سقف أو صمت كاذب. وبلا مهلة يبقى الانتظار الكامل كله بالتوازي.
+      // قناة الويب سوكيت الحية: كل مقبس مفتوح — معتمداً يمسك مقعده
+      // من المقاعد أو غير معتمد يجلس في خانة الحوض — يُغلق هنا
+      // بالتوازي كله، وكل قناة تحت ما تبقى من الموعد الكلي: قناة لا
+      // تحسم إغلاقها بانقضاء ما تبقى لا تمسك الإيقاف خارج مهلته —
+      // تُرك إغلاقها في الخلفية وتُعلن عدّاً صاخباً بدل انتظار بلا
+      // سقف أو صمت كاذب. وبلا مهلة يبقى الانتظار الكامل كله بالتوازي.
       // الفشل هنا محتوى: قناة ماتت قبل الإغلاق حسم مسارها نفسه وحده
       final sockets = _liveWsSockets.toList();
       if (sockets.isNotEmpty) {
@@ -2027,7 +2031,10 @@ class LocalIntakeServer {
           );
         }
       }
-      while (_activeRequests > 0) {
+      // شرط الفراغ: المقاعد والحوض معاً — الحوض قنواتٌ قبل الاعتماد
+      // أغلقها الإغلاق الرشيق فوق كما أغلق المعتمدة، فلا يعود stop
+      // على خانة حوض ما زالت جالسة
+      while (_activeRequests > 0 || _wsPreauthTotal > 0) {
         // أعد استخدام المسلح: نداءان متداخلان لstop
         // يطحن الثاني _drain فيبقى الأول معلقا على مستقبل لا يكتمل
         final drained = _drain ??= Completer<void>();
@@ -2260,8 +2267,9 @@ class LocalIntakeServer {
   }
 
   // مهلة انتظار أول رسالة اعتماد على القناة — ثابت داخلي لا خيار:
-  // اتصال بلا اعتماد يمسك مقعده كي لا يجوع غيره، والمهلة القصيرة
-  // تحصّر نافذة ذلك المسك. فوقها يُغلق الاتصال برمز القناة المسجل.
+  // اتصال بلا اعتماد يجلس في حوض القنوات سقفه الثماني، والمهلة
+  // القصيرة تحصّر نافذة جلوسه هناك فلا يتراكم الحوض بلا حصاد.
+  // فوقها يُغلق الاتصال برمز القناة المسجل.
   // الاختبارات تحقن قيمة أقصر عبر [wsAuthTimeout].
   static const Duration _wsAuthDeadlineDefault = Duration(seconds: 10);
 
@@ -2272,10 +2280,60 @@ class LocalIntakeServer {
   // تحسم رسالةً صامتة فوق اتصال حي.
   static const Duration _wsHeartbeat = Duration(seconds: 30);
 
-  // مقابس القناة الحية: كل واحد يمسك مقعداً (السقوف قائمة فوقها —
-  // لا سقف قناة ثانٍ بجوارها)، وstop يغلقها رشيقياً كي يحسم مستقبل
-  // مساراتها داخل نافذة الفراغ ولا يبقى مقعد ولا مقبس بعد العودة.
+  // مقابس القناة الحية: المعتمدة منها تمسك مقعدها من المقاعد العامة
+  // (السقوف قائمة فوقها)، وغير المعتمدة تجلس في حوض القنوات أدناه
+  // بلا مقعد، وstop يغلقها رشيقياً كي يحسم مستقبل مساراتها داخل نافذة
+  // الفراغ ولا يبقى مقعد ولا مقبس ولا خانة حوض بعد العودة.
   final Set<WebSocket> _liveWsSockets = <WebSocket>{};
+
+  // سقف الحوض الكلي للقنوات قبل الاعتماد — ثابت داخلي لا خيار، وهو
+  // الحد الفعلي لعدد القنوات الجالسة فيه. قيمته ثماني لأن حصة الأصل
+  // الافتراضية في المقاعد ضعيفة (أربعة): في وضع القائمة لا يستأثر
+  // أصل مدرج واحد بالحوض كله، وفي السماح للجميع لا يحتجز المهاجم
+  // المدرِّج سوى ثمانية مقابس بلا أثر على الأوامر — فالقنوات غير
+  // المعتمدة لا تمس مقعد أمر أصلاً، والسقف يحرس مقابس الحوض وحدها
+  static const int _wsPreauthPoolCap = 8;
+
+  // سقف الأصل داخل الحوض: الأصغر من حصة الأصل في المقاعد والسقف
+  // الكلي — فلا يتجاوز الحوض حصة أصل ما كانت القيمة، ولا يتجاوز
+  // الحوض نفسه. مفتاحه الأصل المطبَّع نفسه مفتاح حصة المقاعد
+  // (الفراغ دلو من لا أصل له)، و«الأب» في ميزانيات أسئلة الموافقة
+  // لا علاقة له هنا: حوض القنوات دلو الأصل الواحد لا دلو الأب
+  int get _wsPreauthOriginCap => config.maxSeatsPerOrigin < _wsPreauthPoolCap
+      ? config.maxSeatsPerOrigin
+      : _wsPreauthPoolCap;
+
+  // عدّادا الحوض: الكلي وخانات الأصول المطبَّعة. لا يحجز أي منهما
+  // مقعد أمر، وخانة كل قناة تخرج عند موتها أو عند رفض اعتمادها أو
+  // عند انتقالها إلى مقعدها في لحظة القبول
+  int _wsPreauthTotal = 0;
+  final Map<String, int> _wsPreauthByOrigin = <String, int>{};
+
+  void _wsPreauthEnter(String originKey) {
+    _wsPreauthTotal++;
+    _wsPreauthByOrigin[originKey] = (_wsPreauthByOrigin[originKey] ?? 0) + 1;
+  }
+
+  void _wsPreauthExit(String originKey) {
+    _wsPreauthTotal--;
+    final left = (_wsPreauthByOrigin[originKey] ?? 1) - 1;
+    if (left <= 0) {
+      _wsPreauthByOrigin.remove(originKey);
+    } else {
+      _wsPreauthByOrigin[originKey] = left;
+    }
+    _signalIdleIfDrained();
+  }
+
+  // إشارة فراغ المقاعد والحوض معاً لمن ينتظرها في stop: الانتظار لا
+  // ينعقد حتى تفرغ الخانتان لا إحداهما
+  void _signalIdleIfDrained() {
+    if (_activeRequests <= 0 && _wsPreauthTotal <= 0) {
+      final drain = _drain;
+      _drain = null;
+      if (drain != null && !drain.isCompleted) drain.complete();
+    }
+  }
 
   /// The pairing route - the one path the intake answers specially while
   /// the pairing layer is armed. Disarmed, it is no path at all: it rides
@@ -2368,6 +2426,17 @@ class LocalIntakeServer {
   /// handler timeout, and the total-deadline cut. Each is owned by this
   /// server instance so the injected clock drives them deterministically.
   late final _WarnThrottle _busyWarnThrottle = _WarnThrottle(
+    nowMs: () => _now,
+    windowMs: _warnThrottleWindowMs,
+  );
+
+  // كابح سطر رفض السقف الكلي للحوض، وكابح سطر رفض سقف الأصل فيه —
+  // موضعان مستقلان كبقية المواضع فلا فيضُ موضعٍ يُكتم آخره
+  late final _WarnThrottle _wsPoolWarnThrottle = _WarnThrottle(
+    nowMs: () => _now,
+    windowMs: _warnThrottleWindowMs,
+  );
+  late final _WarnThrottle _wsPoolOriginWarnThrottle = _WarnThrottle(
     nowMs: () => _now,
     windowMs: _warnThrottleWindowMs,
   );
@@ -2726,6 +2795,21 @@ class LocalIntakeServer {
           return;
         }
       }
+      // قناة الويب سوكيت بلا مقعد قبل الاعتماد: المصافحة تمر من تحت
+      // بوابتي المقاعد (الانشغال العام وحصة الأصل) حصرا — سقفها هو
+      // حوض القنوات عند دخول مسارها (فوق بوابة سقف الاتصالات المفتوحة
+      // كما هنا)، والمقعد وحصة الأصل لا تؤخذان إلا عند قبول الاعتماد
+      // في مسار القناة نفسه
+      if (wsHandshake) {
+        await _handleRequest(
+          request,
+          response,
+          admission,
+          wsHandshake,
+          mounted,
+        );
+        return;
+      }
       // (سقف الاتصالات) فوق السقف نرد فورا — فيضان طلبات متزامنة
       // يضاعف ذروة الذاكرة (كل طلب جسم يقرأ حتى سقف الجسم) بلا حاجز
       if (_activeRequests >= config.maxConcurrentRequests) {
@@ -2820,12 +2904,9 @@ class LocalIntakeServer {
         } else {
           _seatsByOrigin[seatOriginKey] = originLeft;
         }
-        if (_activeRequests <= 0) {
-          // إشارة فراغ المقاعد لمن ينتظرها في stop
-          final drain = _drain;
-          _drain = null;
-          if (drain != null && !drain.isCompleted) drain.complete();
-        }
+        // إشارة الفراغ: المقاعد والحوض معاً (حوض القنوات أدناه) لا
+        // المقاعد وحدها
+        _signalIdleIfDrained();
       }
     } catch (error, stack) {
       // شبكة الأمان: أي استثناء ناجٍ يرى ردا ويُغلق الاتصال
@@ -3737,20 +3818,79 @@ class LocalIntakeServer {
     }
   }
 
-  // مسار القناة كله داخل مقعد واحد: المصافحة عبر خطوة القبول الواحدة
-  // (الرفض قبل الترقية برمز السلك الحرفي)، والترقية بسقف الرسالة
-  // مرّ للمحول نفسه وبلا ضغط (قناة أوامر لا تخدم ضغطاً لمختلط
-  // أسرارها)، ثم الاعتماد بأول رسالة في مهلتها — التوكن أو إثبات
-  // الاقتران، وقدحه خطوة القبول نفسها بنداء ثانٍ عليها لا منطق
-  // حماية ثانٍ — ثم حلقة الرسائل: الواردة أوامر بفحوص الحمولة نفسها
-  // والصادرة أحداث يرسلها المضيف. سقف الاتصالات هو المقاعد القائمة
-  // نفسها: الاتصال الحي مقعد واحد من السقف العام ومن حصة أصله.
+  // مسار القناة: الحوض قبل الاعتماد (سقفاه الداخليان — لا مقعد أمر
+  // في الحوض أبداً)، والمصافحة عبر خطوة القبول الواحدة (الرفض قبل
+  // الترقية برمز السلك الحرفي)، والترقية بسقف الرسالة مرّ للمحول
+  // نفسه وبلا ضغط (قناة أوامر لا تخدم ضغطاً لمختلط أسرارها)، ثم
+  // الاعتماد بأول رسالة في مهلتها — التوكن أو إثبات الاقتران، وقدحه
+  // خطوة القبول نفسها بنداء ثانٍ عليها لا منطق حماية ثانٍ — وعند
+  // قبوله يُؤخذ مقعد الأمر وحصة الأصل في اللحظة نفسها ويبقيان طول
+  // عمر القناة، ثم حلقة الرسائل: الواردة أوامر بفحوص الحمولة نفسها
+  // والصادرة أحداث يرسلها المضيف. سقف الاتصالات المفتوحة (خياري)
+  // قائم فوق الحوض كما هو، وسقفا المقاعد يحدان القنوات المعتمدة
+  // على أصولها كالأوامر.
   Future<void> _handleWebSocket(
     HttpRequest request,
     HttpResponse response,
     IntakeAdmission admission,
     String? origin,
   ) async {
+    // حوض القنوات قبل الاعتماد: المصافحة تحت سقفي الحوض (الكلي
+    // وسقف الأصل المطبَّع) والرفض قبل الترقية بالرمزين القائمين
+    // وبمسار الرد القائم. رفض السعة قراءة خالصة لا يسوّي سجل القبول
+    // — بنفس خاصية رفض الانشغال فوق — فلا يخلف أثراً على حصص المعدل
+    final poolOriginKey = admission.normalizedOrigin ?? '';
+    if (_wsPreauthTotal >= _wsPreauthPoolCap) {
+      final line = _wsPoolWarnThrottle.admit(
+        'intake channel pool: $_wsPreauthTotal pooled channels over the '
+        'cap of $_wsPreauthPoolCap — rejecting',
+      );
+      if (line != null) {
+        telemetry.warn(line, category: BridgeCategory.network);
+      }
+      response.headers.set(
+        'X-Correlation-Id',
+        _sanitizeCorrelationId(_firstHeader(request, 'X-Correlation-Id')),
+      );
+      _echoCors(
+        response,
+        _firstHeader(request, 'Origin'),
+        admitted: admission.echoesCors,
+      );
+      await _replyRejection(
+        response,
+        code: 'server_busy',
+        message: 'The server is busy right now — please retry shortly',
+        bodyFullyRead: false,
+      );
+      return;
+    }
+    if ((_wsPreauthByOrigin[poolOriginKey] ?? 0) >= _wsPreauthOriginCap) {
+      final line = _wsPoolOriginWarnThrottle.admit(
+        'intake channel pool origin limit: '
+        '${_wsPreauthByOrigin[poolOriginKey] ?? 0} pooled channels for '
+        'one sender (cap $_wsPreauthOriginCap) — rejecting',
+      );
+      if (line != null) {
+        telemetry.warn(line, category: BridgeCategory.network);
+      }
+      response.headers.set(
+        'X-Correlation-Id',
+        _sanitizeCorrelationId(_firstHeader(request, 'X-Correlation-Id')),
+      );
+      _echoCors(
+        response,
+        _firstHeader(request, 'Origin'),
+        admitted: admission.echoesCors,
+      );
+      await _replyRejection(
+        response,
+        code: 'origin_seat_limit',
+        message: 'This origin holds its full seat share — retry shortly',
+        bodyFullyRead: false,
+      );
+      return;
+    }
     // بوابة القبول: التسوية عند موضعها نفسه كما في الرد الواحد —
     // الرفض قبل الترقية برمز السلك الحرفي ولا ترقية لأصل غير مقبول.
     // والاعتماد مؤجَّل هنا لا مطلوب: المتصفح لا يرسل ترويسة توكن في
@@ -3767,29 +3907,43 @@ class LocalIntakeServer {
       );
       return;
     }
-    final WebSocket ws;
-    try {
-      ws = await _upgradeChannel(request);
-    } on Object {
-      // ترقية رفضها المحول (ترويسة ناقصة أو شكل مخالف): رفض شكل
-      // سلكي يُرد قبل أي شيء آخر
-      await _replyRejection(
-        response,
-        code: 'bad_request',
-        message:
-            'The WebSocket upgrade was refused — send a valid '
-            'handshake (Upgrade: websocket with a client key)',
-        bodyFullyRead: false,
-        protocolShape: true,
-      );
-      return;
+    _wsPreauthEnter(poolOriginKey);
+    var pooled = true;
+    void leavePool() {
+      if (!pooled) return;
+      pooled = false;
+      _wsPreauthExit(poolOriginKey);
     }
-    ws.pingInterval = _wsHeartbeat;
-    _liveWsSockets.add(ws);
+
     try {
-      await _wsSession(ws, origin);
+      final WebSocket ws;
+      try {
+        ws = await _upgradeChannel(request);
+      } on Object {
+        // ترقية رفضها المحول (ترويسة ناقصة أو شكل مخالف): رفض شكل
+        // سلكي يُرد قبل أي شيء آخر
+        await _replyRejection(
+          response,
+          code: 'bad_request',
+          message:
+              'The WebSocket upgrade was refused — send a valid '
+              'handshake (Upgrade: websocket with a client key)',
+          bodyFullyRead: false,
+          protocolShape: true,
+        );
+        return;
+      }
+      ws.pingInterval = _wsHeartbeat;
+      _liveWsSockets.add(ws);
+      try {
+        await _wsSession(ws, origin, leavePool);
+      } finally {
+        _liveWsSockets.remove(ws);
+      }
     } finally {
-      _liveWsSockets.remove(ws);
+      // الخانة تخرج من الحوض عند موت القناة أو عند رفض اعتمادها أو
+      // عند انتقالها إلى مقعدها (نداء leavePool في الجلسة)
+      leavePool();
     }
   }
 
@@ -3798,7 +3952,11 @@ class LocalIntakeServer {
   // اقتران في مهلتها — وإلا الإغلاق بالرمز المسجل)، وما بعدها
   // أوامر بفحوص الحمولة نفسها تُسلسل بترتيب وصولها، والاتصال كله
   // حي تحت مهلة الخمول القابلة للضبط ونبض المحول الداخلي.
-  Future<void> _wsSession(WebSocket ws, String? origin) async {
+  Future<void> _wsSession(
+    WebSocket ws,
+    String? origin,
+    void Function() leavePool,
+  ) async {
     final firstMessage = Completer<Object?>();
     var firstArrived = false;
     var authAccepted = false;
@@ -4002,24 +4160,65 @@ class LocalIntakeServer {
       unawaited(sub.cancel());
       return;
     }
-    // اعتمدت: القناة مفتوحة — المخزون من ما قبل الفتح يجري أولاً
-    // بترتيب وصوله ثم الأوامر الحية على المشترك نفسه حتى موتها
-    final sessionAuth = authAdmission;
-    auth = sessionAuth;
-    authAccepted = true;
-    armIdle();
-    for (final queued in preOpen) {
-      chain = chain.then<void>((_) async {
-        if (gone) return;
-        try {
-          await _wsHandleMessage(ws, queued, sessionAuth);
-        } on Object {
-          // عطل كتابة الرد: القناة ماتت — onDone/onError يجيبان موتها
-        }
-      });
+    // الانتقال من الحوض إلى المقاعد عند قبول الاعتماد: المقعد العام
+    // وحصة الأصل في اللحظة نفسها بلا فاصل انتظار (الفحص والأخذ في
+    // مدى تزامنٍ واحد لا يقطعه انتظار)، والخانة تخرج من الحوض هنا،
+    // والمقعد يبقى طول عمر القناة. فإن لم يوجد مقعد أو حصة أُغلقت
+    // القناة بالرمز القائم نفسه في إطار الرفض وتحررت خانتها من
+    // الحوض، وبوابة الأمر على القناة كما هي لا يتغير موضعها
+    final seatOriginKey = authAdmission.normalizedOrigin ?? '';
+    if (_activeRequests >= config.maxConcurrentRequests) {
+      await _wsCloseWithCode(
+        ws,
+        'server_busy',
+        'The server is busy right now — please retry shortly',
+      );
+      unawaited(sub.cancel());
+      return;
     }
-    preOpen.clear();
-    await sessionDone.future;
+    if ((_seatsByOrigin[seatOriginKey] ?? 0) >= config.maxSeatsPerOrigin) {
+      await _wsCloseWithCode(
+        ws,
+        'origin_seat_limit',
+        'This origin holds its full seat share — retry shortly',
+      );
+      unawaited(sub.cancel());
+      return;
+    }
+    _activeRequests++;
+    _seatsByOrigin[seatOriginKey] = (_seatsByOrigin[seatOriginKey] ?? 0) + 1;
+    leavePool();
+    try {
+      // اعتمدت: القناة مفتوحة — المخزون من ما قبل الفتح يجري أولاً
+      // بترتيب وصوله ثم الأوامر الحية على المشترك نفسه حتى موتها
+      final sessionAuth = authAdmission;
+      auth = sessionAuth;
+      authAccepted = true;
+      armIdle();
+      for (final queued in preOpen) {
+        chain = chain.then<void>((_) async {
+          if (gone) return;
+          try {
+            await _wsHandleMessage(ws, queued, sessionAuth);
+          } on Object {
+            // عطل كتابة الرد: القناة ماتت — onDone/onError يجيبان موتها
+          }
+        });
+      }
+      preOpen.clear();
+      await sessionDone.future;
+    } finally {
+      // تحرير المقعد وحصة الأصل عند موت القناة — وإشارة الفراغ مقاعد
+      // وحوضاً معاً كي لا ينتظر stop خانةً فرغت مقاعدها وبقيت جالسة
+      _activeRequests--;
+      final originLeft = (_seatsByOrigin[seatOriginKey] ?? 1) - 1;
+      if (originLeft <= 0) {
+        _seatsByOrigin.remove(seatOriginKey);
+      } else {
+        _seatsByOrigin[seatOriginKey] = originLeft;
+      }
+      _signalIdleIfDrained();
+    }
     unawaited(sub.cancel());
     idle?.cancel();
   }

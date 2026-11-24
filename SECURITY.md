@@ -262,7 +262,14 @@ What the bridge guards now:
   The total request deadline (`requestTimeout`, 30 s default) bounds
   the pre-handler phase — the gates, the policy checks, and the body
   read — so no pre-handler seat outlives it; a handler without a
-  budget holds its seat until it completes.
+  budget holds its seat until it completes. WebSocket channels count
+  against this budget only after their credential: a channel still
+  waiting for its credential sits in a small internal pool (8 channels
+  in total, `maxSeatsPerOrigin` per origin) that holds no command seat,
+  takes its seat only at credential acceptance, and keeps it for the
+  channel's lifetime — credential-less channels can never occupy the
+  seats, and a channel whose seat or share is gone by its acceptance
+  closes with the standing `server_busy` / `origin_seat_limit` code.
 - **Early rejections cannot pin seats.** Every pre-body rejection (405,
   the origin and token policy rejects, 415, the parser's 400) replies
   and cuts the connection, draining the unread body under bounded
@@ -285,7 +292,12 @@ What remains:
   The cap bounds one sender's share, never the sum of senders; set
   `handlerTimeout` so a slow handler frees its seat early with a
   reconcilable `504 handler_timeout` - without one a slow handler
-  holds its seat until it completes.
+  holds its seat until it completes. Credential-less WebSocket
+  channels never join this flood: they wait in the internal channel
+  pool (8 in total, `maxSeatsPerOrigin` per origin) that holds no
+  seat, so origin rotation fills the pool - further channels are
+  refused before the upgrade with the standing codes while the
+  commands stay served.
 - **Peak memory under origin rotation is bounded by the caps** — the
   two 10,000-entry maps plus `dart:io`'s own per-connection buffers,
   which the package does not bound.

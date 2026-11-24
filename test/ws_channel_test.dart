@@ -125,6 +125,40 @@ Future<(List<String> replies, int? closeCode)> awaitClosed(
   return (replies, ws.closeCode);
 }
 
+/// A real HTTP POST command that returns (status, body) - the wire
+/// observable the seat and share assertions read. A network failure is
+/// recorded as (-1, '') instead of thrown, so the verdict speaks in
+/// statuses.
+Future<(int, String)> postBody(int port, {required String origin}) async {
+  final client = HttpClient();
+  try {
+    final req = await client.postUrl(Uri.parse('http://127.0.0.1:$port/'));
+    req.headers.set('Origin', origin);
+    req.headers.set(HttpHeaders.contentTypeHeader, 'application/json');
+    req.add(utf8.encode('["HTTP-CMD"]'));
+    final res = await req.close().timeout(const Duration(seconds: 5));
+    final body = await res.transform(utf8.decoder).join();
+    return (res.statusCode, body);
+  } on Object {
+    return (-1, '');
+  } finally {
+    client.close(force: true);
+  }
+}
+
+/// A bounded wait for a counter condition - the verdict never leans on
+/// a bare sleep wall.
+Future<bool> waitFor(
+  bool Function() check, {
+  Duration limit = const Duration(seconds: 2),
+}) async {
+  final sw = Stopwatch()..start();
+  while (!check() && sw.elapsed < limit) {
+    await Future<void>.delayed(const Duration(milliseconds: 10));
+  }
+  return check();
+}
+
 /// A raw handshake that reads the HTTP reply the server writes BEFORE any
 /// upgrade - the pre-upgrade refusals are plain HTTP answers.
 Future<(int status, String body)> rawHandshake(
@@ -410,6 +444,168 @@ void main() {
       expect(body, contains('"origin_seat_limit"'));
       openBarrier.complete();
       await ws.close();
+    } finally {
+      c.protection.dispose();
+      await c.srv.stop();
+    }
+  });
+
+  test('credential acceptance with the seats full closes the channel with '
+      'the standing server_busy code inside the rejection frame', () async {
+    final c = await start(
+      config: BridgeConfig(
+        wsPath: '/ws',
+        maxConcurrentRequests: 1,
+        maxSeatsPerOrigin: 1,
+        idleTimeout: const Duration(seconds: 2),
+      ),
+      wsAuthTimeout: const Duration(seconds: 5),
+    );
+    try {
+      // القناة الأولى تعتمد وتمسك المقعد الوحيد للميزانية الضيقة —
+      // والأخذ يُنتظر بالعداد كي لا يتسابق اعتماد القناتين
+      final holder = await openChannel(c.srv.port);
+      expect(
+        await waitFor(() => c.srv.counters.activeSeats == 1),
+        isTrue,
+        reason: 'the authenticated holder holds the only seat',
+      );
+      // الثانية تعبر الترقية من الحوض قبل الاعتماد (لا مقعد قبل الاعتماد)
+      // ثم يُغلق اعتمادها بالإطار السلكي القائم لرمز الانشغال
+      final second = await WebSocket.connect(
+        'ws://127.0.0.1:${c.srv.port}/ws',
+        headers: {'Origin': 'https://portal.example'},
+      ).timeout(const Duration(seconds: 5));
+      second.add(jsonEncode({'token': _token, 'correlationId': 'ws-full'}));
+      final (replies, closeCode) = await awaitClosed(second);
+      expect(
+        replies.single,
+        contains('"server_busy"'),
+        reason:
+            'no seat is available at credential acceptance - the channel '
+            'closes with the standing wire code in the rejection frame',
+      );
+      expect(closeCode, isNotNull, reason: 'the channel closed');
+      await holder.close();
+    } finally {
+      c.protection.dispose();
+      await c.srv.stop();
+    }
+  });
+
+  test('credential acceptance with the origin share full closes the '
+      'channel with the standing origin_seat_limit code while the server '
+      'still has room', () async {
+    final c = await start(
+      config: BridgeConfig(
+        wsPath: '/ws',
+        maxConcurrentRequests: 8,
+        maxSeatsPerOrigin: 1,
+        idleTimeout: const Duration(seconds: 2),
+      ),
+      wsAuthTimeout: const Duration(seconds: 5),
+    );
+    try {
+      // الحاملة تمسك الحصة الوحيدة للأصل والمقاعد العامة ما زالت واسعة
+      final holder = await openChannel(c.srv.port);
+      expect(
+        await waitFor(() => c.srv.counters.activeSeats == 1),
+        isTrue,
+        reason: 'the authenticated holder holds the origin share',
+      );
+      final second = await WebSocket.connect(
+        'ws://127.0.0.1:${c.srv.port}/ws',
+        headers: {'Origin': 'https://portal.example'},
+      ).timeout(const Duration(seconds: 5));
+      second.add(jsonEncode({'token': _token, 'correlationId': 'ws-share'}));
+      final (replies, closeCode) = await awaitClosed(second);
+      expect(
+        replies.single,
+        contains('"origin_seat_limit"'),
+        reason:
+            'the origin share is full at credential acceptance - the '
+            'channel closes with the share code while the server still '
+            'has room',
+      );
+      expect(closeCode, isNotNull, reason: 'the channel closed');
+      await holder.close();
+    } finally {
+      c.protection.dispose();
+      await c.srv.stop();
+    }
+  });
+
+  test('the channel takes its seat and its origin share at credential '
+      'acceptance: an open unauthenticated channel holds none, and both '
+      'free when the channel dies', () async {
+    final c = await start(
+      config: BridgeConfig(
+        wsPath: '/ws',
+        maxSeatsPerOrigin: 1,
+        idleTimeout: const Duration(seconds: 2),
+      ),
+      wsAuthTimeout: const Duration(seconds: 5),
+      allowed: const ['https://portal.example', 'https://other.example'],
+    );
+    try {
+      final ws = await WebSocket.connect(
+        'ws://127.0.0.1:${c.srv.port}/ws',
+        headers: {'Origin': 'https://portal.example'},
+      ).timeout(const Duration(seconds: 5));
+      // القناة مفتوحة بلا اعتماد: لا مقعد ولا حصة — العداد صفر والأصل
+      // نفسه يُخدم
+      expect(
+        c.srv.counters.activeSeats,
+        0,
+        reason: 'an open channel before its credential holds no seat at all',
+      );
+      final (beforeStatus, beforeBody) = await postBody(
+        c.srv.port,
+        origin: 'https://portal.example',
+      );
+      expect(
+        beforeStatus,
+        200,
+        reason:
+            'the unauthenticated channel never holds the origin share - '
+            'the same origin is served beside it',
+      );
+      expect(beforeBody, contains('"ok":true'));
+      // الاعتماد: المقعد وحصة الأصل تؤخذان في اللحظة نفسها
+      ws.add(jsonEncode({'token': _token, 'correlationId': 'ws-seat'}));
+      final taken = await waitFor(() => c.srv.counters.activeSeats == 1);
+      expect(
+        taken,
+        isTrue,
+        reason: 'credential acceptance takes exactly one seat',
+      );
+      // الحصة الآن ممتلئة: أمر من الأصل نفسه فوق الحصة يرد برمزها،
+      // والأصل الآخر يُخدم
+      final (heldStatus, heldBody) = await postBody(
+        c.srv.port,
+        origin: 'https://portal.example',
+      );
+      expect(heldStatus, 503);
+      expect(heldBody, contains('"origin_seat_limit"'));
+      final (otherStatus, _) = await postBody(
+        c.srv.port,
+        origin: 'https://other.example',
+      );
+      expect(otherStatus, 200, reason: 'another origin keeps its share');
+      // موت القناة يحرر المقعد والحصة معا
+      await ws.close();
+      final freed = await waitFor(() => c.srv.counters.activeSeats == 0);
+      expect(freed, isTrue, reason: 'the seat frees when the channel dies');
+      final (afterStatus, afterBody) = await postBody(
+        c.srv.port,
+        origin: 'https://portal.example',
+      );
+      expect(
+        afterStatus,
+        200,
+        reason: 'the origin share is released with the seat',
+      );
+      expect(afterBody, contains('"ok":true'));
     } finally {
       c.protection.dispose();
       await c.srv.stop();
