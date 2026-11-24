@@ -97,6 +97,11 @@ void main() {
     return;
   }
 
+  // مهلة اعتماد القناة في الشاهد. نصفها حدّان مترابطان: تُرى الخانة
+  // خلاله من الإرسال، ويعود الإيقاف دونه — فلا يمرّ إيقافٌ انتظر مهلة
+  // الاعتماد بدل أن يغلق القناة بنفسه
+  const authTimeout = Duration(seconds: 2);
+
   for (final tls in [false, true]) {
     final transport = tls ? 'TLS' : 'plain';
 
@@ -106,7 +111,7 @@ void main() {
         telemetry: const SilentTelemetry(),
         correlationIdGenerator: _cid,
         onCommand: (cmd) async => const CommandOutcome(ok: true),
-        wsAuthTimeout: const Duration(seconds: 2),
+        wsAuthTimeout: authTimeout,
         protection: IntakeProtection(telemetry: const SilentTelemetry())
           ..update(
             policy: const OriginPolicy(allowed: ['https://portal.example']),
@@ -128,20 +133,29 @@ void main() {
             : await Socket.connect(InternetAddress.loopbackIPv4, srv.port),
       );
       addTearDown(peer.destroy);
+      // الخانة تؤخذ قبل ترقية القناة، فظهورها في العدّاد هو أول ما يراه
+      // الخارجي منها، والقراءة في كل دورة من دورات الأحداث. وحدّ الانتظار
+      // على الساعة لا على عدد الدورات: الدورة الواحدة تكلّف نحو ميكرو-
+      // ثانية في حلقة دافئة وأضعافها في باردة، وترقية النقل الآمن تبلغ
+      // الخانة على لينكس بعد نحو أربعين ملّي ثانية من الإرسال، فميزانية
+      // دورات ثابتة تُنفَد في حلقة دافئة قبل وصول الترقية.
+      // والحدّ نصف مهلة الاعتماد مقيساً من الإرسال: حين تُرى الخانة يتبقى
+      // من المهلة ثانية على الأقل، فلا يمرّ إيقافٌ انتظرها بشرط الإرجاع
+      // في أقل من نصف المهلة أدناه
+      final sinceSend = Stopwatch()..start();
       peer.sendUpgrade(srv.port);
-      // القراءة في كل دورة من دورات الأحداث: الخانة تؤخذ قبل ترقية
-      // القناة، فظهورها في العدّاد هو أول ما يراه الخارجي منها
-      var turns = 0;
-      while (srv.counters.wsPreauthPool == 0 && turns < 5000) {
+      while (srv.counters.wsPreauthPool == 0 &&
+          sinceSend.elapsed < authTimeout ~/ 2) {
         await Future<void>.delayed(Duration.zero);
-        turns++;
       }
       expect(
         srv.counters.wsPreauthPool,
         1,
         reason:
-            'the channel holds its pool slot: its upgrade is in '
-            'flight or just delivered',
+            'the channel takes its pool slot within half the channel auth '
+            'deadline of the upgrade, so its upgrade is in flight or just '
+            'delivered when the stop begins '
+            '(${sinceSend.elapsed} after the request was sent)',
       );
       final sw = Stopwatch()..start();
       final report = await srv.stop(timeout: const Duration(seconds: 6));
@@ -155,7 +169,7 @@ void main() {
       );
       expect(
         sw.elapsed,
-        lessThan(const Duration(seconds: 1)),
+        lessThan(authTimeout ~/ 2),
         reason:
             'the stop closes the channel at once - it never waits for '
             'the channel auth deadline',
