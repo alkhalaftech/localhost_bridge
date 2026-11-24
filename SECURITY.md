@@ -265,7 +265,8 @@ What the bridge guards now:
   budget holds its seat until it completes. WebSocket channels count
   against this budget only after their credential: a channel still
   waiting for its credential sits in a small internal pool (8 channels
-  in total, `maxSeatsPerOrigin` per origin) that holds no command seat,
+  in total, min(`maxSeatsPerOrigin`, 8) per origin) that holds no
+  command seat,
   takes its seat only at credential acceptance, and keeps it for the
   channel's lifetime — credential-less channels can never occupy the
   seats, and a channel whose seat or share is gone by its acceptance
@@ -294,8 +295,8 @@ What remains:
   reconcilable `504 handler_timeout` - without one a slow handler
   holds its seat until it completes. Credential-less WebSocket
   channels never join this flood: they wait in the internal channel
-  pool (8 in total, `maxSeatsPerOrigin` per origin) that holds no
-  seat, so origin rotation fills the pool - further channels are
+  pool (8 in total, min(`maxSeatsPerOrigin`, 8) per origin) that holds
+  no seat, so origin rotation fills the pool - further channels are
   refused before the upgrade with the standing codes while the
   commands stay served.
 - **Peak memory under origin rotation is bounded by the caps** — the
