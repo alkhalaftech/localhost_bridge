@@ -166,6 +166,18 @@ jobs:
             echo "::notice title=lab timing::${line:0:200}"
           done
 
+      # The corpus pair that rides the TLS feed prints one TLS-CORPUS line
+      # per case naming the status each door answered. The over-limit body
+      # case rides as a notice, so its verdict on every runner - macOS
+      # included - reads from the public annotations on a green run too.
+      - name: TLS corpus pair verdicts
+        shell: bash
+        if: always()
+        run: |
+          (grep -E "^TLS-CORPUS: [^ ]+ 04_over_limit " "$RUNNER_TEMP/test_out.txt" || true) | while IFS= read -r line; do
+            echo "::notice title=tls corpus::${line:0:200}"
+          done
+
   browser-lab:
     # The real-browser lab (test/browser_lab_test.dart): a system
     # Chrome/Chromium driven headlessly proves the pre-pairing browser
