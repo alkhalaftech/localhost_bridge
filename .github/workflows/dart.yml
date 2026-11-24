@@ -166,6 +166,18 @@ jobs:
             echo "::notice title=lab timing::${line:0:200}"
           done
 
+      # The body-limit witness prints one BODY-LIMIT line naming how long a
+      # full-cap body sent in ordinary chunks took to be served. It rides
+      # as a notice, so the margin to the body limit reads from the public
+      # annotations on every runner.
+      - name: body limit margin
+        shell: bash
+        if: always()
+        run: |
+          (grep -E "^BODY-LIMIT:" "$RUNNER_TEMP/test_out.txt" || true) | while IFS= read -r line; do
+            echo "::notice title=body limit::${line:0:200}"
+          done
+
       # The corpus pair that rides the TLS feed prints one TLS-CORPUS line
       # per case naming the status each door answered. The over-limit body
       # case rides as a notice, so its verdict on every runner - macOS
