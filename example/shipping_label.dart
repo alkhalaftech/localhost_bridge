@@ -12,7 +12,7 @@
 //
 // إصدار الملصق أمر بأثر (استهلاك شريط/تكلفة ناقل): المضيف الجاد يضعه
 // خلف تأكيد بشري ودفتر عدم تكرار — انظر example/idempotent_handler.dart
-// وقسم «Recommended setup» في SECURITY.md.
+// وقسم «Recommended setup for irreversible commands» في SECURITY.md.
 import 'dart:convert';
 import 'dart:io';
 
