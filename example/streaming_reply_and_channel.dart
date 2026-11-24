@@ -259,14 +259,25 @@ Future<bool> _runSelfCheck() async {
         onTimeout: () => <String>[],
       );
       await silentSub.cancel();
+      // العميل يغلق جهته أيضاً: قناة أغلقها الخادم مع اشتراكٍ ملغى قد
+      // تجلس مقبسُها على مؤقّت الخمول بدل أن يموت حتماً — والإغلاق
+      // المعلق فشلٌ معلن في الفحص لا صمت
+      var silentHandshake = true;
+      try {
+        await silent.close().timeout(const Duration(seconds: 3));
+      } on TimeoutException {
+        silentHandshake = false;
+      }
       check(
         'a channel with no credential inside the short auth deadline is '
-            'cut with ws_auth_timeout',
+            'cut with ws_auth_timeout, and both hands complete the close',
         framesAtClose.isNotEmpty &&
             silent.closeCode != null &&
-            framesAtClose.any((f) => f.contains('ws_auth_timeout')),
+            framesAtClose.any((f) => f.contains('ws_auth_timeout')) &&
+            silentHandshake,
         'closeCode ${silent.closeCode} frames '
-            '${framesAtClose.take(2).join(' | ').trim()}',
+            '${framesAtClose.take(2).join(' | ').trim()} handshake '
+            '$silentHandshake',
       );
     }
   } finally {
@@ -280,7 +291,10 @@ Future<bool> _runSelfCheck() async {
               '${channelSupported ? '' : ', channel skipped'})'
         : 'SELF-CHECK FAILED ($failed of ${passed + failed} checks failed)',
   );
-  return failed == 0;
+  // حسم الفحص: الحكم طُبع ولا انتظار بعده — قناة قطعتها مهلة الاعتماد
+  // تُبقي على هذه الـSDK مؤقّتات تفكيك حية بعد كل الهدم فتعيش العملية
+  // دقيقة إضافية، ووضع الفحص لا مضيف حي فالخروج صريح بالحكم النهائي
+  exit(failed == 0 ? 0 : 1);
 }
 
 Future<void> main(List<String> args) async {

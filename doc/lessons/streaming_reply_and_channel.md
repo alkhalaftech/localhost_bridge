@@ -40,8 +40,12 @@ Five checks from a real client: the streamed request reads as
 reads the standing JSON reply; an unlisted origin with the stream
 header is still refused `origin_not_listed` - streaming never bypasses
 admission; the channel takes its token credential from the first
-message and answers commands as reply events; and a channel with no
-credential is cut inside the 3-second deadline with `ws_auth_timeout`.
+message, answers commands as reply events, and closes by both hands;
+and a channel with no credential is cut inside the 3-second deadline
+with `ws_auth_timeout`, both hands completing that close too. The
+probe mode ends with an explicit `exit` on its verdict: a channel cut
+by the auth deadline leaves teardown timers alive on this SDK, and a
+process that has said its final word does not wait a minute for them.
 Below 3.13 the channel checks are replaced by one named SKIP line and
 the run still ends `SELF-CHECK PASSED (3 checks, channel skipped)`
 with exit 0 - the skip says exactly what was not checked.
