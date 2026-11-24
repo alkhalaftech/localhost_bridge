@@ -11,7 +11,8 @@
 // ::1 حيث يتوفر، وعائلة الميزانيات الزوجية، ومصافحة TLS لا تكتمل لا
 // تحجز مقعداً ولا تصل إلى الخادم أصلاً وتُقطع على السلك عند مهلة
 // المصافحة (المسلَّح العالق كذلك)، والمرسل الميت يفرغ مقعده، وصفحة
-// الجسر المُخدمة تجاوز أصلها https لا http، والقناة wss، والإطفاء
+// الجسر المُخدمة تجاوز أصلها https لا http، والقناة wss، وباب الغلاف
+// يقرأ حقائق HttpServer.bindSecure الثلاث من طلب عبره بنفسه، والإطفاء
 // الافتراضي حرفاً ورفض توليفة مقبس اليونكس عند البناء.
 import 'dart:async';
 import 'dart:convert';
@@ -20,6 +21,8 @@ import 'dart:typed_data' show BytesBuilder;
 
 import 'package:test/test.dart';
 import 'package:localhost_bridge/localhost_bridge.dart';
+import 'package:localhost_bridge/src/tls_handshake_feed.dart'
+    show TlsHandshakeFeed;
 
 import 'support/tls_cert.dart';
 
@@ -222,6 +225,20 @@ Future<Map<String, Object?>> _exchangeTls(
   final reply = await _drive(socket, request);
   socket.destroy();
   return reply;
+}
+
+// قارئ حقائق الباب: ما يقرؤه HttpServer من مقبس الطلب الذي عبر — الشكل
+// والموثق ومعلومات الاتصال — ويُقرأ من طلب عبر الباب الذي يُقاس هو،
+// لا يُفترض فيه من باب آخر
+Map<String, Object?> _readFacts(HttpRequest req, int listenerPort) {
+  final info = req.connectionInfo;
+  return <String, Object?>{
+    'scheme': req.requestedUri.scheme,
+    'remoteIsLoopback': info?.remoteAddress.isLoopback,
+    'hasLocalPort': (info?.localPort ?? 0) == listenerPort,
+    'hasRemotePort': (info?.remotePort ?? 0) > 0,
+    'certificate': req.certificate,
+  };
 }
 
 String _post(
@@ -1098,8 +1115,8 @@ void main() {
   });
 
   test(
-    'the wrapper door answers beside the HttpServer.bindSecure '
-    'reference door: the reference reads scheme https, a null '
+    'the wrapper door and the HttpServer.bindSecure reference door read '
+    'the same facts from their own requests: scheme https, a null '
     'certificate, and a loopback connectionInfo, and both doors serve',
     () async {
       // باب مرجعي من المستمع الآمن العام بلا حزمة بينهما: يقرأ الحقائق
@@ -1112,11 +1129,7 @@ void main() {
       );
       final seen = <String, Object?>{};
       ref.listen((req) async {
-        seen['scheme'] = req.requestedUri.scheme;
-        final info = req.connectionInfo;
-        seen['remoteIsLoopback'] = info?.remoteAddress.isLoopback;
-        seen['hasLocalPort'] = (info?.localPort ?? 0) > 0;
-        seen['certificate'] = req.certificate;
+        seen.addAll(_readFacts(req, ref.port));
         req.response.write('ok');
         await req.response.close();
       });
@@ -1185,8 +1198,111 @@ void main() {
       expect(
         seen['hasLocalPort'],
         true,
-        reason: 'the reference connectionInfo carries a real local port',
+        reason:
+            'the reference connectionInfo carries its listener port '
+            'as the local port',
       );
+      expect(
+        seen['hasRemotePort'],
+        true,
+        reason: 'the reference connectionInfo carries the peer port',
+      );
+      // والباب المغلَّف مقروءاً بنفسه لا مفترضاً من باب المرجع:
+      // التلقيمة تحت HttpServer.listenOn كما تُركَّب في الحزمة — القبول
+      // خاماً والتسليح بعد أول سجل والتسليم بمحوّل يرتدي SecureSocket —
+      // والحقائق نفسها تُقرأ من طلب عبره، فالتطابق بين البابين محسوب
+      final rawDoor = await RawServerSocket.bind(
+        InternetAddress.loopbackIPv4,
+        0,
+      );
+      final feed = TlsHandshakeFeed(
+        raw: rawDoor,
+        context: _tlsContext(),
+        handshakeTimeout: const Duration(seconds: 5),
+        openConnectionCap: 0,
+        inFlightHandshakeCap: TlsHandshakeFeed.internalHandshakeCap,
+        openConnectionTotal: () => 0,
+        inFlightHandshakesTotal: () => 0,
+        onCut: () {},
+        onDelivered: () {},
+        onOverHandshakeCap: (int _, int _) {},
+        onOverConnectionCap: (int _, int _) {},
+      );
+      final wrapped = HttpServer.listenOn(feed);
+      addTearDown(() async {
+        wrapped.close(force: true);
+        await feed.close();
+      });
+      final wrapSeen = <String, Object?>{};
+      wrapped.listen((req) async {
+        wrapSeen.addAll(_readFacts(req, wrapped.port));
+        req.response.write('ok');
+        await req.response.close();
+      });
+      final wrapReply = await _exchangeTls(
+        '127.0.0.1',
+        wrapped.port,
+        'GET / HTTP/1.1\r\nHost: 127.0.0.1:${wrapped.port}\r\n\r\n',
+      );
+      expect(
+        wrapReply['status'],
+        200,
+        reason: 'the feed door serves its own exchange',
+      );
+      expect(
+        wrapSeen['scheme'],
+        'https',
+        reason:
+            'the feed door itself reads the https scheme - the adapter '
+            'wears SecureSocket, so the SDK decides https on the wrapper '
+            'door exactly as on bindSecure',
+      );
+      expect(
+        wrapSeen['certificate'],
+        isNull,
+        reason:
+            'the feed door itself reads a null request certificate - '
+            'the adapter answers peerCertificate from the engine',
+      );
+      expect(
+        wrapSeen['remoteIsLoopback'],
+        true,
+        reason: 'the feed door connectionInfo reads a loopback peer',
+      );
+      expect(
+        wrapSeen['hasLocalPort'],
+        true,
+        reason:
+            'the feed door connectionInfo carries its listener port '
+            'as the local port',
+      );
+      expect(
+        wrapSeen['hasRemotePort'],
+        true,
+        reason:
+            'the feed door connectionInfo carries the peer port the '
+            'adapter captured from the raw socket',
+      );
+      // والتطابق قيمةً بقيمة: كل حقيقة قرأها باب المرجع قرأها باب الغلاف
+      // بالقيمة نفسها
+      const facts = [
+        'scheme',
+        'remoteIsLoopback',
+        'hasLocalPort',
+        'hasRemotePort',
+        'certificate',
+      ];
+      expect(wrapSeen.keys.toSet(), facts.toSet());
+      expect(seen.keys.toSet(), facts.toSet());
+      for (final fact in facts) {
+        expect(
+          wrapSeen[fact],
+          seen[fact],
+          reason:
+              'parity on "$fact": the feed door and the bindSecure door '
+              'read the same value',
+        );
+      }
       expect(
         srv.counters.tlsHandshakesDelivered,
         1,
