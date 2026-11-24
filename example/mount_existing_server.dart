@@ -84,8 +84,9 @@ class _MountedDemo {
     return demo;
   }
 
-  /// الجسر لم يبدأ إصغاءً قط على هذا المثال — والفراغ يحسم ما تبقى في
-  /// الطيران على المسار المركب حتماً قبل إغلاق خادم المضيف
+  /// The bridge never started a listener in this example - and stop()
+  /// settles whatever is still in flight on the mounted path before the
+  /// host server closes.
   Future<void> close() async {
     await bridge.stop();
     await host.close(force: true);
