@@ -42,6 +42,11 @@
   internal pre-auth pool right now), so a host dashboard can watch the
   pool and a stop's harvest of it; a fully drained stop reads zero on
   both.
+- Added: `BridgeStopReport.wsChannelsStillLive` - the WebSocket channel
+  connections still live when a stop returned (pooled and authenticated
+  alike) - counted into `stillRunning`, so a stop bounded by its timeout
+  that returns before the pool drained reports the remainder and reads
+  `fullyDrained` false instead of a silent true.
 - Added: `BridgeConfig.maxOpenConnections` - an optional hard ceiling
   on open connections (`dart:io` never bounds them): a request arriving
   while more sockets than the cap are open answers `503`, and once the

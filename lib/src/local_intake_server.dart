@@ -112,6 +112,7 @@ class _OrphanTicket {
 class BridgeStopReport {
   const BridgeStopReport._({
     required this.seatsStillActive,
+    required this.wsChannelsStillLive,
     required this.orphanHandlersStillRunning,
   });
 
@@ -120,13 +121,23 @@ class BridgeStopReport {
   /// lets a bounded stop own that honestly.
   final int seatsStillActive;
 
+  /// WebSocket channel connections still live when the stop returned -
+  /// the pooled credential-less ones and the authenticated ones alike. A
+  /// channel whose close never settled inside the deadline (a peer that
+  /// never answers the close frame) is still an open connection, so a
+  /// bounded stop names it here instead of reading a silent
+  /// [fullyDrained]; the unbounded stop waits the pool out and reads
+  /// zero.
+  final int wsChannelsStillLive;
+
   /// Orphaned handlers (budget-expired work) still running when the stop
   /// returned, across generations: orphans retired at an earlier stop's
   /// return count here while they are still working.
   final int orphanHandlersStillRunning;
 
-  /// Seats plus orphans still working at the return.
-  int get stillRunning => seatsStillActive + orphanHandlersStillRunning;
+  /// Seats, live channel sockets, and orphans still working at the return.
+  int get stillRunning =>
+      seatsStillActive + wsChannelsStillLive + orphanHandlersStillRunning;
 
   /// Whether nothing was left working at the return.
   bool get fullyDrained => stillRunning == 0;
@@ -134,6 +145,7 @@ class BridgeStopReport {
   @override
   String toString() =>
       'BridgeStopReport(seatsStillActive: $seatsStillActive, '
+      'wsChannelsStillLive: $wsChannelsStillLive, '
       'orphanHandlersStillRunning: $orphanHandlersStillRunning)';
 }
 
@@ -2131,6 +2143,7 @@ class LocalIntakeServer {
   /// moment, read from the live counters.
   BridgeStopReport _stopSnapshot() => BridgeStopReport._(
     seatsStillActive: _activeRequests,
+    wsChannelsStillLive: _liveWsSockets.length,
     orphanHandlersStillRunning: _activeOrphans + _retiredOrphans,
   );
 

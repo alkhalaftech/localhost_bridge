@@ -433,4 +433,89 @@ void main() {
       }
     },
   );
+
+  test(
+    'stop(timeout) that returns while a pooled channel still holds the '
+    'close frame never claims fullyDrained',
+    timeout: const Timeout(Duration(seconds: 40)),
+    () async {
+      // نظير ميت بمقبس خام: القناة تترقى إلى الحوض ثم تصمت أبدياً فلا
+      // تجيب إطار الإغلاق، وstop بمهلة تعود والخانة حية — فالتقرير
+      // الصادق لا يدّعي فراغاً لم يقع ولا يترك البقاء بلا ذكر
+      final (srv, pr) = await startPool();
+      try {
+        final dead = await Socket.connect('127.0.0.1', srv.port);
+        addTearDown(dead.destroy);
+        final key = base64Encode(List<int>.filled(16, 0xab));
+        dead.add(
+          utf8.encode(
+            'GET /ws HTTP/1.1\r\n'
+            'Host: 127.0.0.1:${srv.port}\r\n'
+            'Upgrade: websocket\r\n'
+            'Connection: Upgrade\r\n'
+            'Sec-WebSocket-Key: $key\r\n'
+            'Sec-WebSocket-Version: 13\r\n'
+            'Origin: https://portal.example\r\n'
+            'Sec-Fetch-Mode: websocket\r\n'
+            'Sec-Fetch-Dest: websocket\r\n'
+            '\r\n',
+          ),
+        );
+        final upgraded = Completer<void>();
+        final head = StringBuffer();
+        late final StreamSubscription<List<int>> sub;
+        sub = dead.listen(
+          (chunk) {
+            head.write(utf8.decode(chunk, allowMalformed: true));
+            if (!upgraded.isCompleted && head.toString().contains('\r\n\r\n')) {
+              upgraded.complete();
+              // توقف القراءة هنا: لا إجابة لإطار الإغلاق أبداً
+              sub.pause();
+            }
+          },
+          onError: (Object _) {
+            if (!upgraded.isCompleted) upgraded.completeError('socket error');
+          },
+          onDone: () {
+            if (!upgraded.isCompleted) upgraded.completeError('socket closed');
+          },
+        );
+        await upgraded.future.timeout(const Duration(seconds: 5));
+        expect(
+          head.toString(),
+          contains('101'),
+          reason: 'the channel upgraded into the pool and stays silent',
+        );
+        expect(
+          await waitFor(() => srv.counters.wsPreauthPool == 1),
+          isTrue,
+          reason: 'the upgraded channel sits in the pool',
+        );
+        final report = await srv
+            .stop(timeout: const Duration(milliseconds: 900))
+            .timeout(const Duration(seconds: 8));
+        expect(
+          report.fullyDrained,
+          isFalse,
+          reason:
+              'a bounded stop returning with a live pooled channel never '
+              'claims a fully drained stop',
+        );
+        expect(
+          report.wsChannelsStillLive,
+          1,
+          reason: 'the report names the channel socket that outlived the stop',
+        );
+        expect(
+          srv.counters.wsChannels,
+          1,
+          reason:
+              'the handle counter still reads the channel socket that '
+              'outlived the stop',
+        );
+      } finally {
+        pr.dispose();
+      }
+    },
+  );
 }
