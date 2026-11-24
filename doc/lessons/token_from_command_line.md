@@ -45,7 +45,7 @@ Where to look
 
 - `example/token_from_command_line.dart:61` - the token generated once
   inside the self-check, then armed with an empty policy at line 63.
-- `example/token_from_command_line.dart:110` - the wrong-guess
+- `example/token_from_command_line.dart:111` - the wrong-guess
   sequence that walks the real budget on the wire.
 - `example/token_from_command_line.dart:131` - the lockout check with
   the honest `Retry-After`, and line 140 the holder crossing anyway.
