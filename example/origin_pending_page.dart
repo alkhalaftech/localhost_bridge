@@ -45,7 +45,10 @@ void _state(String state, String detail) {
 // والرمز وRetry-After كما تقرأهما الصفحة، وتعيد المحاولة مرة واحدة بعد
 // الانتظار المعلن بالضبط. تعيد ما سرت فيه الحالات وحكمها الأخير وثانية
 // الانتظار المعلن على السلك — بلا مطبوعات فقط يقرأها المستخدم.
-Future<(List<String> states, String verdict, int waitSeconds)> _runFlow(
+Future<
+  (List<String> states, String verdict, int waitSeconds, String retryAfterRaw)
+>
+_runFlow(
   HttpClient client,
   int port,
   String origin,
@@ -79,20 +82,22 @@ Future<(List<String> states, String verdict, int waitSeconds)> _runFlow(
     first = await send().timeout(const Duration(seconds: 5));
   } on Exception {
     mark('NO-VERDICT', 'the sender never got an answer — treat as down');
-    return (states, states.last, 0);
+    return (states, states.last, 0, '');
   }
   final firstBody = await utf8.decoder.bind(first).join();
   final firstJson = jsonDecode(firstBody) as Map<String, dynamic>;
   if (first.statusCode == 200) {
     mark('GRANTED', 'admitted outright — not the consent path');
-    return (states, states.last, 0);
+    return (states, states.last, 0, '');
   }
   if (first.statusCode != 403 || firstJson['error'] != 'origin_pending') {
     mark('REFUSED', '${first.statusCode} ${firstJson['error']}');
-    return (states, states.last, 0);
+    return (states, states.last, 0, '');
   }
-  final waitSeconds =
-      int.tryParse(first.headers.value('retry-after') ?? '') ?? 2;
+  // الترويسة الخام تُحفظ كما قرأها السلك: الفحص يرفض غيابها قبل أي
+  // تحليل — والاحتياط 2 ثانية للانتظار لا يجوز أن يتظاهر بأنه قراءة
+  final retryAfterRaw = first.headers.value('retry-after') ?? '';
+  final waitSeconds = int.tryParse(retryAfterRaw) ?? 2;
   mark('PENDING', 'consent question open — Retry-After: $waitSeconds s');
   mark('WAITING', 'honoring Retry-After — no hammering');
   await Future<void>.delayed(Duration(seconds: waitSeconds));
@@ -102,7 +107,7 @@ Future<(List<String> states, String verdict, int waitSeconds)> _runFlow(
     second = await send().timeout(const Duration(seconds: 5));
   } on Exception {
     mark('NO-VERDICT', 'the sender never got an answer — treat as down');
-    return (states, states.last, waitSeconds);
+    return (states, states.last, waitSeconds, retryAfterRaw);
   }
   final secondBody = await utf8.decoder.bind(second).join();
   final secondJson = jsonDecode(secondBody) as Map<String, dynamic>;
@@ -111,7 +116,7 @@ Future<(List<String> states, String verdict, int waitSeconds)> _runFlow(
   } else {
     mark('REFUSED', '${second.statusCode} ${secondJson['error']}');
   }
-  return (states, states.last, waitSeconds);
+  return (states, states.last, waitSeconds, retryAfterRaw);
 }
 
 /// The consent state-machine page. In production this lives on your https
@@ -291,9 +296,11 @@ Future<bool> _runSelfCheck() async {
       'walked ${grant.$1.join(' -> ')}',
     );
     check(
-      'the consent question carried an honest Retry-After on the wire',
-      grant.$3 >= 1,
-      'Retry-After was ${grant.$3} s',
+      'the consent question carried an honest Retry-After header on '
+          'the wire',
+      grant.$4.isNotEmpty && grant.$3 >= 1,
+      'Retry-After header ${grant.$4.isEmpty ? '<absent>' : grant.$4}, '
+          'parsed ${grant.$3} s',
     );
 
     final refuse = await _runFlow(
