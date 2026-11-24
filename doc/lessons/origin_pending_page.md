@@ -49,14 +49,18 @@ stops it.
 Where to look
 -------------
 
-- `example/origin_pending_page.dart:45` - `_runFlow`: one round of the
+- `example/origin_pending_page.dart:48` - `_runFlow`: one round of the
   machine over the wire; it reports the states it visited, the final
   verdict, and the `Retry-After` seconds it read.
-- `example/origin_pending_page.dart:221` - `_runSelfCheck`: the page
+- `example/origin_pending_page.dart:224` - `_runSelfCheck`: the page
   GET and the two walks, one PASS line per check.
-- `example/origin_pending_page.dart:240` - the wiring: the policy is
-  nothing but the consent callback.
-- `example/origin_pending_page.dart:316` - the mode switch that keeps
+- `example/origin_pending_page.dart:245` - the wiring: the policy is
+  nothing but the consent callback, and the question window is sized
+  to this demo's human (`askTimeout: _humanAskWindow`, 3 seconds
+  against an 1100 ms answer) - a live host keeps the 60-second
+  default, but a process that must exit does not want a question
+  timer outliving its checks.
+- `example/origin_pending_page.dart:327` - the mode switch that keeps
   the interactive walk and the unattended checks on one file.
 
 What it deliberately does not do

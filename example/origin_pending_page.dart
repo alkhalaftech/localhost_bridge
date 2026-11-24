@@ -19,6 +19,9 @@ import 'package:localhost_bridge/localhost_bridge.dart';
 // الأول بعد مهلة قصيرة ويرفض كل سؤال بعدها، وكل أصل آخر يُرفض من أول
 // سؤال. حتمي كي تعرض الجولة المسارين: منحة ثم رفض.
 const _humanAnswerDelay = Duration(milliseconds: 1100);
+// نافذة السؤال (askTimeout) بمقاس هذا الإنسان التجريبي: أوسع من مهلة
+// إجابته بحاشية، وأضيق بكثير من الافتراضي الذي يليق مضيفاً حياً
+const _humanAskWindow = Duration(seconds: 3);
 final _answersPerOrigin = <String, int>{};
 
 Future<OriginConsent> _simulateHuman(String origin) async {
@@ -237,7 +240,15 @@ Future<bool> _runSelfCheck() async {
     correlationIdGenerator: () =>
         DateTime.now().microsecondsSinceEpoch.toRadixString(36),
     protection: IntakeProtection(telemetry: const SilentTelemetry())
-      ..update(policy: OriginPolicy(onUnknownOrigin: _simulateHuman)),
+      ..update(
+        // نافذة السؤال بمقاس الإنسان التجريبي الذي يجيب بعد 1.1 ثانية:
+        // الافتراضي 60 ثانية يليق مضيفاً حياً لا عملاً يجب أن يخرج،
+        // ومؤقّت السؤال الحي حتى نفاذه يُبقي العملية بعد الفحص حتماً
+        policy: OriginPolicy(
+          onUnknownOrigin: _simulateHuman,
+          askTimeout: _humanAskWindow,
+        ),
+      ),
   );
   final bridgePort = await bridge.start(preferredPort: 0);
 
@@ -324,7 +335,15 @@ Future<void> main(List<String> args) async {
     correlationIdGenerator: () =>
         DateTime.now().microsecondsSinceEpoch.toRadixString(36),
     protection: IntakeProtection(telemetry: const SilentTelemetry())
-      ..update(policy: OriginPolicy(onUnknownOrigin: _simulateHuman)),
+      ..update(
+        // نافذة السؤال بمقاس الإنسان التجريبي الذي يجيب بعد 1.1 ثانية:
+        // الافتراضي 60 ثانية يليق مضيفاً حياً لا عملاً يجب أن يخرج،
+        // ومؤقّت السؤال الحي حتى نفاذه يُبقي العملية بعد الفحص حتماً
+        policy: OriginPolicy(
+          onUnknownOrigin: _simulateHuman,
+          askTimeout: _humanAskWindow,
+        ),
+      ),
   );
   final bridgePort = await bridge.start(preferredPort: 9300);
 
