@@ -374,10 +374,12 @@
 - Added: the WebSocket channel - `BridgeConfig.wsPath` (null, off by
   default) opens a `dart:io` WebSocket on the host-chosen path. The
   handshake passes the same single admission step every request
-  passes: origin, fetch metadata (the browser's own
-  `Sec-Fetch-Mode: websocket` handshake shape is a real send method),
-  host authority, and the seat caps - every refusal answers its
-  standing wire code BEFORE the upgrade. The connection opens only
+  passes: origin, fetch metadata (the accepted shape is the browser's
+  own websocket handshake - `Sec-Fetch-Mode: websocket` with
+  `Sec-Fetch-Dest: websocket` or `Sec-Fetch-Dest: empty` - a real
+  send method), host authority, and the seat caps - every refusal
+  answers its standing wire code BEFORE the upgrade. The connection
+  opens only
   after its first message carries a verified credential - the shared
   token or a paired origin-bound signature (`token_required` /
   `token_locked` / `pair_signature_replay` close with their literal
