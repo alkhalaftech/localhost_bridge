@@ -949,6 +949,11 @@ class LocalIntakeServer {
   /// shares the seat counter with the old one mid-drain.
   Future<void>? _stoppingFuture;
 
+  // الموعد الكلي للإيقاف الجاري (ملّي-ثانية، فارغٌ للإيقاف بلا مهلة):
+  // يُقرأ من مسار الإغلاق عند الدخول ليكون حدّ انتظار مصافحته هو رصيد
+  // مهلة الإيقاف نفسه — عين حدّ تسوية اللقطة
+  int? _stoppingDeadlineMs;
+
   HttpServer? _server;
   int _port = 0;
 
@@ -2009,6 +2014,9 @@ class LocalIntakeServer {
     // الموعد الكلي للمهلة المطلوبة: يحكم الإغلاق الرشيق والمقاعد
     // واليتامى معا؛ وبلا مهلة يبقى الانتظار الكامل كما كان
     final deadlineMs = timeout == null ? null : _now + timeout.inMilliseconds;
+    // وموعدُه يُتاح لمسار الإغلاق عند الدخول: قناة تبلغ موضعها بعد
+    // اللقطة تحدد انتظار مصافحتها برصيد المهلة نفسه
+    _stoppingDeadlineMs = deadlineMs;
     try {
       final server = _server;
       final serverV6 = _serverV6;
@@ -2163,6 +2171,7 @@ class LocalIntakeServer {
         );
       }
       _stoppingFuture = null;
+      _stoppingDeadlineMs = null;
       settled.complete();
     }
     return _stopSnapshot();
@@ -3883,6 +3892,57 @@ class LocalIntakeServer {
     }
   }
 
+  // إغلاق قناة بلغت موضعها بعد لقطة الأحياء في أثناء الإيقاف: إطار
+  // إغلاق stop نفسه، والمحاسبة محمولة حتى يُغلق المقبع فعلاً — بانتظار
+  // الدفق لا مستقبل الإغلاق، فمستقبل الإغلاق يكتمل بتفريغ الإطار ولا
+  // يعني إغلاق المقبع — وبحدّ رصيد مهلة الإيقاف على انتظار stop وحده،
+  // وما بعده بلا حدّ كما في جلسة القناة التي تكته اللقطة. ولا جلسة
+  // هنا: لا اعتماد ولا ردّ على مقبسٍ في حالة إغلاق
+  Future<void> _wsCloseWhileStopping(
+    WebSocket ws,
+    void Function() leavePool,
+  ) async {
+    final deadlineMs = _stoppingDeadlineMs;
+    try {
+      final socketClosed = Completer<void>();
+      late final StreamSubscription<dynamic> sub;
+      sub = ws.listen(
+        (_) {},
+        onDone: () {
+          if (!socketClosed.isCompleted) socketClosed.complete();
+        },
+        onError: (Object _) {
+          if (!socketClosed.isCompleted) socketClosed.complete();
+        },
+      );
+      try {
+        unawaited(
+          ws
+              .close(WebSocketStatus.goingAway, 'server stopping')
+              .catchError((Object _) {}),
+        );
+        if (deadlineMs == null) {
+          await socketClosed.future;
+        } else {
+          try {
+            await socketClosed.future.timeout(_remaining(deadlineMs));
+          } on TimeoutException {
+            // ما بعده بلا حدّ كما في جلسة القناة المكتهة: المحاسبة
+            // تبقى حتى يُغلق المقبع فعلاً مهما طال، وحدّ الإيقاف يحكم
+            // انتظار stop وحده
+            await socketClosed.future;
+          }
+        }
+      } finally {
+        unawaited(sub.cancel());
+      }
+    } on Object {
+      // القناة ماتت في أثناء الإغلاق: حسمها مسارها الخاص
+    } finally {
+      leavePool();
+    }
+  }
+
   // مسار القناة: الحوض قبل الاعتماد (سقفاه الداخليان — لا مقعد أمر
   // في الحوض أبداً)، والمصافحة عبر خطوة القبول الواحدة (الرفض قبل
   // الترقية برمز السلك الحرفي)، والترقية بسقف الرسالة مرّ للمحول
@@ -4001,7 +4061,24 @@ class LocalIntakeServer {
       ws.pingInterval = _wsHeartbeat;
       _liveWsSockets.add(ws);
       try {
-        await _wsSession(ws, origin, leavePool);
+        // الإغلاق عند الدخول: لقطة الأحياء تؤخذ في مقدمة stop قبل أن
+        // تبلغ هذه القناة موضعها — كانت تنتظر الترقية في الحوض — فلا
+        // يبلغها الإغلاق الرشيق وتعيش إلى مهلة اعتمادها بلا حاكم.
+        // إطار إغلاق stop يُرسل هنا عند الدخول، والجلسة تجري كعادتها
+        // فتحمل المحاسبة حتى يُغلق المقبع فعلاً — بالتأكيد عند مهلة
+        // الاعتماد إن لم تُكمل المصافحة — ولا تتحرر الخانة قبل ذلك
+        // الإغلاق عند الدخول: لقطة الأحياء تؤخذ في مقدمة stop قبل أن
+        // تبلغ هذه القناة موضعها — كانت تنتظر الترقية في الحوض — فلا
+        // يبلغها الإغلاق الرشيق وتعيش إلى مهلة اعتمادها بلا حاكم.
+        // إطار إغلاق stop يُرسل هنا عند الدخول، ومصافحته بانتظارٍ حتى
+        // حدّ رصيد مهلة الإيقاف ثم بلا حدّ كما في جلسة القناة التي
+        // تكته اللقطة، والمحاسبة تبقى حتى يُغلق المقبع فعلاً — فلا
+        // يُدّعى فراغٌ لم يقع ولا جلسة على مقبسٍ في حالة إغلاق
+        if (_stoppingFuture != null) {
+          await _wsCloseWhileStopping(ws, leavePool);
+        } else {
+          await _wsSession(ws, origin, leavePool);
+        }
       } finally {
         _liveWsSockets.remove(ws);
       }
