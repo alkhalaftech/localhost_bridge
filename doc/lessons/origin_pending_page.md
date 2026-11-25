@@ -35,8 +35,9 @@ honoring Retry-After, one retry, granted; the consent question really
 carried an honest `Retry-After` header on the wire - the check
 reads the header itself and refuses an absent one before parsing, so
 a fallback wait can never pose as a read (verified: with the header
-send removed, this check is the one that goes red); and the stranger origin ends refused without any
-grant. The run ends `SELF-CHECK PASSED (4 checks)` with exit 0.
+send removed, this check is the one that goes red); and the stranger
+origin ends refused without any grant. The run ends `SELF-CHECK
+PASSED (4 checks)` with exit 0.
 
 Interactive:
 
@@ -55,15 +56,15 @@ Where to look
   machine over the wire; it reports the states it visited, the final
   verdict, and the `Retry-After` header exactly as the wire carried it
   (absence travels as an empty string, never as a fallback number).
-- `example/origin_pending_page.dart:227` - `_runSelfCheck`: the page
+- `example/origin_pending_page.dart:229` - `_runSelfCheck`: the page
   GET and the two walks, one PASS line per check.
-- `example/origin_pending_page.dart:246` - the wiring: the policy is
+- `example/origin_pending_page.dart:247` - the wiring: the policy is
   nothing but the consent callback, and the question window is sized
   to this demo's human (`askTimeout: _humanAskWindow`, 3 seconds
   against an 1100 ms answer) - a live host keeps the 60-second
   default, but a process that must exit does not want a question
   timer outliving its checks.
-- `example/origin_pending_page.dart:332` - the mode switch that keeps
+- `example/origin_pending_page.dart:334` - the mode switch that keeps
   the interactive walk and the unattended checks on one file.
 
 What it deliberately does not do
