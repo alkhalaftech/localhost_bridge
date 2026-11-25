@@ -107,13 +107,19 @@ void main() {
           'every delivered socket (http_impl.dart:3558-3562) - the adapter '
           'must forward it, not name it unsupported',
     );
-    final readBack = adapter.getRawOption(RawSocketOption(6, 1, Uint8List(4)));
+    // التمكين يُقرأ من الخام بترميز منصته، ولا رقم واحد عبر المنصات:
+    // لينكس ويندوز يقرآن 1 وماك يقرأ 4 (مقيس على macos-latest في CI) —
+    // فالحكم المشترك الصادق: الحالة بعد النداء ممكَّنة أي غير صفرية،
+    // والويندوز يقرأ 1 افتراضياً قبل النداء فلا «تغيّر حالة» يُنتظر
+    // منه هناك
+    final after = adapter.getRawOption(RawSocketOption(6, 1, Uint8List(4)));
     expect(
-      readBack[0],
-      1,
+      after[0],
+      isNot(0),
       reason:
-          'IPPROTO_TCP/TCP_NODELAY reads back set from the raw socket - the '
-          'forward reached the wire layer, it was not swallowed',
+          'IPPROTO_TCP/TCP_NODELAY reads back enabled from the raw socket '
+          'after the call - the forward reached the wire layer, it was not '
+          'swallowed',
     );
     client.destroy();
   });
