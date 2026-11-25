@@ -56,11 +56,6 @@ const List<(String, String)> sectionPairs = [
 /// Every other span's text must appear verbatim in the opposite side's
 /// section.
 const Map<String, String> allowedSpanAsymmetries = {
-  // نثر إنجليزي ملفوف بعلامتين لا معرّفاً؛ اسم حقل السلك هو `error`
-  // وهو المذكور في الضلع العربي من الجملة نفسها.
-  'code':
-      'English prose word wrapped in backticks in the intro bullet; the '
-      'wire field itself is "error", which the Arabic side quotes',
   // من قائمة «ما تحصل عليه» في المقدمة العربية؛ موضع كل معرّف أدناه
   // مشترك بين الدليلين ويُفحص هناك في قسمه.
   'Sec-Fetch-Mode: cors':

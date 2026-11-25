@@ -18,7 +18,8 @@ commands *mean* stays entirely in your handler.
 - **Zero runtime dependencies** — pure `dart:io`, one package, no native
   code. (The SDK constraint pub.dev displays is a compatibility range,
   not a dependency.)
-- Rejections carry a stable error `code` — the developer contract. The
+- Rejections carry a stable error code in the `error` field — the
+  developer contract. The
   honest exceptions cut the connection immediately: the busy 503 (the
   global seat cap and the open-connection cap), the per-origin seat
   503, the 403 Host reject (a request whose Host is not this bridge's
@@ -535,8 +536,8 @@ message (a JSON object `{"token": "..."} ` or
 `{"pairing": "id.stamp.sig"}`, within the 10 second auth deadline; the
 pairing signature signs `WS`, the channel path, and a correlation id you
 choose). At credential acceptance the connection takes one concurrency
-seat and its origin share - the same seat budget the HTTP commands hold
-- and keeps both for the channel's lifetime, so `maxConcurrentRequests`
+seat and its origin share - the same seat budget the HTTP commands hold -
+and keeps both for the channel's lifetime, so `maxConcurrentRequests`
 and `maxSeatsPerOrigin` bound the authenticated connections per origin
 exactly like live commands; a channel whose seat or share is gone by its
 acceptance closes with the same standing code. Every inbound message is
@@ -593,10 +594,12 @@ final bridge = LocalIntakeServer(/* your wiring */);
 final server = await HttpServer.bind(InternetAddress.anyIPv4, 8080);
 server.listen((request) async {
   if (request.uri.path == '/bridge') {
-    // الجسر يجيب بالحماية الكاملة، وكل ردٍ يكتب ويُقطع على المقبس المنتزع
+    // The bridge answers with its full protection; every reply is written
+    // and cut on the detached socket
     await bridge.handleHostRequest(request, hostPort: server.port);
   } else {
-    // التطبيق القائم يجيب مساراته بنفسه بإطاره هو؛ الجسر لا يراها
+    // The existing app answers its own routes with its own framework;
+    // the bridge never sees them
     await app.handle(request);
   }
 });
