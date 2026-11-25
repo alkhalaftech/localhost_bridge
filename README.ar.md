@@ -1152,7 +1152,19 @@ blocking requirement and are not needed as a fallback» ([دليل Chrome: Local
 بوابة https خاصتك. ومثالان من خارج الطباعة يعرضان تحقق جهة المضيف في
 مجالين آخرين: `example/shipping_label.dart` (أوامر ملصقات بمواصفة
 مغلقة) و`example/payment_receipt.dart` (سياسة توكن-فقط بمرجع تفويض
-ذَي استعمال واحد يصدره المضيف). وثائق API تسافر مع الحزمة. والدليل
-العربي هو `README.ar.md`.
+ذي استعمال واحد يصدره المضيف).
+
+ستة أمثلة يثبت كل منها نفسه بلا مستخدم بـ`dart run
+example/<name>.dart --self-check` ويحمل درساً في `doc/lessons/`: خمسة
+جديدة — `example/pairing_page.dart` (الرمز المعروض يمشي إلى أمر
+موقَّع)، و`example/token_from_command_line.dart` (السر يبقى في سطر
+الأوامر)، و`example/streaming_reply_and_channel.dart` (الرد المتدفق
+وقناة الويب سوكيت)، و`example/mount_existing_server.dart` (الجسر
+مركّب على خادم المضيف نفسه ومساراته كما هي)،
+و`example/local_status_page.dart` (صفحة حالة بعدادات حية وبلا سر) —
+ومثال صفحة الموافقة أعلاه. ويشغّل
+`dart test test/examples_run_test.dart` كل فحص ذاتي.
+
+وثائق API تسافر مع الحزمة. والدليل العربي هو `README.ar.md`.
 
 الرخصة: BSD 3-Clause.

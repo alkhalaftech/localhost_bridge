@@ -1267,8 +1267,21 @@ or refuse — over the wire at boot, and serves the same machine as a page
 to copy into your https portal. Two examples from outside printing show
 host-side validation in other domains: `example/shipping_label.dart`
 (label commands with a closed spec) and `example/payment_receipt.dart`
-(token-only policy with a single-use, host-issued authorize ref). API
-docs ship with the package. An Arabic guide lives in
+(token-only policy with a single-use, host-issued authorize ref).
+
+Six examples each prove themselves unattended with
+`dart run example/<name>.dart --self-check` and carry a lesson under
+`doc/lessons/`: five new ones - `example/pairing_page.dart` (the
+displayed code walked to a signed command),
+`example/token_from_command_line.dart` (the secret stays on the command
+line), `example/streaming_reply_and_channel.dart` (the streamed reply
+and the WebSocket channel), `example/mount_existing_server.dart` (the
+bridge mounted on a host's own server, routes intact), and
+`example/local_status_page.dart` (a status page with live counters and
+no secret) - and the consent page example above.
+`dart test test/examples_run_test.dart` runs every self-check.
+
+API docs ship with the package. An Arabic guide lives in
 `README.ar.md`.
 
 License: BSD 3-Clause.
