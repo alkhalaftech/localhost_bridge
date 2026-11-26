@@ -130,30 +130,6 @@ int? _openDescriptors() {
   return null;
 }
 
-// هل أدوات البيئة تُدفع مسار فشل الحارس؟ الحارس الوحيد القابل للحقن
-// هنا هو /bin/chmod الغائب: حيث تعمل الأداة ينجح الحارس ولا سبيل
-// لدفع المسار فيُقال التخطي بصدق لا توهم إثباتاً
-Future<bool> _chmodMissing() async {
-  final probeDir = await Directory.systemTemp.createTemp('lb-fp-chmod-');
-  try {
-    final probeFile = File('${probeDir.path}/probe');
-    probeFile.writeAsStringSync('x');
-    final probe = await Process.run('/bin/chmod', <String>[
-      '600',
-      probeFile.path,
-    ]);
-    return probe.exitCode != 0;
-  } on Object {
-    return true;
-  } finally {
-    try {
-      await probeDir.delete(recursive: true);
-    } on Object {
-      // cleanup best-effort
-    }
-  }
-}
-
 void main() {
   test('two pipelined requests in one write with one extra trailing byte '
       'serve both replies and the stray byte is cut at the deadline', () async {
@@ -222,23 +198,40 @@ void main() {
   }, timeout: const Timeout(Duration(seconds: 45)));
 
   test('a unix guard failure returns the process descriptors to their '
-      'pre-start level: the failed start leaves no listener behind', () async {
+      'pre-start level across thirty failed starts: the failed start '
+      'leaves no listener behind', () async {
     if (!Platform.isLinux) {
       markTestSkipped(
-        'unix domain sockets are not part of dart:io on this platform - '
-        'the guard-failure witness runs on Linux where the socket and '
-        'its /bin/chmod guard live',
+        'unix domain sockets are not part of dart:io on Windows - the '
+        'guard-failure witness runs on Linux, where the failure is '
+        'driven by planting a regular file over the born socket path so '
+        'the guard reads a non-socket and walks its failure branch - no '
+        'tool masking needed',
       );
       return;
     }
-    if (!await _chmodMissing()) {
-      markTestSkipped(
-        '/bin/chmod works here - the guard-failure path is proven only '
-        'where the tool is missing above its fixed path, and where it '
-        'works the guard succeeds and the path cannot be driven',
-      );
-      return;
+    // حقن فشل الحارس بلا مس الأداة: مقبس اليونكس يولد ملفاً عند مساره
+    // لحظة ربطه — المرقاب يلمح الولادة ويزرع مكانه ملفاً عادياً فيقرأ
+    // الحارس نمطاً غير مقبس فيرجع false ويمشي مسار الفشل حتماً. والحالة
+    // الفائتة الوحيدة (حسم الحارس قبل الزرع) تجعل البدء ينجح فيفشل
+    // الشاهد صاخباً لا يمرّ صامتاً
+    Future<bool> plantRegularFileOverSocket(String path, Duration limit) async {
+      final sw = Stopwatch()..start();
+      while (sw.elapsed < limit) {
+        if (File(path).existsSync()) {
+          try {
+            File(path).deleteSync();
+          } on Object {
+            // سباق وصيل: من زرع قبلي فزرعه هو الأصل
+          }
+          File(path).writeAsStringSync('not a socket');
+          return true;
+        }
+        await Future<void>.delayed(const Duration(milliseconds: 1));
+      }
+      return false;
     }
+
     final dir = await Directory.systemTemp.createTemp('lb-fp-unix-');
     addTearDown(() async {
       try {
@@ -247,59 +240,82 @@ void main() {
         // cleanup best-effort
       }
     });
-    final sockPath = '${dir.path}/bridge.sock';
     final protection = IntakeProtection(telemetry: const SilentTelemetry())
       ..update(
         policy: const OriginPolicy(allowed: [_listed]),
         token: generateBridgeToken(),
       );
-    final srv = LocalIntakeServer(
-      telemetry: const SilentTelemetry(),
-      correlationIdGenerator: _cid,
-      onCommand: (_) async => const CommandOutcome(ok: true),
-      protection: protection,
-      config: BridgeConfig(unixSocketPath: sockPath),
-    );
     final before = _openDescriptors()!;
-    await expectLater(
-      srv.start(preferredPort: 0),
-      throwsA(isA<IntakeBindException>()),
-      reason: 'the unguardable unix socket fails the whole start closed',
-    );
-    // مهلة تسوية: أحداث إغلاق مسار الفشل تكتمل قبل العدّ
-    await Future<void>.delayed(const Duration(milliseconds: 600));
+    // ثلاثون بدءاً فاشلاً: كل فشل نظيف يغلق ما فتحه (نمو صفر)، وفشل
+    // يترك تلقمته مفتوحة يسرب واصفاً واحداً لكل محاولة فيبلغ الثلاثين
+    for (var attempt = 0; attempt < 30; attempt++) {
+      final sockPath = '${dir.path}/bridge-$attempt.sock';
+      final srv = LocalIntakeServer(
+        telemetry: const SilentTelemetry(),
+        correlationIdGenerator: _cid,
+        onCommand: (_) async => const CommandOutcome(ok: true),
+        protection: protection,
+        config: BridgeConfig(unixSocketPath: sockPath),
+      );
+      final planted = plantRegularFileOverSocket(
+        sockPath,
+        const Duration(seconds: 5),
+      );
+      await expectLater(
+        srv.start(preferredPort: 0),
+        throwsA(isA<IntakeBindException>()),
+        reason:
+            'attempt $attempt: the guard reads the planted regular '
+            'file over the born socket, fails closed, and the whole '
+            'start throws',
+      );
+      final wasPlanted = await planted;
+      expect(
+        wasPlanted,
+        isTrue,
+        reason:
+            'attempt $attempt: the socket was born and the plant '
+            'landed inside the guard window - a start that succeeded '
+            'here means the plant lost its race and the witness must '
+            'fail loudly, never pass silently',
+      );
+      // الملف المزروع عادي والحزمة ترفع مقبس اليونكس حصراً فلا تمسه —
+      // نظافته شأن الشاهد
+      try {
+        File(sockPath).deleteSync();
+      } on Object {
+        // cleanup best-effort
+      }
+    }
     final after = _openDescriptors()!;
     expect(
-      after,
-      lessThanOrEqualTo(before + 4),
+      after - before,
+      lessThanOrEqualTo(4),
       reason:
-          'the failed start closes every listener it opened - a unix '
-          'guard failure that left its raw feed open would hold the '
-          'socket descriptor above the pre-start level forever',
+          'thirty clean guard failures close every listener they opened '
+          '- growth stays near zero; a guard failure that left its raw '
+          'feed open would leak one descriptor per attempt and blow '
+          'past this bound thirty times over',
     );
-  }, timeout: const Timeout(Duration(seconds: 45)));
+  }, timeout: const Timeout(Duration(seconds: 90)));
 
   test('a port conflict pushed into the orphan path leaves the old port '
       'free: a fresh bind on the same port succeeds after the failed '
       'start', () async {
     if (!Platform.isLinux) {
       markTestSkipped(
-        'the orphan path on this transport set is reached through the '
-        'unix listener arm - the witness runs on Linux where that '
-        'optional listener exists',
+        'unix domain sockets are not part of dart:io on Windows - the '
+        'orphan-path witness runs on Linux, where the path is driven '
+        'deterministically by a stale regular file left on the unix '
+        'socket path: the ipv4 port binds, the unix bind throws, and '
+        'the orphan cleanup closes what it opened - no tool masking '
+        'needed',
       );
       return;
     }
-    if (!await _chmodMissing()) {
-      markTestSkipped(
-        '/bin/chmod works here - the orphan path is driven only by a '
-        'bind that succeeds and a guard that fails, and where the tool '
-        'exists the guard succeeds so the path cannot be driven',
-      );
-      return;
-    }
-    // المنفذ القديم: مربوط ثم حر — البدء عليه ينجح ربطه ثم يفشل في
-    // حارس يونكس فيمشي مسار اليتامى
+    // المنفذ القديم: مربوط ثم حر — البدء عليه ينجح ربطه ثم يفشل ربط
+    // اليونكس على الملف الساكن المزروع فيمسك مسار اليتامى حتماً بلا
+    // سباق ولا تمويه أداة
     final squatter = await ServerSocket.bind(InternetAddress.loopbackIPv4, 0);
     final oldPort = squatter.port;
     await squatter.close();
@@ -313,6 +329,7 @@ void main() {
       }
     });
     final sockPath = '${dir.path}/bridge.sock';
+    File(sockPath).writeAsStringSync('stale file');
     final protection = IntakeProtection(telemetry: const SilentTelemetry())
       ..update(
         policy: const OriginPolicy(allowed: [_listed]),
@@ -329,8 +346,9 @@ void main() {
       srv.start(preferredPort: oldPort, fallbacks: const <int>[]),
       throwsA(isA<IntakeBindException>()),
       reason:
-          'the guard failure after a bound port fails the start '
-          'closed and walks the orphan path',
+          'the unix bind over the stale file throws after the ipv4 '
+          'port bound - the generation fails closed and walks the '
+          'orphan path',
     );
     expect(
       srv.port,
@@ -340,11 +358,13 @@ void main() {
           'bound number would point callers at a listener that no '
           'longer exists',
     );
-    // المنفذ القديم حر: اليتيم أُغلق بيد المسار لا ترك مقبسه مشغولاً
+    // المنفذ القديم حر: اليتيم أغلق بيد المسار لا ترك مقبسه مشغولاً
     final fresh = await ServerSocket.bind(
       InternetAddress.loopbackIPv4,
       oldPort,
     );
     await fresh.close();
+    // الملف الساكن عادي والحزمة ترفع مقبس اليونكس حصراً فلا تمسه —
+    // نظافته شأن الشاهد (تهدم مع مجلده في addTearDown)
   }, timeout: const Timeout(Duration(seconds: 45)));
 }
