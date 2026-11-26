@@ -251,7 +251,7 @@ typedef _WitnessBody =
       required Future<Socket> Function() clientSocket,
     });
 
-/// الشاهد 1: رأس منقّط يُقطع في الحد قطعاً هادئاً.
+// الشاهد 1: رأس منقّط يُقطع في الحد قطعاً هادئاً.
 Future<void> _witnessIncompleteHeaderCut({
   required LocalIntakeServer srv,
   required String host,
@@ -286,8 +286,8 @@ Future<void> _witnessIncompleteHeaderCut({
   );
 }
 
-/// الشاهد 2: الحالة نفسها بعد طلب مكتمل على اتصال مُبقى - المهلة تبدأ
-/// عند أول بايت من الطلب التالي لا عند انتهاء الرد السابق.
+// الشاهد 2: الحالة نفسها بعد طلب مكتمل على اتصال مُبقى - المهلة تبدأ
+// عند أول بايت من الطلب التالي لا عند انتهاء الرد السابق.
 Future<void> _witnessKeptAliveStallCut({
   required LocalIntakeServer srv,
   required String host,
@@ -327,8 +327,8 @@ Future<void> _witnessKeptAliveStallCut({
   );
 }
 
-/// الشاهد 4: طلب سليم بطيء معقول ترويساته تصل داخل الحد يُخدم كاملاً -
-/// الحارس الذي يمنع القطع من التهام البطء الشرعي.
+// الشاهد 4: طلب سليم بطيء معقول ترويساته تصل داخل الحد يُخدم كاملاً -
+// الحارس الذي يمنع القطع من التهام البطء الشرعي.
 Future<void> _witnessSlowLegitServed({
   required LocalIntakeServer srv,
   required String host,
@@ -363,9 +363,9 @@ Future<void> _witnessSlowLegitServed({
   expect(client.text, contains('"ok":true'));
 }
 
-/// الشاهد 3: الخامل المُبقى يبقى مفتوحاً بعد مهلة الترويسات ويُغلق تحت
-/// مهلة الخمول بحدَّي شاهد الخمول القائم. الخادم هنا يحمل مهلة الخمول
-/// المحقونة التي تشتق منها الحدود.
+// الشاهد 3: الخامل المُبقى يبقى مفتوحاً بعد مهلة الترويسات ويُغلق تحت
+// مهلة الخمول بحدَّي شاهد الخمول القائم. الخادم هنا يحمل مهلة الخمول
+// المحقونة التي تشتق منها الحدود.
 Future<void> _witnessIdleKeptAlive({
   required LocalIntakeServer srv,
   required String host,
