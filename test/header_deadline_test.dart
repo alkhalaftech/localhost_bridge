@@ -603,4 +603,73 @@ void main() {
               'live witness runs on Linux/macOS'
         : false,
   );
+
+  group('headerTimeout value rule', () {
+    // قاعدة القيمة كقاعدة حدّ الجسم حرفاً: القيمة الصريحة وحدها تُفحص -
+    // موجبة ولا تزيد على مهلة الطلب - والفحص عند بناء الخادم حيث بقية
+    // الفحوص لا كمفاجأة على السلك
+    test('an explicit headerTimeout over the request timeout throws at '
+        'construction', () {
+      expect(
+        () => LocalIntakeServer(
+          telemetry: const SilentTelemetry(),
+          onCommand: (_) async => const CommandOutcome(ok: true),
+          config: const BridgeConfig(
+            headerTimeout: Duration(seconds: 11),
+            requestTimeout: Duration(seconds: 10),
+          ),
+        ),
+        throwsArgumentError,
+      );
+    });
+
+    test('a non-positive explicit headerTimeout throws at construction', () {
+      expect(
+        () => LocalIntakeServer(
+          telemetry: const SilentTelemetry(),
+          onCommand: (_) async => const CommandOutcome(ok: true),
+          config: const BridgeConfig(headerTimeout: Duration.zero),
+        ),
+        throwsArgumentError,
+      );
+      expect(
+        () => LocalIntakeServer(
+          telemetry: const SilentTelemetry(),
+          onCommand: (_) async => const CommandOutcome(ok: true),
+          config: const BridgeConfig(headerTimeout: Duration(seconds: -1)),
+        ),
+        throwsArgumentError,
+      );
+    });
+
+    test('unset selects the shorter of ten seconds and the request timeout, '
+        'the explicit value announces itself, and equal still builds', () {
+      final defaultServer = LocalIntakeServer(
+        telemetry: const SilentTelemetry(),
+        onCommand: (_) async => const CommandOutcome(ok: true),
+      );
+      expect(defaultServer.effectiveHeaderTimeout, const Duration(seconds: 10));
+      final lowered = LocalIntakeServer(
+        telemetry: const SilentTelemetry(),
+        onCommand: (_) async => const CommandOutcome(ok: true),
+        config: const BridgeConfig(requestTimeout: Duration(seconds: 4)),
+      );
+      expect(lowered.effectiveHeaderTimeout, const Duration(seconds: 4));
+      final explicit = LocalIntakeServer(
+        telemetry: const SilentTelemetry(),
+        onCommand: (_) async => const CommandOutcome(ok: true),
+        config: const BridgeConfig(headerTimeout: Duration(seconds: 7)),
+      );
+      expect(explicit.effectiveHeaderTimeout, const Duration(seconds: 7));
+      final equal = LocalIntakeServer(
+        telemetry: const SilentTelemetry(),
+        onCommand: (_) async => const CommandOutcome(ok: true),
+        config: const BridgeConfig(
+          headerTimeout: Duration(seconds: 10),
+          requestTimeout: Duration(seconds: 10),
+        ),
+      );
+      expect(equal.effectiveHeaderTimeout, const Duration(seconds: 10));
+    });
+  });
 }
