@@ -185,6 +185,12 @@ class _Link {
 /// legitimate sender whose headers arrive inside the deadline.
 class _SlowClient {
   _SlowClient(this.socket) {
+    // كل عملاء الشهود بلا Nagle بتثبيت التكليف: البطيء الشرعي أوّلى
+    // بتقطيعه يصل على السلك كما يُرسل لا مجتمعاً في مقطع واحد
+    final set = socket.setOption(SocketOption.tcpNoDelay, true);
+    if (!set) {
+      throw StateError('the witness client could not disable Nagle');
+    }
     socket.listen(
       (chunk) {
         _received += chunk.length;
