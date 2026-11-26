@@ -47,6 +47,13 @@ class HeaderWatchdogFeed extends Stream<Socket> implements ServerSocket {
   final Set<HeaderDeadlineSocket> _live = <HeaderDeadlineSocket>{};
   bool _closed = false;
 
+  // هل استُمع على دفق التسليم قط؟ listenOn لا تشترك إلا حين ينادي
+  // المضيف listen على HttpServer، وفشلٌ بين الولادة والاستماع (مسار
+  // يونكس مشغول مثلاً) يغلق التلقيمة بلا مستمع قط — وإغلاق متحكم
+  // باشتراك واحد لم يُستمع قط لا يكتمل أبداً لأنه ينتظر مستهلكاً لن
+  // يأتي، فالإغلاق ينتظر المنفذ حين وُجد وحده حين لم يوجد
+  bool _hasListener = false;
+
   void _onAccepted(Socket socket) {
     if (_closed) {
       // قبول كان في الطريق عند الإغلاق: بلا مستمع بعد الإغلاق
@@ -73,7 +80,13 @@ class HeaderWatchdogFeed extends Stream<Socket> implements ServerSocket {
     }
     _live.clear();
     await _door.close();
-    await _out.close();
+    if (_hasListener) {
+      await _out.close();
+    } else {
+      // بلا مستمع قط: الإغلاق يُعلَّم ولا يُنتظر — انتظارُه هنا كان
+      // يعلّق البدء الفاشل كله إلى أبد (مقيس في حاوية لينكس)
+      unawaited(_out.close());
+    }
     return this;
   }
 
@@ -83,12 +96,15 @@ class HeaderWatchdogFeed extends Stream<Socket> implements ServerSocket {
     Function? onError,
     void Function()? onDone,
     bool? cancelOnError,
-  }) => _out.stream.listen(
-    onData,
-    onError: onError,
-    onDone: onDone,
-    cancelOnError: cancelOnError,
-  );
+  }) {
+    _hasListener = true;
+    return _out.stream.listen(
+      onData,
+      onError: onError,
+      onDone: onDone,
+      cancelOnError: cancelOnError,
+    );
+  }
 
   @override
   int get port => _door.port;
