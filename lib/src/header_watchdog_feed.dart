@@ -135,36 +135,35 @@ class HeaderWatchdogFeed extends Stream<Socket> implements ServerSocket {
 /// - the safe direction is a retired tracker, never a false cut. Bodies
 /// are never scanned for shape: a declared length is counted byte-wise,
 /// and a chunked declaration serves its cycle then retires the tracker.
-class HeaderDeadlineSocket implements Socket {
-  HeaderDeadlineSocket(this._inner, this._deadline, {void Function()? onDead})
-    : _onDead = onDead {
-    _out = StreamController<Uint8List>(
-      sync: true,
-      onPause: () => _sub.pause(),
-      onResume: () => _sub.resume(),
-      onCancel: () {
-        // المستهلك انصرف: الساعة تُوقف معه لا قطعٌ على مقبس مُهجور
-        stopClock();
-        _markDead();
-        return _sub.cancel();
-      },
-    );
-    // اتصال جديد: الساعة من لحظة الولادة (القبول عادياً، والتسليم آمناً)
+/// الساعة ومُفرِّص الترويسات معاً لاتصال واحد — صنفٌ واحد يُستعمل في
+/// المسارين: الغلاف العادي (HeaderDeadlineSocket) والمحوّل الآمن
+/// (_RawSecureAdapter). الساعة تُسلَّح عند الولادة (القبول عادياً،
+/// والتسليم آمناً حيث تغطي مهلة المصافحة ما قبلها)، ولا تُعاد بالبايتات،
+/// وتُنزع عند مُنهي الترويسات، وعلى الاتصال المُبقى تُسلَّح عند أول بايت
+/// من الطلب التالي حصراً — اتصالٌ لا يرسل شيئاً بعد ردّه بلا ساعة ويبقى
+/// تحت مهلة الخمول. عند الموعد القطع هادئاً عبر نداء _onCut: المالك
+/// يدمّر مقبسه ويغلق دفق تسليمه — لا بايت ولا رد ولا رمز جديد.
+/// المُفرِّص يقرأ ما يحتاجه سطر الطلب وحده: الأسطر تنتهي بـ LF (أشمل من
+/// CRLF فكل مُنهي يعرفه الخادم يُنهيه هذا الماسح)، وآخر Content-Length
+/// وTransfer-Encoding المحصور بـ chunked وUpgrade تُحفظ، وما لا يفهمه
+/// الفاحص لا يُسرَّح — في كل حالة من تلك يرفضه dart:io ويغلق الاتصال
+/// (برهان مصدر SDK بأرقام الأسطر في تعليق _noteCandidate) فلا اتصال
+/// يعاد استعماله ليُقطع خطأً. الأجسام لا تُفحص شكلاً: المعلن يُعدّ
+/// بايتاً بايتاً، والمقطّع يُتتبع بقواعد نهاية دورته حصراً.
+class _HeaderTracker {
+  _HeaderTracker({required Duration deadline, required void Function() onCut})
+    : _deadline = deadline,
+      _onCut = onCut {
+    // الساعة من لحظة الولادة (القبول عادياً، والتسليم آمناً)
     _arm();
-    _sub = _inner.listen(
-      _onInnerData,
-      onError: (Object _) => _onInnerGone(),
-      onDone: _onInnerGone,
-    );
   }
 
-  final Socket _inner;
   final Duration _deadline;
-  final void Function()? _onDead;
-  late final StreamController<Uint8List> _out;
-  late final StreamSubscription<Uint8List> _sub;
+  final void Function() _onCut;
   Timer? _timer;
   bool _dead = false;
+  bool _armed = false;
+  int _deadlineAtUs = 0;
 
   // انتظار أول بايت من الطلب التالي على اتصال مُبقى: لا ساعة قبله
   bool _awaitingFirstByte = false;
@@ -202,8 +201,6 @@ class HeaderDeadlineSocket implements Socket {
   // إنشاء وإلغاء لكل طلب على اتصال مُبقى)، وعند انطلاق المؤقت يعيد
   // الجدولة إن بقي من الموعد، فلا قطع مبكر
   static final Stopwatch _mono = Stopwatch()..start();
-  bool _armed = false;
-  int _deadlineAtUs = 0;
 
   void _arm() {
     if (_dead || _armed) return;
@@ -242,28 +239,26 @@ class HeaderDeadlineSocket implements Socket {
     _timer = null;
     _armed = false;
     _markDead();
-    // القطع الهادئ: تدمير المقبس الداخلي يبلغ النظير على السلك - لا بايت
-    // ولا رد ولا رمز جديد، والإغلاق نفسه هو التقرير
-    _inner.destroy();
-    if (!_out.isClosed) _out.close();
+    // القطع الهادئ: المالك يدمّر مقبسه الداخلي فيبلغ النظير على السلك
+    // - لا بايت ولا رد ولا رمز جديد، والإغلاق نفسه هو التقرير
+    _onCut();
   }
 
   void _markDead() {
     if (_dead) return;
     _dead = true;
-    _onDead?.call();
   }
 
-  void _onInnerData(Uint8List chunk) {
+  void track(Uint8List chunk) {
     if (_dead) return;
     _track(chunk);
-    if (!_dead && !_out.isClosed) _out.add(chunk);
   }
 
-  void _onInnerGone() {
+  // انصراف المستهلك أو موت الاتصال من مالكه: الساعة توقف ولا قطع على
+  // مقبس مُهجور
+  void retire() {
     _markDead();
     stopClock();
-    if (!_out.isClosed) _out.close();
   }
 
   // ── التفريص ──
@@ -626,8 +621,75 @@ class HeaderDeadlineSocket implements Socket {
     _te = false;
     _awaitingFirstByte = true;
   }
+}
 
-  // ── سطح Socket المُفوَّض: كل شيء يمرّ كما هو، والقطع وحده المضاف ──
+/// غلاف `Socket` على الأبواب العادية: كل شيء يمرّ للمقبس الداخلي كما هو
+/// (القراءة والكتابة وعقد الإغلاق)، والحارس وحده المضاف — ساعة ومُفرِّص
+/// من `_HeaderTracker` الصنف المشترك مع محوّل TLS. القطع: المالك يدمّر
+/// المقبس الداخلي ويغلق دفق تسليمه، فيبلغ النظير على السلك بلا بايت
+/// ولا رد ولا رمز جديد.
+class HeaderDeadlineSocket implements Socket {
+  HeaderDeadlineSocket(this._inner, this._deadline, {void Function()? onDead})
+    : _onDead = onDead {
+    _out = StreamController<Uint8List>(
+      sync: true,
+      onPause: () => _sub.pause(),
+      onResume: () => _sub.resume(),
+      onCancel: () {
+        // المستهلك انصرف: الساعة تُوقف معه لا قطعٌ على مقبس مُهجور
+        _scanner.retire();
+        return _sub.cancel();
+      },
+    );
+    _scanner = _HeaderTracker(
+      deadline: _deadline,
+      onCut: () {
+        // القطع الهادئ: تدمير المقبس الداخلي يبلغ النظير على السلك - لا
+        // بايت ولا رد ولا رمز جديد، والإغلاق نفسه هو التقرير
+        _inner.destroy();
+        if (!_out.isClosed) _out.close();
+        _markDead();
+      },
+    );
+    _sub = _inner.listen(
+      _onInnerData,
+      onError: (Object _) => _onInnerGone(),
+      onDone: _onInnerGone,
+    );
+  }
+
+  final Socket _inner;
+  final Duration _deadline;
+  final void Function()? _onDead;
+  late final StreamController<Uint8List> _out;
+  late final StreamSubscription<Uint8List> _sub;
+  late _HeaderTracker _scanner;
+  bool _dead = false;
+
+  void _markDead() {
+    if (_dead) return;
+    _dead = true;
+    _onDead?.call();
+  }
+
+  void _onInnerData(Uint8List chunk) {
+    if (_dead) return;
+    _scanner.track(chunk);
+    if (!_dead && !_out.isClosed) _out.add(chunk);
+  }
+
+  void _onInnerGone() {
+    _markDead();
+    _scanner.retire();
+    if (!_out.isClosed) _out.close();
+  }
+
+  /// Stops the deadline clock without touching the connection - the feed's
+  /// close and the consumer's departure use it; the socket itself belongs
+  /// to the owning server's close.
+  void stopClock() {
+    _scanner.stopClock();
+  }
 
   @override
   StreamSubscription<Uint8List> listen(
@@ -678,42 +740,23 @@ class HeaderDeadlineSocket implements Socket {
   Future close() => _inner.close();
 
   @override
-  Future get done => _inner.done;
-
-  @override
-  void destroy() {
-    _markDead();
-    stopClock();
-    _inner.destroy();
-    if (!_out.isClosed) _out.close();
-  }
-
-  @override
-  bool setOption(SocketOption option, bool enabled) =>
-      _inner.setOption(option, enabled);
-
-  @override
-  Uint8List getRawOption(RawSocketOption option) => _inner.getRawOption(option);
-
-  @override
-  void setRawOption(RawSocketOption option) => _inner.setRawOption(option);
-
-  @override
-  int get port => _inner.port;
-
-  @override
-  int get remotePort => _inner.remotePort;
-
-  @override
-  InternetAddress get address => _inner.address;
-
-  @override
   InternetAddress get remoteAddress => _inner.remoteAddress;
 
   @override
   dynamic noSuchMethod(Invocation invocation) {
+    // الأعضاء غير المُعاوَرة من عقد Socket (getRawOption وsetRawOption
+    // وأعضاء Stream الأخرى) تُرفض مسمّاة كما في سلف الغلاف — الاتصال
+    // المُسلَّم عبر هذا الغلاف يُستهلك من HttpServer فحسب
     throw UnsupportedError(
       'HeaderDeadlineSocket: ${invocation.memberName} is not implemented',
     );
+  }
+
+  @override
+  void destroy() {
+    _markDead();
+    _scanner.retire();
+    _inner.destroy();
+    if (!_out.isClosed) _out.close();
   }
 }
