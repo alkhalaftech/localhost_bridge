@@ -38,6 +38,7 @@ class BridgeConfig {
     this.localPages,
     this.requestTimeout = const Duration(seconds: 30),
     this.bodyTimeout,
+    this.headerTimeout,
     this.idleTimeout = const Duration(seconds: 60),
     this.handlerTimeout = defaultHandlerTimeout,
     this.extraHosts = const <String>[],
@@ -406,12 +407,38 @@ class BridgeConfig {
   /// The default body-phase deadline - see [bodyTimeout].
   static const Duration defaultBodyTimeout = Duration(seconds: 10);
 
+  /// The deadline over completing one request's headers - the acceptance
+  /// phase a connection occupies before any request object exists
+  /// (dart:io generates no `HttpRequest` for an incomplete header block,
+  /// so nothing above the socket can bound this phase). A client that
+  /// connects and stalls inside its headers - a silent socket, a slowloris
+  /// drip, a request line that never ends - is cut on the wire at the
+  /// deadline with no reply, so it cannot hold the open socket past it.
+  /// On a fresh connection the deadline starts at accept; on a kept-alive
+  /// connection it starts at the first byte of the next request, and a
+  /// connection that sends nothing after its reply stays under
+  /// [idleTimeout]. `null` - the default - selects the shorter of
+  /// [defaultHeaderTimeout] and [requestTimeout], following a lowered
+  /// request timeout down the same way [bodyTimeout] does. An explicit
+  /// value must be positive and no longer than [requestTimeout];
+  /// otherwise building a [LocalIntakeServer] throws [ArgumentError].
+  /// On the TLS transport the deadline starts at the handshake delivery -
+  /// the path before it is [tlsHandshakeTimeout]'s. The deadline in force
+  /// reads as `LocalIntakeServer.effectiveHeaderTimeout`.
+  final Duration? headerTimeout;
+
+  /// The default header-completion deadline - see [headerTimeout].
+  static const Duration defaultHeaderTimeout = Duration(seconds: 10);
+
   /// Idle timeout of the HTTP listeners. A connection that carries no
   /// request closes between this value and twice that: the idle timer of
   /// `dart:io` runs once per period, marking a connection on one pass and
   /// destroying it on the next. An occupied seat outlives it by the
-  /// close-handling grace. The WebSocket channel keeps its own idle timer
-  /// and its own code (`ws_idle_timeout`).
+  /// close-handling grace. A connection whose request headers stall is cut
+  /// earlier, at the header deadline ([headerTimeout], announced as
+  /// `effectiveHeaderTimeout` in force), so a silent or dripping sender
+  /// never holds its open socket up to this bound. The WebSocket channel
+  /// keeps its own idle timer and its own code (`ws_idle_timeout`).
   final Duration idleTimeout;
 
   /// The default handler budget - the deadline over the host's command

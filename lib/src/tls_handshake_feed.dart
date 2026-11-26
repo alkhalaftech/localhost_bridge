@@ -22,6 +22,8 @@ import 'dart:convert';
 import 'dart:io';
 import 'dart:typed_data' show BytesBuilder, Uint8List;
 
+import 'header_watchdog_feed.dart';
+
 /// The bridge's TLS transport feed: the plain [RawServerSocket] the
 /// bridge binds is wrapped here, and every accepted raw socket must
 /// complete the first TLS record before it is armed with
@@ -89,6 +91,7 @@ class TlsHandshakeFeed extends Stream<Socket> implements ServerSocket {
   final RawServerSocket _raw;
   final SecurityContext _context;
   final Duration _handshakeTimeout;
+  final Duration? _headerTimeout;
   final int _openConnectionCap;
   final int _inFlightHandshakeCap;
   final int Function() _openConnectionTotal;
@@ -122,6 +125,7 @@ class TlsHandshakeFeed extends Stream<Socket> implements ServerSocket {
     required RawServerSocket raw,
     required SecurityContext context,
     required Duration handshakeTimeout,
+    Duration? headerTimeout,
     required int openConnectionCap,
     required int inFlightHandshakeCap,
     required int Function() openConnectionTotal,
@@ -133,6 +137,7 @@ class TlsHandshakeFeed extends Stream<Socket> implements ServerSocket {
   }) : _raw = raw,
        _context = context,
        _handshakeTimeout = handshakeTimeout,
+       _headerTimeout = headerTimeout,
        _openConnectionCap = openConnectionCap,
        _inFlightHandshakeCap = inFlightHandshakeCap,
        _openConnectionTotal = openConnectionTotal,
@@ -315,7 +320,13 @@ class TlsHandshakeFeed extends Stream<Socket> implements ServerSocket {
         // العدّ ينتهي هنا لحظة التسليم: يُعدّ من الآن في connectionsInfo
         // وحده، والتلقيمة لا تعدّه ثانية
         _onDelivered();
-        _out.add(_RawSecureAdapter(secure));
+        _out.add(
+          _headerTimeout == null
+              ? _RawSecureAdapter(secure)
+              // مهلة اكتمال الترويسات تبدأ بعد التسليم حصراً: المصافحة
+              // قبلها ساعة _handshakeTimeout كما هي
+              : HeaderDeadlineSocket(_RawSecureAdapter(secure), _headerTimeout),
+        );
       },
       onError: (Object _) {
         // المصافحة الفاشلة تنقص العدّ: المقعد تحرر للمرسل التالي —

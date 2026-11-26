@@ -20,9 +20,13 @@ import 'support/tls_cert.dart';
 
 const _listed = 'https://portal.example';
 
-// الحد الافتراضي المكتوب لمهلة اكتمال الترويسات - وهو ما يقرؤه الشاهد
-// ما لم يعلنه الخادم بنفسه
-Duration _bound(LocalIntakeServer srv) => const Duration(seconds: 10);
+// المهلة المحقونة للمشاهد: أقصر من هوامش الشهود كلها، والفعّالة هي
+// أصغرها ومهلة الطلب (ثلاثين ثانية) = المهلة نفسها
+const Duration _headerTimeout = Duration(milliseconds: 700);
+
+// الحد النافذ كما يعلنه الخادم نفسه: القيمة المضبوطة عند البناء لا رقم
+// مكتوب في الشاهد
+Duration _bound(LocalIntakeServer srv) => srv.effectiveHeaderTimeout;
 
 // مهلة الخمول المحقونة لشاهد عقد الخمول، وحدا شاهد الخمول القائم نفسه:
 // سماحية تبكير المؤقت، وهامش تأخره فوق ضعف المهلة
@@ -54,6 +58,7 @@ Future<(String, Directory)> _unixPaths() async {
 BridgeConfig _config(_Scene scene, {Duration? idleTimeout}) => BridgeConfig(
   securityContext: scene.tls ? tlsContext() : null,
   listenIPv6Loopback: scene.v6,
+  headerTimeout: _headerTimeout,
   idleTimeout: idleTimeout ?? const Duration(seconds: 60),
 );
 
@@ -116,10 +121,7 @@ class _Link {
   String? _pendingHost;
 
   /// Sends one complete POST whose declared body may carry its first bytes.
-  void sendPost({
-    required int contentLength,
-    List<int> firstBytes = const [],
-  }) {
+  void sendPost({required int contentLength, List<int> firstBytes = const []}) {
     send([
       ...utf8.encode(
         'POST / HTTP/1.1\r\n'
@@ -469,14 +471,22 @@ void main() {
           'the cut is quiet', () async {
         final srv = await _start(_config(scene));
         addTearDown(srv.stop);
-        await _runSceneWitness(_witnessIncompleteHeaderCut, scene: scene, srv: srv);
+        await _runSceneWitness(
+          _witnessIncompleteHeaderCut,
+          scene: scene,
+          srv: srv,
+        );
       }, timeout: const Timeout(Duration(seconds: 45)));
 
       test('after a completed request a kept-alive connection stalling its '
           'next header is cut from the first byte of that request', () async {
         final srv = await _start(_config(scene));
         addTearDown(srv.stop);
-        await _runSceneWitness(_witnessKeptAliveStallCut, scene: scene, srv: srv);
+        await _runSceneWitness(
+          _witnessKeptAliveStallCut,
+          scene: scene,
+          srv: srv,
+        );
       }, timeout: const Timeout(Duration(seconds: 45)));
 
       test('a slow but legitimate request whose headers arrive inside the '
@@ -495,72 +505,102 @@ void main() {
     });
   }
 
-  group('unix domain socket listener', () {
-    // تخطٍ صادق مسمّى على نمط تخطي القناة: مقابس مجال يونكس ليست جزءاً
-    // من dart:io على Windows - الشاهد الحي يجري على لينكس وماك حصراً
-    test('an incomplete request header is cut at the header deadline and '
-        'the cut is quiet', () async {
-      final (sockPath, dir) = await _unixPaths();
-      addTearDown(() async {
-        try {
-          await dir.delete(recursive: true);
-        } on Object {
-          // cleanup best-effort: the socket file is the package's job
-        }
-      });
-      final srv = await _start(BridgeConfig(unixSocketPath: sockPath));
-      addTearDown(srv.stop);
-      await _runUnixWitness(_witnessIncompleteHeaderCut, srv: srv, sockPath: sockPath);
-    }, timeout: const Timeout(Duration(seconds: 45)));
+  group(
+    'unix domain socket listener',
+    () {
+      // تخطٍ صادق مسمّى على نمط تخطي القناة: مقابس مجال يونكس ليست جزءاً
+      // من dart:io على Windows - الشاهد الحي يجري على لينكس وماك حصراً
+      test('an incomplete request header is cut at the header deadline and '
+          'the cut is quiet', () async {
+        final (sockPath, dir) = await _unixPaths();
+        addTearDown(() async {
+          try {
+            await dir.delete(recursive: true);
+          } on Object {
+            // cleanup best-effort: the socket file is the package's job
+          }
+        });
+        final srv = await _start(
+          BridgeConfig(unixSocketPath: sockPath, headerTimeout: _headerTimeout),
+        );
+        addTearDown(srv.stop);
+        await _runUnixWitness(
+          _witnessIncompleteHeaderCut,
+          srv: srv,
+          sockPath: sockPath,
+        );
+      }, timeout: const Timeout(Duration(seconds: 45)));
 
-    test('after a completed request a kept-alive connection stalling its '
-        'next header is cut from the first byte of that request', () async {
-      final (sockPath, dir) = await _unixPaths();
-      addTearDown(() async {
-        try {
-          await dir.delete(recursive: true);
-        } on Object {
-          // cleanup best-effort: the socket file is the package's job
-        }
-      });
-      final srv = await _start(BridgeConfig(unixSocketPath: sockPath));
-      addTearDown(srv.stop);
-      await _runUnixWitness(_witnessKeptAliveStallCut, srv: srv, sockPath: sockPath);
-    }, timeout: const Timeout(Duration(seconds: 45)));
+      test('after a completed request a kept-alive connection stalling its '
+          'next header is cut from the first byte of that request', () async {
+        final (sockPath, dir) = await _unixPaths();
+        addTearDown(() async {
+          try {
+            await dir.delete(recursive: true);
+          } on Object {
+            // cleanup best-effort: the socket file is the package's job
+          }
+        });
+        final srv = await _start(
+          BridgeConfig(unixSocketPath: sockPath, headerTimeout: _headerTimeout),
+        );
+        addTearDown(srv.stop);
+        await _runUnixWitness(
+          _witnessKeptAliveStallCut,
+          srv: srv,
+          sockPath: sockPath,
+        );
+      }, timeout: const Timeout(Duration(seconds: 45)));
 
-    test('a slow but legitimate request whose headers arrive inside the '
-        'deadline is served whole', () async {
-      final (sockPath, dir) = await _unixPaths();
-      addTearDown(() async {
-        try {
-          await dir.delete(recursive: true);
-        } on Object {
-          // cleanup best-effort: the socket file is the package's job
-        }
-      });
-      final srv = await _start(BridgeConfig(unixSocketPath: sockPath));
-      addTearDown(srv.stop);
-      await _runUnixWitness(_witnessSlowLegitServed, srv: srv, sockPath: sockPath);
-    }, timeout: const Timeout(Duration(seconds: 45)));
+      test('a slow but legitimate request whose headers arrive inside the '
+          'deadline is served whole', () async {
+        final (sockPath, dir) = await _unixPaths();
+        addTearDown(() async {
+          try {
+            await dir.delete(recursive: true);
+          } on Object {
+            // cleanup best-effort: the socket file is the package's job
+          }
+        });
+        final srv = await _start(
+          BridgeConfig(unixSocketPath: sockPath, headerTimeout: _headerTimeout),
+        );
+        addTearDown(srv.stop);
+        await _runUnixWitness(
+          _witnessSlowLegitServed,
+          srv: srv,
+          sockPath: sockPath,
+        );
+      }, timeout: const Timeout(Duration(seconds: 45)));
 
-    test('an idle kept-alive connection outlives the header deadline and '
-        'closes between one idle period and two', () async {
-      final (sockPath, dir) = await _unixPaths();
-      addTearDown(() async {
-        try {
-          await dir.delete(recursive: true);
-        } on Object {
-          // cleanup best-effort: the socket file is the package's job
-        }
-      });
-      final srv = await _start(
-        BridgeConfig(unixSocketPath: sockPath, idleTimeout: _idle),
-      );
-      addTearDown(srv.stop);
-      await _runUnixWitness(_witnessIdleKeptAlive, srv: srv, sockPath: sockPath);
-    }, timeout: const Timeout(Duration(seconds: 45)));
-  }, skip: Platform.isWindows
-      ? 'unix domain sockets are not part of dart:io on Windows - the '
-          'live witness runs on Linux/macOS'
-      : false);
+      test('an idle kept-alive connection outlives the header deadline and '
+          'closes between one idle period and two', () async {
+        final (sockPath, dir) = await _unixPaths();
+        addTearDown(() async {
+          try {
+            await dir.delete(recursive: true);
+          } on Object {
+            // cleanup best-effort: the socket file is the package's job
+          }
+        });
+        final srv = await _start(
+          BridgeConfig(
+            unixSocketPath: sockPath,
+            headerTimeout: _headerTimeout,
+            idleTimeout: _idle,
+          ),
+        );
+        addTearDown(srv.stop);
+        await _runUnixWitness(
+          _witnessIdleKeptAlive,
+          srv: srv,
+          sockPath: sockPath,
+        );
+      }, timeout: const Timeout(Duration(seconds: 45)));
+    },
+    skip: Platform.isWindows
+        ? 'unix domain sockets are not part of dart:io on Windows - the '
+              'live witness runs on Linux/macOS'
+        : false,
+  );
 }

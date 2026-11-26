@@ -10,6 +10,7 @@ import 'bridge_telemetry.dart';
 import 'intake_invariants.dart';
 import 'intake_protection.dart';
 import 'intake_rejections.dart';
+import 'header_watchdog_feed.dart';
 import 'tls_handshake_feed.dart';
 import 'trusted_command.dart';
 
@@ -507,6 +508,26 @@ class LocalIntakeServer {
         );
       }
     }
+    // مهلة اكتمال الترويسات: القيمة الصريحة وحدها تُفحص — موجبة ولا تزيد
+    // على مهلة الطلب الكلية حرفاً كقاعدة حدّ الجسم، وإلا ما كانت هي التي
+    // تنقضي أبداً؛ وبلا قيمة فالحدّ الأصغر من عشر ثوانٍ ومهلة الطلب
+    final headerTimeout = config.headerTimeout;
+    if (headerTimeout != null) {
+      require(
+        headerTimeout > Duration.zero,
+        'config.headerTimeout',
+        headerTimeout,
+      );
+      if (headerTimeout > effectiveTimeout) {
+        throw ArgumentError.value(
+          headerTimeout,
+          'config.headerTimeout',
+          'must not exceed the request timeout ($effectiveTimeout) - a '
+              'header deadline longer than the whole pre-handler deadline '
+              'would never be the one that fires',
+        );
+      }
+    }
     require(
       config.handlerTimeout > Duration.zero,
       'config.handlerTimeout',
@@ -764,6 +785,22 @@ class LocalIntakeServer {
           ? effectiveTimeout
           : BridgeConfig.defaultBodyTimeout);
 
+  /// The header-completion deadline in force: the explicit
+  /// [BridgeConfig.headerTimeout] when given, else the shorter of
+  /// [BridgeConfig.defaultHeaderTimeout] and [effectiveTimeout] - the
+  /// same rule [effectiveBodyTimeout] follows. It bounds the acceptance
+  /// path from the connection's accept to the end of the request headers;
+  /// on a kept-alive connection it starts at the first byte of the next
+  /// request, and a connection that sends nothing stays under
+  /// [BridgeConfig.idleTimeout]. On the TLS transport it starts at the
+  /// handshake delivery - the path before it is
+  /// [BridgeConfig.tlsHandshakeTimeout]'s.
+  late final Duration effectiveHeaderTimeout =
+      config.headerTimeout ??
+      (effectiveTimeout < BridgeConfig.defaultHeaderTimeout
+          ? effectiveTimeout
+          : BridgeConfig.defaultHeaderTimeout);
+
   /// The explicit "no handler deadline" marker: pass it to [handlerTimeout]
   /// to run handlers unbounded - the pre-0.2.0 meaning of null, which now
   /// selects the configured default budget instead. The value is
@@ -974,6 +1011,15 @@ class LocalIntakeServer {
   /// [BridgeConfig.unixSocketPath] is armed and the bind and its
   /// owner-only permission guard both succeeded.
   HttpServer? _serverUnix;
+
+  // تلقيمات القبول العادي للأبواب الثلاثة (الحلقي، والـ::1 الاختياري،
+  // ومقبس يونكس الاختياري): كل واحد يحمل ساعة مهلة اكتمال الترويسات فوق
+  // مقابسه المقبولة - الحد نفسه الذي يطبّقه نقل TLS على اتصالاته بعد
+  // تسليمها. وإغلاق HttpServer لا يمر من التلقيمة (listenOn لا يغلق
+  // الممرَّر له) فالخادم يغلقها بيده في stop وفي مسار اليتامى
+  HeaderWatchdogFeed? _plainFeed;
+  HeaderWatchdogFeed? _plainFeedV6;
+  HeaderWatchdogFeed? _plainFeedUnix;
 
   /// The filesystem path of the socket this instance actually created -
   /// the only path a stop may unlink, and only while it still names a
@@ -1557,6 +1603,7 @@ class LocalIntakeServer {
     raw: raw,
     context: config.securityContext!,
     handshakeTimeout: config.tlsHandshakeTimeout,
+    headerTimeout: effectiveHeaderTimeout,
     openConnectionCap: config.maxOpenConnections,
     inFlightHandshakeCap: TlsHandshakeFeed.internalHandshakeCap,
     openConnectionTotal: _openConnectionTotal,
@@ -1566,6 +1613,11 @@ class LocalIntakeServer {
     onOverHandshakeCap: _noteHandshakeCapLine,
     onOverConnectionCap: _noteAcceptCapLine,
   );
+
+  // تلقيمة القبول العادي فوق مستمع مربوط: مهلة اكتمال الترويسات واحدة
+  // على كل النقلات — القبول هنا هو لحظة الساعة، والتسليم فوري
+  HeaderWatchdogFeed _newPlainFeed(ServerSocket door) =>
+      HeaderWatchdogFeed(door: door, deadline: effectiveHeaderTimeout);
 
   // سطر كبح السقف الداخلي: بنمط بقية أسطر السعة — سطر واحد في الثانية
   // على الأكثر بالساعة المحقونة، والسطر التالي يحمل عدد المكتوم،
@@ -1634,10 +1686,16 @@ class LocalIntakeServer {
           // TLS ينتهي تحت طبقة HTTP فلا عقد سلك يتغير، والصامت والمزيّف
           // يُقطعان قبل التسليح حيث يصل التدمير إلى السلك
           if (tls == null) {
-            _server = await HttpServer.bind(
+            // القبول العادي بنمط النقل الآمن نفسه: المستمع الخام ملك
+            // الحزمة والتلقيمة تحمل ساعة مهلة الترويسات فوق كل مقبس
+            // مقبول فلا اتصال ينقّط رأسه ويحجز الباب
+            final door = await ServerSocket.bind(
               InternetAddress.loopbackIPv4,
               candidate,
             );
+            final feed = _newPlainFeed(door);
+            _plainFeed = feed;
+            _server = HttpServer.listenOn(feed);
           } else {
             // القبول الخام: RawServerSocket يسلّم التلقيمة مقابس RawSocket
             // — المقبض الذي تبقى في يد التلقيمة حتى التسليم فيصل القتل
@@ -1681,29 +1739,39 @@ class LocalIntakeServer {
           if (orphan != null) {
             _server = null;
             final orphanFeed = _feed;
+            final orphanPlainFeed = _plainFeed;
             // والتلقيمة تتبع الخادم إلى الصفر معه: إغلاقها هو الذي يحصد
             // ما قبل التسليح (listenOn لا يغلق الممرَّر له) وترك مرجعها
-            // يستدعي عدّاً على باب لم يعد موجوداً
+            // يستدعي عدّاً على باب لم يعد موجوداً — وتلقيمة القبول
+            // العادي كذلك إذ هي مالكة المستمع الخام
             _feed = null;
+            _plainFeed = null;
             // والمنفذ يتبع الخادم إلى الصفر: رقم قديم فوق خادم لم
-            // يعد موجوداً كذبة يستند إليها المستدعي (عقد port)
+            // يعد موجوداً كذبة يستند إليه المستدعي (عقد port)
             _port = 0;
             await orphan.close(force: true);
             await orphanFeed?.close();
+            await orphanPlainFeed?.close();
           }
           final orphanV6 = _serverV6;
           if (orphanV6 != null) {
             _serverV6 = null;
             final orphanFeedV6 = _feedV6;
+            final orphanPlainFeedV6 = _plainFeedV6;
             _feedV6 = null;
+            _plainFeedV6 = null;
             await orphanV6.close(force: true);
             await orphanFeedV6?.close();
+            await orphanPlainFeedV6?.close();
           }
           final orphanUnix = _serverUnix;
           if (orphanUnix != null) {
             _serverUnix = null;
+            final orphanPlainFeedUnix = _plainFeedUnix;
+            _plainFeedUnix = null;
             await _removeUnixSocketFile();
             await orphanUnix.close(force: true);
+            await orphanPlainFeedUnix?.close();
           }
           telemetry.warn(
             'port $candidate unavailable (${e.runtimeType}), '
@@ -1740,11 +1808,16 @@ class LocalIntakeServer {
         // ومع سياق جاهز التلقيمة نفسها — بابٌ واحد لا ينشق نقله
         HttpServer v6;
         if (tls == null) {
-          v6 = await HttpServer.bind(
+          // نقل المستمع الأول نفسه على باب الـ::1: مستمع خام ملك الحزمة
+          // وتلقيمة مهلة الترويسات نفسها
+          final doorV6 = await ServerSocket.bind(
             InternetAddress.loopbackIPv6,
             _port,
             v6Only: true,
           );
+          final feedV6 = _newPlainFeed(doorV6);
+          _plainFeedV6 = feedV6;
+          v6 = HttpServer.listenOn(feedV6);
         } else {
           // القبول الخام نفسه على باب الـ::1: نقل الباب الأول حرفاً
           final rawV6 = await RawServerSocket.bind(
@@ -1774,10 +1847,15 @@ class LocalIntakeServer {
     }
     final unixPath = config.unixSocketPath;
     if (unixPath != null) {
-      final unix = await HttpServer.bind(
+      // نقل الأبواب العادية نفسه على مقبس يونكس: مستمع خام وتلقيمة مهلة
+      // الترويسات نفسها
+      final doorUnix = await ServerSocket.bind(
         InternetAddress(unixPath, type: InternetAddressType.unix),
         0,
       );
+      final feedUnix = _newPlainFeed(doorUnix);
+      _plainFeedUnix = feedUnix;
+      final unix = HttpServer.listenOn(feedUnix);
       final guarded = await _enforceUnixOwnerOnly(unixPath);
       if (!guarded) {
         await unix.close(force: true);
@@ -2023,11 +2101,17 @@ class LocalIntakeServer {
       final serverUnix = _serverUnix;
       final feed = _feed;
       final feedV6 = _feedV6;
+      final plainFeed = _plainFeed;
+      final plainFeedV6 = _plainFeedV6;
+      final plainFeedUnix = _plainFeedUnix;
       _server = null;
       _feed = null;
+      _plainFeed = null;
       _serverV6 = null;
       _feedV6 = null;
+      _plainFeedV6 = null;
       _serverUnix = null;
+      _plainFeedUnix = null;
       _port = 0;
       // الإيقاف الكامل ينسى المنفذ المعلق: بعده لا استئناف يملك عنواناً
       // — والبدء الجديد يربط جيلاً جديداً من الصفر
@@ -2058,6 +2142,11 @@ class LocalIntakeServer {
       // يبلغ النظير وكل حصاد قطعةٌ معدودة
       await feed?.close();
       await feedV6?.close();
+      // وتلقيمات القبول العادي باليد نفسها: مالكة مستمعاتها الخامة
+      // (listenOn لا يغلق الممرَّر له) وساعة مهلة الترويسات تُوقف معها
+      await plainFeed?.close();
+      await plainFeedV6?.close();
+      await plainFeedUnix?.close();
       if (serverUnix != null) {
         // ملف المقبس الذي أنشأته الحالة هذه يُرفع بعد الإغلاق: بداية
         // تالية على المسار نفسه تعيد الربط نظيفة بلا ملف عالق
