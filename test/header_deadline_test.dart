@@ -111,9 +111,13 @@ class _Link {
   Future<void> get answeredFuture => _answered.future;
 
   static Future<_Link> connect(Socket socket, {required String host}) async {
-    final set = socket.setOption(SocketOption.tcpNoDelay, true);
-    if (!set) {
-      throw StateError('the witness client could not disable Nagle');
+    // tcpNoDelay خيار TCP حصراً: على مجال يونكس نداؤه يرمي errno 95
+    // (مقيس في حاوية لينكس) — واليونكس بلا Nagle أصلاً فلا ما يُعطَّل
+    if (socket.address.type != InternetAddressType.unix) {
+      final set = socket.setOption(SocketOption.tcpNoDelay, true);
+      if (!set) {
+        throw StateError('the witness client could not disable Nagle');
+      }
     }
     return _Link(socket).._pendingHost = host;
   }
@@ -186,10 +190,13 @@ class _Link {
 class _SlowClient {
   _SlowClient(this.socket) {
     // كل عملاء الشهود بلا Nagle بتثبيت التكليف: البطيء الشرعي أوّلى
-    // بتقطيعه يصل على السلك كما يُرسل لا مجتمعاً في مقطع واحد
-    final set = socket.setOption(SocketOption.tcpNoDelay, true);
-    if (!set) {
-      throw StateError('the witness client could not disable Nagle');
+    // بتقطيعه يصل على السلك كما يُرسل لا مجتمعاً في مقطع واحد — وعلى
+    // TCP حصراً: مقبس مجال يونكس بلا Nagle أصلاً ونداء الخيار يرمي
+    if (socket.address.type != InternetAddressType.unix) {
+      final set = socket.setOption(SocketOption.tcpNoDelay, true);
+      if (!set) {
+        throw StateError('the witness client could not disable Nagle');
+      }
     }
     socket.listen(
       (chunk) {
