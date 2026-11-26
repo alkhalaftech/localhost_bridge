@@ -78,6 +78,225 @@ Future<LocalIntakeServer> _start(BridgeConfig config) async {
 /// One connected raw client probe: it sends exactly the bytes it is given
 /// (tcpNoDelay carries each write to the wire at once), collects the reply
 /// bytes, and records the peer's close whenever it lands.
+// ═══ شواهد حدود الطلب غير البسيطة (مراجعة H2 الخارجية): الأشكال التي
+// كان الفاحص الأول يُسرّحها (السطر الطويل، وUpgrade وحدها، والمقطّع،
+// وكثرت الأسطر) صارت تحت الساعة كلها، وحارسا عدم القطع يبقيان الخدمة
+// سليمة. شواهد القطع أحمرُها على الشجرة غير المبنية (f2db440) مسجَّل،
+// وحارسا عدم القطع أخضران على الطرفين معاً.
+Future<void> _witnessLongLineCut({
+  required LocalIntakeServer srv,
+  required String host,
+  required Future<Socket> Function() clientSocket,
+}) async {
+  final bound = _bound(srv);
+  final link = await _Link.connect(await clientSocket(), host: host);
+  addTearDown(link.destroy);
+  // السطر يبدأ بـ c فيصير مرشحاً عند الفاحص المقطعي: أسوأ الحالات
+  // (المرشّح يتجاوز سقفه فيُترك بلا فهم والساعة باقية)
+  final line = 'c${'x' * 19999}';
+  link.send(utf8.encode('POST / HTTP/1.1\r\nHost: $host\r\n$line'));
+  final cut = await link.eofWithin(bound + _cutMargin);
+  expect(
+    cut,
+    true,
+    reason:
+        'a header line longer than the scanner cap never retires the '
+        'tracker - the deadline still cuts it (${bound.inMilliseconds} '
+        'ms + margin)',
+  );
+  expect(
+    link.receivedBytes,
+    0,
+    reason:
+        'the cut is quiet: no reply bytes and no standing rejection '
+        'shape changes',
+  );
+}
+
+Future<void> _witnessUpgradeWithoutConnection({
+  required LocalIntakeServer srv,
+  required String host,
+  required Future<Socket> Function() clientSocket,
+}) async {
+  final bound = _bound(srv);
+  final link = await _Link.connect(await clientSocket(), host: host);
+  addTearDown(link.destroy);
+  link.send(
+    utf8.encode(
+      'POST / HTTP/1.1\r\n'
+      'Host: $host\r\n'
+      'Origin: $_listed\r\n'
+      'Content-Type: application/json\r\n'
+      'Upgrade: h2c\r\n'
+      'Content-Length: 15\r\n'
+      '\r\n["BROWSER-LAB"]',
+    ),
+  );
+  // ignore: avoid_print
+  print('UPG-DBG-REQ: plain / Upgrade witness sent');
+  try {
+    await link.answeredFuture.timeout(const Duration(seconds: 10));
+  } on TimeoutException {
+    // ignore: avoid_print
+    print(
+      'UPG-DBG bytes=${link.receivedBytes} '
+      'text=${link.text.length > 400 ? link.text.substring(0, 400) : link.text}',
+    );
+    rethrow;
+  }
+  expect(
+    link.statusLine,
+    contains(' 200 '),
+    reason:
+        'Upgrade without Connection: upgrade is a plain request at '
+        'dart:io (the upgrade token rides Connection alone: '
+        'http_parser.dart:752-759 / :801-808) - served, never upgraded',
+  );
+  link.send(utf8.encode('GET / HTTP/1.1\r\nHost: $host\r\nX-Bridge-Trail'));
+  final cut = await link.eofWithin(bound + _cutMargin);
+  expect(
+    cut,
+    true,
+    reason:
+        'the next stalled header is cut from its first byte - the '
+        'Upgrade line did not retire the tracker',
+  );
+}
+
+Future<void> _witnessChunkedThenIncompleteCut({
+  required LocalIntakeServer srv,
+  required String host,
+  required Future<Socket> Function() clientSocket,
+}) async {
+  final bound = _bound(srv);
+  final link = await _Link.connect(await clientSocket(), host: host);
+  addTearDown(link.destroy);
+  link.send(
+    utf8.encode(
+      'POST / HTTP/1.1\r\n'
+      'Host: $host\r\n'
+      'Origin: $_listed\r\n'
+      'Content-Type: application/json\r\n'
+      'Transfer-Encoding: chunked\r\n'
+      '\r\n'
+      'f\r\n["BROWSER-LAB"]\r\n'
+      '0\r\n\r\n',
+    ),
+  );
+  await link.answeredFuture.timeout(const Duration(seconds: 10));
+  expect(
+    link.statusLine,
+    contains(' 200 '),
+    reason:
+        'a full chunked cycle is served - the body was tracked by its '
+        'grammar to the cycle end, never retired',
+  );
+  link.send(utf8.encode('GET / HTTP/1.1\r\nHost: $host\r\nX-Bridge-Trail'));
+  final cut = await link.eofWithin(bound + _cutMargin);
+  expect(
+    cut,
+    true,
+    reason:
+        'the next stalled header after a chunked cycle is still cut - '
+        'chunked did not retire the tracker',
+  );
+}
+
+Future<void> _witnessChunkedThenPlainAlive({
+  required LocalIntakeServer srv,
+  required String host,
+  required Future<Socket> Function() clientSocket,
+}) async {
+  final bound = _bound(srv);
+  final link = await _Link.connect(await clientSocket(), host: host);
+  addTearDown(link.destroy);
+  link.send(
+    utf8.encode(
+      'POST / HTTP/1.1\r\n'
+      'Host: $host\r\n'
+      'Origin: $_listed\r\n'
+      'Content-Type: application/json\r\n'
+      'Transfer-Encoding: chunked\r\n'
+      '\r\n'
+      'f\r\n["BROWSER-LAB"]\r\n'
+      '0\r\n\r\n',
+    ),
+  );
+  await link.answeredFuture.timeout(const Duration(seconds: 10));
+  expect(
+    link.statusLine,
+    contains(' 200 '),
+    reason:
+        'the chunked request '
+        'is served whole',
+  );
+  link.send(
+    utf8.encode(
+      'POST / HTTP/1.1\r\n'
+      'Host: $host\r\n'
+      'Origin: $_listed\r\n'
+      'Content-Type: application/json\r\n'
+      'Content-Length: 15\r\n'
+      '\r\n["BROWSER-LAB"]',
+    ),
+  );
+  await link.answeredFuture.timeout(const Duration(seconds: 10));
+  expect(
+    link.statusLine,
+    contains(' 200 '),
+    reason:
+        'the plain request '
+        'after the chunked cycle is served on the same connection',
+  );
+  final cut = await link.eofWithin(bound + _cutMargin);
+  expect(
+    cut,
+    false,
+    reason:
+        'both served and the connection alive past the header deadline - '
+        'the tracker watches without false cuts (guards mutation M22)',
+  );
+}
+
+Future<void> _witnessManyLinesCut({
+  required LocalIntakeServer srv,
+  required String host,
+  required Future<Socket> Function() clientSocket,
+}) async {
+  final bound = _bound(srv);
+  final link = await _Link.connect(await clientSocket(), host: host);
+  addTearDown(link.destroy);
+  final lines = List.generate(300, (i) => 'X-Bridge-Line-$i: v').join('\r\n');
+  link.send(
+    utf8.encode(
+      'POST / HTTP/1.1\r\n'
+      'Host: $host\r\n'
+      'Origin: $_listed\r\n'
+      'Content-Type: application/json\r\n'
+      '$lines\r\n'
+      'Content-Length: 15\r\n'
+      '\r\n["BROWSER-LAB"]',
+    ),
+  );
+  await link.answeredFuture.timeout(const Duration(seconds: 10));
+  expect(
+    link.statusLine,
+    contains(' 200 '),
+    reason:
+        'three hundred header lines are served - the line count never '
+        'retires the tracker',
+  );
+  link.send(utf8.encode('GET / HTTP/1.1\r\nHost: $host\r\nX-Bridge-Trail'));
+  final cut = await link.eofWithin(bound + _cutMargin);
+  expect(
+    cut,
+    true,
+    reason:
+        'the next stalled header after three hundred lines is still cut '
+        '- the line count did not retire the tracker',
+  );
+}
+
 class _Link {
   _Link(this.socket) {
     unawaited(
@@ -514,6 +733,53 @@ void main() {
         final srv = await _start(_config(scene, idleTimeout: _idle));
         addTearDown(srv.stop);
         await _runSceneWitness(_witnessIdleKeptAlive, scene: scene, srv: srv);
+      }, timeout: const Timeout(Duration(seconds: 45)));
+
+      test('a header line longer than the scanner cap on a fresh connection '
+          'is cut at the deadline', () async {
+        final srv = await _start(_config(scene));
+        addTearDown(srv.stop);
+        await _runSceneWitness(_witnessLongLineCut, scene: scene, srv: srv);
+      }, timeout: const Timeout(Duration(seconds: 45)));
+
+      test('an Upgrade header without Connection: upgrade serves the request '
+          'and the next stalled header is still cut', () async {
+        final srv = await _start(_config(scene));
+        addTearDown(srv.stop);
+        await _runSceneWitness(
+          _witnessUpgradeWithoutConnection,
+          scene: scene,
+          srv: srv,
+        );
+      }, timeout: const Timeout(Duration(seconds: 45)));
+
+      test('a chunked request body is tracked and the next stalled header is '
+          'cut', () async {
+        final srv = await _start(_config(scene));
+        addTearDown(srv.stop);
+        await _runSceneWitness(
+          _witnessChunkedThenIncompleteCut,
+          scene: scene,
+          srv: srv,
+        );
+      }, timeout: const Timeout(Duration(seconds: 45)));
+
+      test('a chunked request followed by a normal request keeps both served '
+          'and the connection alive past the deadline', () async {
+        final srv = await _start(_config(scene));
+        addTearDown(srv.stop);
+        await _runSceneWitness(
+          _witnessChunkedThenPlainAlive,
+          scene: scene,
+          srv: srv,
+        );
+      }, timeout: const Timeout(Duration(seconds: 45)));
+
+      test('three hundred header lines serve the request and the next stalled '
+          'header is still cut', () async {
+        final srv = await _start(_config(scene));
+        addTearDown(srv.stop);
+        await _runSceneWitness(_witnessManyLinesCut, scene: scene, srv: srv);
       }, timeout: const Timeout(Duration(seconds: 45)));
     });
   }
