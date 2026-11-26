@@ -1764,13 +1764,18 @@ class LocalIntakeServer {
             await orphanFeedV6?.close();
             await orphanPlainFeedV6?.close();
           }
+          // يونكس يُحصد بالتلقيمة معه أو بدون مستمع: التلقيمة تُسند
+          // قبل حارس الصلاحيات (والحارس قد يرمي لا يرد false وحده) —
+          // فمسار فشل بين الربط والضبط يبقي الباب الخام في يدها
           final orphanUnix = _serverUnix;
-          if (orphanUnix != null) {
+          final orphanPlainFeedUnix = _plainFeedUnix;
+          if (orphanUnix != null || orphanPlainFeedUnix != null) {
             _serverUnix = null;
-            final orphanPlainFeedUnix = _plainFeedUnix;
             _plainFeedUnix = null;
-            await _removeUnixSocketFile();
-            await orphanUnix.close(force: true);
+            if (orphanUnix != null) {
+              await _removeUnixSocketFile();
+              await orphanUnix.close(force: true);
+            }
             await orphanPlainFeedUnix?.close();
           }
           telemetry.warn(
@@ -1859,6 +1864,12 @@ class LocalIntakeServer {
       final guarded = await _enforceUnixOwnerOnly(unixPath);
       if (!guarded) {
         await unix.close(force: true);
+        // والمرجع الخام ملك التلقيمة (listenOn لا يغلق الممرَّر له
+        // ب_closeServer=false) فإغلاقها هو الذي يوقف الباب المربوط —
+        // وتركها هنا يسرّب مستمعاً مربوطاً على مسار فشل كان الإغلاق
+        // يبلغه قبل الفرق، والحقل يُصفَّر معه فلا يتيم في الالتقاط
+        _plainFeedUnix = null;
+        await feedUnix.close();
         // ملف المقبس الذي وُلد هنا يُرفع بالمسار الفعلي لا بحقل الحالة:
         // الحقل لا يُضبط إلا بعد نجاح الحارس فنداؤه بحقه كان سيترك
         // الملف يحتل المسار فيعجز كل بدء تالٍ عنه. والعقد الآمن نفسه:
