@@ -78,11 +78,9 @@ Future<LocalIntakeServer> _start(BridgeConfig config) async {
 /// One connected raw client probe: it sends exactly the bytes it is given
 /// (tcpNoDelay carries each write to the wire at once), collects the reply
 /// bytes, and records the peer's close whenever it lands.
-// ═══ شواهد حدود الطلب غير البسيطة (مراجعة H2 الخارجية): الأشكال التي
-// كان الفاحص الأول يُسرّحها (السطر الطويل، وUpgrade وحدها، والمقطّع،
-// وكثرت الأسطر) صارت تحت الساعة كلها، وحارسا عدم القطع يبقيان الخدمة
-// سليمة. شواهد القطع أحمرُها على الشجرة غير المبنية (f2db440) مسجَّل،
-// وحارسا عدم القطع أخضران على الطرفين معاً.
+// ═══ شواهد حدود الطلب غير البسيطة: الأشكال التي كان الفاحص الأول
+// يُسرّحها (السطر الطويل، وUpgrade وحدها، والمقطّع، وكثرت الأسطر)
+// صارت تحت الساعة كلها، وحارسا عدم القطع يبقيان الخدمة سليمة.
 Future<void> _witnessLongLineCut({
   required LocalIntakeServer srv,
   required String host,

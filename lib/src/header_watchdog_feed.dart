@@ -113,43 +113,43 @@ class HeaderWatchdogFeed extends Stream<Socket> implements ServerSocket {
   InternetAddress get address => _door.address;
 }
 
-/// A `Socket`-shaped watchdog over a delivered connection: everything
-/// passes through to the wrapped socket untouched (reads, writes, options,
-/// the closing contract), and one thing is added - the request headers'
-/// completion deadline. The clock arms at construction (the accept on the
-/// plain transports, the delivery on the TLS transport whose handshake
-/// window covers the path before it), is never restarted by arriving
-/// bytes, is cancelled the moment the header terminator crosses the wire,
-/// and on a kept-alive connection arms again at the first byte of the
-/// next request only - a connection that sends nothing after its reply
-/// carries no clock and stays under the idle timeout. At the deadline the
-/// cut is quiet: the wrapped socket is destroyed, the peer reads the
-/// close, and no byte is written - no reply, no wire code. The tracker
-/// under the clock reads only what a request line needs: lines end at LF
-/// (a superset of CRLF, so every header block the server's own parser
-/// terminates, this scan terminates too), the last `Content-Length` and a
-/// clean `Transfer-Encoding: chunked` and an `Upgrade` header are
-/// remembered, and everything the scan cannot make sense of retires it:
-/// retirement stops all future arming on the connection while the clock
-/// of the request in flight stays honest until its terminator cancels it
-/// - the safe direction is a retired tracker, never a false cut. Bodies
-/// are never scanned for shape: a declared length is counted byte-wise,
-/// and a chunked declaration serves its cycle then retires the tracker.
-/// الساعة ومُفرِّص الترويسات معاً لاتصال واحد — صنفٌ واحد يُستعمل في
-/// المسارين: الغلاف العادي (HeaderDeadlineSocket) والمحوّل الآمن
-/// (_RawSecureAdapter). الساعة تُسلَّح عند الولادة (القبول عادياً،
-/// والتسليم آمناً حيث تغطي مهلة المصافحة ما قبلها)، ولا تُعاد بالبايتات،
-/// وتُنزع عند مُنهي الترويسات، وعلى الاتصال المُبقى تُسلَّح عند أول بايت
-/// من الطلب التالي حصراً — اتصالٌ لا يرسل شيئاً بعد ردّه بلا ساعة ويبقى
-/// تحت مهلة الخمول. عند الموعد القطع هادئاً عبر نداء _onCut: المالك
-/// يدمّر مقبسه ويغلق دفق تسليمه — لا بايت ولا رد ولا رمز جديد.
-/// المُفرِّص يقرأ ما يحتاجه سطر الطلب وحده: الأسطر تنتهي بـ LF (أشمل من
-/// CRLF فكل مُنهي يعرفه الخادم يُنهيه هذا الماسح)، وآخر Content-Length
-/// وTransfer-Encoding المحصور بـ chunked وUpgrade تُحفظ، وما لا يفهمه
-/// الفاحص لا يُسرَّح — في كل حالة من تلك يرفضه dart:io ويغلق الاتصال
-/// (برهان مصدر SDK بأرقام الأسطر في تعليق _noteCandidate) فلا اتصال
-/// يعاد استعماله ليُقطع خطأً. الأجسام لا تُفحص شكلاً: المعلن يُعدّ
-/// بايتاً بايتاً، والمقطّع يُتتبع بقواعد نهاية دورته حصراً.
+/// The clock and the request-header scanner for one connection - one
+/// class shared by both transports: the plain wrapper
+/// (HeaderDeadlineSocket) and the TLS adapter. The clock arms at
+/// construction (accept on the plain transports, delivery on TLS whose
+/// handshake window covers the path before it), is never restarted by
+/// arriving bytes, is dropped at the header terminator, and on a
+/// kept-alive connection arms again at the first byte of the next
+/// request only - a connection that sends nothing after its reply
+/// carries no clock and stays under the idle timeout. At the deadline
+/// the cut is quiet through [onCut]: the owner destroys its socket and
+/// closes its delivered stream - no bytes, no reply, no new wire code.
+/// The scanner reads only what a request line needs: lines end at LF (a
+/// superset of CRLF, so every header block the server's own parser
+/// terminates, this scan terminates too), the last `Content-Length` and
+/// a `Transfer-Encoding` that ends in `chunked` and an `Upgrade` header
+/// are remembered, and everything the scan cannot make sense of is NOT
+/// retired - in every such shape dart:io itself refuses the request and
+/// closes the connection (the parser sources are cited at
+/// _noteCandidate), so the clock stays honest and the connection stays
+/// covered. Bodies are never scanned for shape: a declared length is
+/// counted byte-wise, and a chunked body is tracked by the chunked
+/// grammar to its cycle end.
+// الساعة ومُفرِّص الترويسات معاً لاتصال واحد — صنفٌ واحد يُستعمل في
+// المسارين: الغلاف العادي (HeaderDeadlineSocket) والمحوّل الآمن
+// (_RawSecureAdapter). الساعة تُسلَّح عند الولادة (القبول عادياً،
+// والتسليم آمناً حيث تغطي مهلة المصافحة ما قبلها)، ولا تُعاد بالبايتات،
+// وتُنزع عند مُنهي الترويسات، وعلى الاتصال المُبقى تُسلَّح عند أول بايت
+// من الطلب التالي حصراً — اتصالٌ لا يرسل شيئاً بعد ردّه بلا ساعة ويبقى
+// تحت مهلة الخمول. عند الموعد القطع هادئاً عبر نداء _onCut: المالك
+// يدمّر مقبسه ويغلق دفق تسليمه — لا بايت ولا رد ولا رمز جديد.
+// المُفرِّص يقرأ ما يحتاجه سطر الطلب وحده: الأسطر تنتهي بـ LF (أشمل من
+// CRLF فكل مُنهي يعرفه الخادم يُنهيه هذا الماسح)، وآخر Content-Length
+// وTransfer-Encoding المحصور بـ chunked وUpgrade تُحفظ، وما لا يفهمه
+// الفاحص لا يُسرَّح — في كل حالة من تلك يرفضه dart:io ويغلق الاتصال
+// (برهان مصدر SDK بأرقام الأسطر في تعليق _noteCandidate) فلا اتصال
+// يعاد استعماله ليُقطع خطأً. الأجسام لا تُفحص شكلاً: المعلن يُعدّ
+// بايتاً بايتاً، والمقطّع يُتتبع بقواعد نهاية دورته حصراً.
 class _HeaderTracker {
   _HeaderTracker({required Duration deadline, required void Function() onCut})
     : _deadline = deadline,
@@ -623,11 +623,19 @@ class _HeaderTracker {
   }
 }
 
-/// غلاف `Socket` على الأبواب العادية: كل شيء يمرّ للمقبس الداخلي كما هو
-/// (القراءة والكتابة وعقد الإغلاق)، والحارس وحده المضاف — ساعة ومُفرِّص
-/// من `_HeaderTracker` الصنف المشترك مع محوّل TLS. القطع: المالك يدمّر
-/// المقبس الداخلي ويغلق دفق تسليمه، فيبلغ النظير على السلك بلا بايت
-/// ولا رد ولا رمز جديد.
+/// The plain-transport wrapper: everything passes through to the wrapped
+/// socket untouched (reads, writes, options, the closing contract), and
+/// one thing is added - the request headers' completion deadline, carried
+/// by the shared [HeaderTracker]. The cut is quiet through the tracker's
+/// onCut: this wrapper destroys the inner socket and closes its delivered
+/// stream - no bytes, no reply, no new wire code. The TLS transport
+/// carries the same tracker inside its adapter instead of a wrapper, so
+/// the delivered object stays a `SecureSocket`.
+// غلاف `Socket` على الأبواب العادية: كل شيء يمرّ للمقبس الداخلي كما هو
+// (القراءة والكتابة وعقد الإغلاق)، والحارس وحده المضاف — ساعة ومُفرِّص
+// من `_HeaderTracker` الصنف المشترك مع محوّل TLS. القطع: المالك يدمّر
+// المقبس الداخلي ويغلق دفق تسليمه، فيبلغ النظير على السلك بلا بايت
+// ولا رد ولا رمز جديد.
 class HeaderDeadlineSocket implements Socket {
   HeaderDeadlineSocket(this._inner, this._deadline, {void Function()? onDead})
     : _onDead = onDead {
