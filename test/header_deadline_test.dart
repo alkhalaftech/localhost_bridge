@@ -254,6 +254,8 @@ Future<void> _witnessChunkedThenPlainAlive({
         'the plain request '
         'after the chunked cycle is served on the same connection',
   );
+  // مقطّع ختامي ثم خمول: دورة المقطّع تنزع الساعة عند مُنهيها والخمول
+  // بعدها تحت حد الخمول القائم لا تحت حد الترويسات — والقطع هنا خطأ
   final cut = await link.eofWithin(bound + _cutMargin);
   expect(
     cut,
@@ -261,6 +263,37 @@ Future<void> _witnessChunkedThenPlainAlive({
     reason:
         'both served and the connection alive past the header deadline - '
         'the tracker watches without false cuts (guards mutation M22)',
+  );
+  link.send(
+    utf8.encode(
+      'POST / HTTP/1.1\r\n'
+      'Host: $host\r\n'
+      'Origin: $_listed\r\n'
+      'Content-Type: application/json\r\n'
+      'Transfer-Encoding: chunked\r\n'
+      '\r\n'
+      'f\r\n["BROWSER-LAB"]\r\n'
+      '0\r\n\r\n',
+    ),
+  );
+  await link.answeredFuture.timeout(const Duration(seconds: 10));
+  expect(
+    link.statusLine,
+    contains(' 200 '),
+    reason: 'a final chunked cycle on the same connection is served whole',
+  );
+  // والخمول بعد الدورة المقطّعة الختامية كذلك: الساعة نُزعت عند مُنهي
+  // الدورة والخمول للحد الخمولي — لا قطع تحت حد الترويسات (يقتل الطفرة
+  // التي تُسلّح الساعة عند نهاية دورة المقطّع)
+  final cut2 = await link.eofWithin(bound + _cutMargin);
+  expect(
+    cut2,
+    false,
+    reason:
+        'the connection stays open past the header deadline while idle '
+        'after a completed chunked cycle - the cycle end hands the '
+        'connection back to the idle bound, never to a header-deadline '
+        'cut',
   );
 }
 
