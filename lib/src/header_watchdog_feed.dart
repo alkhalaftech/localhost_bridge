@@ -171,36 +171,76 @@ class HeaderDeadlineSocket implements Socket {
 
   // ── مُفرِّص الترويسات: أسطر الطلب، وعدّ الجسم المعلن، والتسريح ──
   static const int _maxLineBytes = 16384;
-  static const int _maxHeaderLines = 256;
   static const int _phaseHeaders = 0;
   static const int _phaseBody = 1;
   static const int _phaseRetired = 2;
+  static const int _phaseChunked = 3;
 
   int _phase = _phaseHeaders;
-  final List<int> _line = <int>[];
-  int _headerLines = 0;
   int? _contentLength;
   bool _chunked = false;
-  bool _upgrade = false;
   int _bodyLeft = 0;
+  // حقائق التأطير المرآة من محلل dart:io: هل Connection يحمل الرمز
+  // upgrade (هو وحده معيار الترقية عنده)، وهل مُرّت ترويسة
+  // Transfer-Encoding (فالطلب الذي لا تنتهي بترميزه الأخير chunked
+  // يرفضه ويغلق)
+  bool _connUpgrade = false;
+  bool _te = false;
+  // قواعد الجسم المقطّع كما يقرؤها dart:io: حجم ست عشري ثم امتداد
+  // منقوط بفاصلة منقوطة ثم CRLF ثم البيانات ثم CRLF، إلى قطعة الصفر،
+  // ثم ترويسات ختامية، ثم سطر فارغ، فنهاية الدورة
+  int _ck = 0;
+  int _ckSize = 0;
+  bool _ckDigits = false;
+  int _ckLeft = 0;
+  int _ckLine = 0;
 
   // ── الساعة ──
 
+  // المؤقت كسول واحد لكل اتصال: التسليح يخزّن موعداً مطلقاً وينشئ
+  // المؤقت إن لم يوجد، ومُنهي الترويسات ينزع العلم دون إلغاء (فلا
+  // إنشاء وإلغاء لكل طلب على اتصال مُبقى)، وعند انطلاق المؤقت يعيد
+  // الجدولة إن بقي من الموعد، فلا قطع مبكر
+  static final Stopwatch _mono = Stopwatch()..start();
+  bool _armed = false;
+  int _deadlineAtUs = 0;
+
   void _arm() {
-    if (_dead) return;
-    _timer ??= Timer(_deadline, _cut);
+    if (_dead || _armed) return;
+    _armed = true;
+    _deadlineAtUs = _mono.elapsedMicroseconds + _deadline.inMicroseconds;
+    _timer ??= Timer(_deadline, _onTimer);
+  }
+
+  // نزع العلم دون إلغاء المؤقت: مُنهي الترويسات وحده يستعمله — المؤقت
+  // يبقى معلقاً للاتصال يعاد جدولته عند التسليح التالي
+  void _disarm() {
+    _armed = false;
+  }
+
+  void _onTimer() {
+    _timer = null;
+    if (_dead || !_armed) return;
+    final left = _deadlineAtUs - _mono.elapsedMicroseconds;
+    if (left > 0) {
+      _timer = Timer(Duration(microseconds: left), _onTimer);
+      return;
+    }
+    _cut();
   }
 
   /// Stops the deadline clock without touching the connection - the feed's
   /// close and the consumer's departure use it; the socket itself belongs
   /// to the owning server's close.
   void stopClock() {
+    _armed = false;
     _timer?.cancel();
     _timer = null;
   }
 
   void _cut() {
     _timer = null;
+    _armed = false;
     _markDead();
     // القطع الهادئ: تدمير المقبس الداخلي يبلغ النظير على السلك - لا بايت
     // ولا رد ولا رمز جديد، والإغلاق نفسه هو التقرير
@@ -228,125 +268,344 @@ class HeaderDeadlineSocket implements Socket {
 
   // ── التفريص ──
 
+  // فاحص مقطعي: السطر يُتتبع بطوله وأول بايت فيه، ولا نسخ إلا لسطر
+  // مرشّح يبدأ بـ c أو t أو u (أول حرف لأسماء الترويسات الثلاث
+  // المتتبعة)، في مخزن بايتات واحد لكل اتصال يتضاعف عند الحاجة، وفك
+  // النص لواحدة من الترويسات المطابقة وحدها. بلا قائمة تنمو بايتاً
+  // بايتاً وبلا نص لكل سطر — فكل ما يُحسب هو الطول.
+  int _lineLen = 0;
+  int _lineFirst = -1;
+  bool _lineCand = false;
+  Uint8List _cand = Uint8List(64);
+  int _candLen = 0;
+
+  void _candAdd(Uint8List chunk, int from, int to) {
+    final n = to - from;
+    if (_candLen + n > _cand.length) {
+      var cap = _cand.length * 2;
+      while (cap < _candLen + n) {
+        cap *= 2;
+      }
+      final grown = Uint8List(cap);
+      grown.setRange(0, _candLen, _cand);
+      _cand = grown;
+    }
+    _cand.setRange(_candLen, _candLen + n, chunk, from);
+    _candLen += n;
+  }
+
+  void _lineStart(int b) {
+    _lineFirst = b;
+    final l = b | 0x20;
+    _lineCand = l == 0x63 || l == 0x74 || l == 0x75;
+    _candLen = 0;
+  }
+
+  void _lineReset() {
+    _lineLen = 0;
+    _lineFirst = -1;
+    _lineCand = false;
+    _candLen = 0;
+  }
+
+  // السطر الفارغ: لا بايتات، أو بايت CR وحده (CRLF مُجرد طرفه)
+  bool get _lineEmpty => _lineLen == 0 || (_lineLen == 1 && _lineFirst == 0x0D);
+
   void _track(Uint8List chunk) {
     var i = 0;
-    while (i < chunk.length) {
+    final n = chunk.length;
+    while (i < n) {
       if (_awaitingFirstByte) {
-        // أول بايت من الطلب التالي على اتصال مُبقى: ساعته من هنا حصراً
         _awaitingFirstByte = false;
         _arm();
       }
       switch (_phase) {
         case _phaseHeaders:
-          final b = chunk[i++];
-          if (b == 0x0A) {
-            // نص السطر يُلتقط قبل التفريغ: التفريغ أولاً يجعل كل سطر
-            // يُقرأ فارغاً فلا Content-Length يُسجَّل أبداً
-            final empty = _lineIsEmpty();
-            final text = empty ? '' : _lineText();
-            _line.clear();
-            if (empty) {
-              _headersComplete();
-            } else {
-              _headerLines++;
-              if (_headerLines > _maxHeaderLines || !_noteHeaderLine(text)) {
-                _retire();
+          // بحث LF بالمقطع لا بايتاً بايتاً: [i, j) امتداد السطر الجاري
+          var j = i;
+          while (j < n && chunk[j] != 0x0A) {
+            j++;
+          }
+          if (j > i) {
+            if (_lineLen == 0) _lineStart(chunk[i]);
+            if (_lineCand) {
+              if (_candLen + (j - i) <= _maxLineBytes) {
+                _candAdd(chunk, i, j);
+              } else {
+                // سطر تأطير أطول من السقف: لا يُفهم فلا يُسرَّح والساعة
+                // باقية — والعقدة المغلقة من dart:io نفسه: ما لم يُفهم
+                // هنا يرفضه ويغلق الاتصال فلا اتصال يعاد استعماله ليُقطع
+                // خطأً (البرهان بمصدر SDK في تعليق _noteCandidate)
+                _lineCand = false;
+                _candLen = 0;
               }
             }
+            _lineLen += j - i;
+            if (_lineLen > (1 << 30)) _lineLen = 1 << 30;
+          }
+          if (j == n) {
+            i = n;
+            break;
+          }
+          i = j + 1; // الـLF
+          if (_lineEmpty) {
+            _lineReset();
+            _headersComplete();
           } else {
-            _line.add(b);
-            if (_line.length > _maxLineBytes) {
-              _retire();
-            }
+            // القيمة التي لا يفهمها الفاحص لا تُسرّح — البرهان في
+            // تعليق _noteCandidate
+            if (_lineCand) _noteCandidate();
+            _lineReset();
           }
         case _phaseBody:
-          final take = (chunk.length - i) < _bodyLeft
-              ? (chunk.length - i)
-              : _bodyLeft;
+          final take = (n - i) < _bodyLeft ? (n - i) : _bodyLeft;
           _bodyLeft -= take;
           i += take;
           if (_bodyLeft == 0) {
             _cycleEnded();
           }
+        case _phaseChunked:
+          i = _trackChunked(chunk, i, n);
         case _phaseRetired:
-          // مسلَّح تسريحه: السكان للمُنهي وحده - ساعة الطلب الجاري تبقى
-          // صادقة حتى يلغيها مُنهي ترويساته، ولا تسليح بعده أبداً
-          final b = chunk[i++];
-          if (b == 0x0A) {
-            final empty = _lineIsEmpty();
-            _line.clear();
-            if (empty) {
-              _timer?.cancel();
-              _timer = null;
-            }
+          // مسلَّح تسريحه (ترقية dart:io وحدها تُسرّح الآن): السكان
+          // للمُنهي وحده، والسطر يُتتبع بالطول لا بالقائمة
+          var j = i;
+          while (j < n && chunk[j] != 0x0A) {
+            j++;
+          }
+          final room = _maxLineBytes - _lineLen;
+          if (j > i && j - i > room) {
+            _lineReset();
+            _disarm();
+            i = i + room + 1;
           } else {
-            _line.add(b);
-            if (_line.length > _maxLineBytes) {
-              _line.clear();
-              _timer?.cancel();
-              _timer = null;
+            if (j > i) {
+              if (_lineLen == 0) _lineFirst = chunk[i];
+              _lineLen += j - i;
+            }
+            if (j == n) {
+              i = n;
+              break;
+            }
+            i = j + 1;
+            final empty = _lineEmpty;
+            _lineReset();
+            if (empty) {
+              _disarm();
             }
           }
       }
-      if (_phase == _phaseRetired && _timer == null) {
+      if (_phase == _phaseRetired && !_armed) {
         // ساعة الطلب الجاري حُسمت بعد التسريح: لا شيء يُفحص بعدُ
         return;
       }
     }
   }
 
-  // نص السطر بلا \r الختامية: CRLF يُجرد، وLF المجرد يُقبل نهاية سطر
-  // قبولاً أشمل مما يقبل محلل الخادم فلا مُنهي ترويسات يعرفه الخادم
-  // ويغفل هذا الماسح
-  bool _lineIsEmpty() {
-    if (_line.isEmpty) return true;
-    return _line.length == 1 && _line[0] == 0x0D;
-  }
-
-  String _lineText() {
-    var end = _line.length;
-    if (end > 0 && _line[end - 1] == 0x0D) {
-      end--;
+  // قواعد الجسم المقطّع كما يقرؤها dart:io: حجم ست عشري (أرقام و
+  // a-f بأي حالة) ثم امتداد منقوط بفاصلة منقوطة ثم CRLF ثم البيانات
+  // ثم CRLF، وهكذا إلى قطعة حجمها صفر، ثم ترويسات ختامية، ثم سطر
+  // فارغ، فنهاية الدورة. وبايت خارج القواعد يجعل dart:io يفشل الطلب
+  // ويغلق الاتصال، فيعود الفاحص إلى طور الترويسات مغلقاً — ولا
+  // تسريح
+  int _trackChunked(Uint8List chunk, int i, int n) {
+    while (i < n && _phase == _phaseChunked) {
+      final b = chunk[i];
+      switch (_ck) {
+        case 0:
+          i++;
+          final h = b | 0x20;
+          if (b >= 0x30 && b <= 0x39) {
+            _ckSize = _ckSize * 16 + (b - 0x30);
+            _ckDigits = true;
+          } else if (h >= 0x61 && h <= 0x66) {
+            _ckSize = _ckSize * 16 + (h - 0x61 + 10);
+            _ckDigits = true;
+          } else if (b == 0x3B) {
+            _ck = 1;
+          } else if (b == 0x0D) {
+            // CR قبل LF: لا حال
+          } else if (b == 0x0A && _ckDigits) {
+            _ckEndSize();
+          } else {
+            _cycleEnded();
+          }
+          if (_ckSize > 0x7FFFFFFF) _cycleEnded();
+        case 1:
+          i++;
+          if (b == 0x0A) _ckEndSize();
+        case 2:
+          final take = (n - i) < _ckLeft ? (n - i) : _ckLeft;
+          _ckLeft -= take;
+          i += take;
+          if (_ckLeft == 0) _ck = 3;
+        case 3:
+          i++;
+          if (b == 0x0A) {
+            _ck = 0;
+            _ckSize = 0;
+            _ckDigits = false;
+          } else if (b != 0x0D) {
+            _cycleEnded();
+          }
+        case 4:
+          i++;
+          if (b == 0x0A) {
+            if (_ckLine == 0) {
+              _cycleEnded();
+            } else {
+              _ckLine = 0;
+            }
+          } else if (b != 0x0D || _ckLine > 0) {
+            _ckLine++;
+          }
+      }
     }
-    return latin1.decode(_line.sublist(0, end), allowInvalid: true);
+    return i;
   }
 
-  bool _noteHeaderLine(String line) {
-    final lower = line.toLowerCase();
-    if (lower.startsWith('content-length:')) {
-      final value = int.tryParse(line.substring(15).trim());
-      if (value == null || value < 0) {
-        return false;
-      }
-      if (_contentLength != null && _contentLength != value) {
-        return false;
-      }
-      _contentLength = value;
-    } else if (lower.startsWith('transfer-encoding:')) {
-      if (line.substring(18).trim().toLowerCase() != 'chunked') {
-        return false;
-      }
-      _chunked = true;
-    } else if (lower.startsWith('upgrade:')) {
-      _upgrade = true;
+  void _ckEndSize() {
+    if (_ckSize == 0) {
+      _ck = 4;
+      _ckLine = 0;
+    } else {
+      _ck = 2;
+      _ckLeft = _ckSize;
+    }
+  }
+
+  // مطابقة اسم الترويسة على البايتات بأي حالة، بلا نص
+  bool _candStarts(List<int> name) {
+    if (_candLen < name.length) return false;
+    for (var k = 0; k < name.length; k++) {
+      var b = _cand[k];
+      if (b >= 0x41 && b <= 0x5A) b += 0x20;
+      if (b != name[k]) return false;
     }
     return true;
   }
 
+  // قيمة الترويسة المطابقة وحدها تُفك نصاً، بلا CR الختامية
+  String _candValue(int from) {
+    var end = _candLen;
+    if (end > 0 && _cand[end - 1] == 0x0D) end--;
+    return latin1.decode(
+      Uint8List.sublistView(_cand, from, end),
+      allowInvalid: true,
+    );
+  }
+
+  // القرارات الثلاثة نفسها التي كانت _noteHeaderLine تأخذها، على
+  // البايتات — والرابعة (Connection) لأجل معيار ترقية dart:io.
+  // **وعائدها لا يُسرّح شيئاً:** كل حالة لا يفهمها الفاحص هنا هي
+  // حالة يرفضها dart:io ويغلق الاتصال، فلا اتصال يعاد استعماله
+  // ليُقطع خطأً (برهان مصدر SDK بإصدارات CI الثلاثة):
+  // • تكرار Content-Length يرمي — 3.8.0: http_parser.dart:729-735 ·
+  //   3.13.0/stable: :771-779
+  // • القيمة غير الرقمية ترمي — http_headers.dart: 3.8.0:386-388 ·
+  //   3.13.0/stable: :379-395
+  // • Transfer-Encoding لا ينتهي بـ chunked في طلب يرمي —
+  //   3.13.0/stable: http_parser.dart:407-415؛ وفي 3.8.0 يبقى الطلب
+  //   بلا تأطير (القيمة تُقارن كاملة لا بآخر رمز: :740-743) فيقرؤه
+  //   بلا جسم فيفشل في بايتاته التالية ويغلق
+  // • الاسم الذي فيه مسافة لا يطابق "content-length" عند dart:io —
+  //   فطلب يحتاج جسماً يرمي "no ContentLength"
+  //   (http_headers.dart: 3.8.0:147 · 3.13.0/stable: :145)
+  // فبقاء الساعة على غير المفهوم آمن، والقطع لا يصيب طلباً سليماً
+  void _noteCandidate() {
+    if (_candStarts(_nCl)) {
+      final value = int.tryParse(_candValue(15).trim());
+      if (value == null || value < 0) return;
+      if (_contentLength != null && _contentLength != value) return;
+      _contentLength = value;
+    } else if (_candStarts(_nTe)) {
+      _te = true;
+      final tokens = _candValue(18).split(',');
+      _chunked = tokens.last.trim().toLowerCase() == 'chunked';
+    } else if (_candStarts(_nCo)) {
+      for (final t in _candValue(11).split(',')) {
+        if (t.trim().toLowerCase() == 'upgrade') _connUpgrade = true;
+      }
+    }
+  }
+
+  static const List<int> _nCl = [
+    99,
+    111,
+    110,
+    116,
+    101,
+    110,
+    116,
+    45,
+    108,
+    101,
+    110,
+    103,
+    116,
+    104,
+    58,
+  ];
+  static const List<int> _nTe = [
+    116,
+    114,
+    97,
+    110,
+    115,
+    102,
+    101,
+    114,
+    45,
+    101,
+    110,
+    99,
+    111,
+    100,
+    105,
+    110,
+    103,
+    58,
+  ];
+  static const List<int> _nCo = [
+    99,
+    111,
+    110,
+    110,
+    101,
+    99,
+    116,
+    105,
+    111,
+    110,
+    58,
+  ];
+
   void _headersComplete() {
-    // مُنهي الترويسات: ساعة القبول تنتهي هنا - طور الجسم له حده القائم
-    stopClock();
-    if (_upgrade) {
-      // إطارات القناة ليست طلبات: تسريح دائم - القناة بمهلاتها هي
+    // مُنهي الترويسات: ساعة القبول تنتهي هنا بنزع العلم دون إلغاء،
+    // وطور الجسم له حده القائم
+    _disarm();
+    if (_connUpgrade) {
+      // ترقية dart:io وحدها تُسرّح: Connection يحمل الرمز upgrade
+      // (3.8.0: http_parser.dart:752-759 · 3.13.0/stable: :801-808) —
+      // عندها يُفصل المقبس إلى القناة بمهلاتها أو يُدمَّر بعد الرد،
+      // فلا اتصال HTTP يعاد استعماله ليظل بلا حاكم
       _phase = _phaseRetired;
       _awaitingFirstByte = false;
       return;
     }
+    if (_te && !_chunked) {
+      // TE لا ينتهي بـ chunked في طلب: dart:io يرفضه ويغلق (برهان
+      // _noteCandidate) — البقاء مغلقاً لا تسريح
+      _cycleEnded();
+      return;
+    }
     if (_chunked) {
-      // خدمة الدورة ثم تسريح: الآمن فوق التغطية، وحدها الجسم المعلن
-      // بالعدد هو الذي يُعدّ
-      _phase = _phaseRetired;
-      _awaitingFirstByte = false;
+      // الجسم المقطّع يُتتبع بقواعده إلى نهاية الدورة فلا تسريح،
+      // وحدها الجسم المعلن بالعدد هو الذي يُعدّ
+      _phase = _phaseChunked;
+      _ck = 0;
+      _ckSize = 0;
+      _ckDigits = false;
       return;
     }
     final length = _contentLength ?? 0;
@@ -360,17 +619,12 @@ class HeaderDeadlineSocket implements Socket {
 
   void _cycleEnded() {
     _phase = _phaseHeaders;
-    _headerLines = 0;
     _contentLength = null;
     _chunked = false;
-    _upgrade = false;
     _bodyLeft = 0;
+    _connUpgrade = false;
+    _te = false;
     _awaitingFirstByte = true;
-  }
-
-  void _retire() {
-    _phase = _phaseRetired;
-    _awaitingFirstByte = false;
   }
 
   // ── سطح Socket المُفوَّض: كل شيء يمرّ كما هو، والقطع وحده المضاف ──
