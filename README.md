@@ -1204,6 +1204,22 @@ CLI clients on Linux and macOS.
   server throws `ArgumentError`; raise it together with `maxBodyBytes`
   for uploads that genuinely need longer than ten seconds. The limit in
   force reads as `server.effectiveBodyTimeout`.
+- Request headers must complete: `BridgeConfig.headerTimeout` (10
+  seconds by default) is the deadline over the acceptance phase before
+  any request object exists - a client that connects and stalls inside
+  its headers (a silent socket, a slowloris drip, a request line that
+  never ends) is cut on the wire at the deadline with no reply, on every
+  listener. On a fresh connection the deadline starts at accept; on a
+  kept-alive connection it starts at the first byte of the next request,
+  and a connection that sends nothing after its reply stays under the
+  idle bound (`idleTimeout`) alone - it is never cut for silence. With
+  the option unset the header limit is the shorter of ten seconds and
+  `requestTimeout`, following a lowered request timeout down the same
+  way the body limit does. An explicit `headerTimeout` must be positive
+  and no longer than `requestTimeout`, otherwise building the server
+  throws `ArgumentError`. On the TLS transport the deadline starts at
+  the handshake delivery - the path before it is `tlsHandshakeTimeout`'s.
+  The deadline in force reads as `server.effectiveHeaderTimeout`.
 - `dart:io` never bounds the sockets a listening server has accepted,
   so a host that wants a hard ceiling on open connections sets
   `BridgeConfig.maxOpenConnections` above zero: a request arriving while

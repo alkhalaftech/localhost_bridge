@@ -56,6 +56,21 @@
   following it down. An explicit value must be positive and no longer
   than `requestTimeout`, else `ArgumentError` at server construction,
   and the limit in force reads as `server.effectiveBodyTimeout`.
+- API: `BridgeConfig.headerTimeout` - the deadline over completing one
+  request's headers (10 seconds by default), the acceptance phase before
+  any request object exists: a client that connects and stalls inside
+  its headers is cut on the wire at the deadline with no reply, on every
+  listener. On a fresh connection the deadline starts at accept; on a
+  kept-alive connection it starts at the first byte of the next request,
+  and a connection that sends nothing after its reply stays under
+  `idleTimeout` - nothing is ever cut for silence. On the TLS transport
+  the deadline starts at the handshake delivery; the path before it
+  stays `tlsHandshakeTimeout`'s. `null` - the default - selects the
+  shorter of ten seconds and `requestTimeout`, following a lowered
+  request timeout down. An explicit value must be positive and no
+  longer than `requestTimeout`, else `ArgumentError` at server
+  construction, and the deadline in force reads as
+  `server.effectiveHeaderTimeout`.
 - Added: `BridgeConfig.maxOpenConnections` - an optional hard ceiling
   on open connections (`dart:io` never bounds them): a request arriving
   while more sockets than the cap are open answers `503`, and once the

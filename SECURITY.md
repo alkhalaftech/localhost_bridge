@@ -314,18 +314,33 @@ What remains:
   a seat for as long as the body limit allows and no longer:
   `BridgeConfig.bodyTimeout` (10 s default) cuts the read, answers `408
   request_timeout`, and frees the seat, after which the server recovers.
-  Raise the limit only for uploads that genuinely need longer than ten
-  seconds, and weigh it against the seat budget.
+  The same holds before the body: a sender that stalls inside its request
+  headers is cut at the header deadline — `BridgeConfig.headerTimeout`
+  (10 s default) closes the connection on the wire with no reply — and a
+  connection that sends nothing after its reply stays under the idle
+  bound below, never cut for silence alone. Raise the limits only for
+  uploads that genuinely need longer than ten seconds, and weigh them
+  against the seat budget.
 - **Peak memory under origin rotation is bounded by the caps** — the
   two 10,000-entry maps plus `dart:io`'s own per-connection buffers,
   which the package does not bound.
 - **`dart:io` sets no limit on a single header's length.** The package
   caps the headers it reads (`Origin` over 1,024 characters,
   `X-Bridge-Token` over 1,024 bytes); the seats bound requests in
-  flight, and a connection that carries no request closes between
-  `idleTimeout` and twice that (60 s default): the idle timer runs once
-  per period, marking a connection on one pass and destroying it on the
-  next. The count of open connections is unbounded by `dart:io`
+  flight, and a connection closes under two bounds working together: a
+  connection whose request headers have not completed is cut at the
+  header deadline — `BridgeConfig.headerTimeout` (10 s default, or the
+  shorter of it when `requestTimeout` is lower) closes the connection
+  on the wire with no reply, on every listener, the clock starting at
+  accept on the plain doors and at the handshake delivery on the TLS
+  door (the path before it is `tlsHandshakeTimeout`'s) — and a
+  connection that carries no request closes between `idleTimeout` and
+  twice that (60 s default): the idle timer runs once per period,
+  marking a connection on one pass and destroying it on the next. On a
+  kept-alive connection the header deadline starts at the first byte of
+  the next request, never at the end of the previous reply, so idle
+  keep-alive sockets stay under the idle bound alone. The count of open
+  connections is unbounded by `dart:io`
   itself — a host that wants a hard ceiling sets
   `BridgeConfig.maxOpenConnections` above zero, and a request arriving
   over the cap answers `503` until the count drops; `0` (the default)
