@@ -11,7 +11,9 @@
 // المتاح فلا بايت يفقد. التسليح بـRawSecureSocket.secureServer والاشتراك
 // القائم ينتقل للمحرك بينما البايتات المقروءة تعود إليه عبر
 // bufferedData، والتسليم محوّل فوق RawSecureSocket يرتدي شكل SecureSocket
-// لأن HttpServer.listenOn لا يستهلك غيره — بعقد إغلاق يطابق ما يبنيه
+// لأن HttpServer.listenOn لا يستهلك غيره — وساعة مهلة الترويسات حين
+// تُضبط تعيش داخل المحوّل نفسه (الصنف المشترك مع الغلاف العادي) فلا
+// غلاف ثانٍ فوقه والمسلَّم يبقى SecureSocket بلا وسيط — بعقد إغلاق يطابق ما يبنيه
 // SecureSocket العام فوق الخام نفسه: flush يسلّم البايتات المعلقة
 // للمحرك ولا ينتظر السلك، وclose يغلق جهة الكتابة وحدها بعد التسليم
 // (shutdown(send) — جهة القراءة لا تُمسّ فوق جسم غير مقروء)، وdestroy
@@ -30,8 +32,11 @@ import 'header_watchdog_feed.dart';
 /// `RawSecureSocket.secureServer` (the bytes read before arming are
 /// handed back to the TLS engine through `bufferedData`, and the
 /// existing read subscription moves to the engine with it) and
-/// delivered to `HttpServer.listenOn` wrapped as the `SecureSocket`
-/// shape that consumer requires.
+/// delivered to `HttpServer.listenOn` as the `SecureSocket` shape that
+/// consumer requires - the adapter itself is that shape, and the
+/// request-header deadline lives inside it when armed, so a delivered
+/// socket stays a real `SecureSocket` to `is SecureSocket` and reads
+/// its scheme and certificate by construction.
 ///
 /// The gate is the first full TLS record, not the first byte: a first
 /// byte that is not a handshake record (a plain HTTP client on the
@@ -321,11 +326,11 @@ class TlsHandshakeFeed extends Stream<Socket> implements ServerSocket {
         // وحده، والتلقيمة لا تعدّه ثانية
         _onDelivered();
         _out.add(
-          _headerTimeout == null
-              ? _RawSecureAdapter(secure)
-              // مهلة اكتمال الترويسات تبدأ بعد التسليم حصراً: المصافحة
-              // قبلها ساعة _handshakeTimeout كما هي
-              : HeaderDeadlineSocket(_RawSecureAdapter(secure), _headerTimeout),
+          // مهلة اكتمال الترويسات تعيش داخل المحوّل نفسه حين تُضبط:
+          // الساعة تُسلَّح عند التسليم حصراً والمصافحة قبلها ساعة
+          // _handshakeTimeout كما هي — والمسلَّم يبقى SecureSocket
+          // حقيقياً بلا غلاف ثانٍ فيقرأ HttpServer مخططه من شكله الأصلي
+          _RawSecureAdapter(secure, headerTimeout: _headerTimeout),
         );
       },
       onError: (Object _) {
@@ -414,8 +419,20 @@ class _PreArm {
 /// raw socket outright. Members no consumption ever invoked throw an
 /// `UnsupportedError` naming the member - a named error, never silent
 /// behavior - and everything else passes through to the raw socket.
+///
+/// When [headerTimeout] is armed, the shared [HeaderTracker] lives
+/// inside the adapter: its clock arms at construction (the delivery -
+/// the handshake window before it belongs to the handshake timeout),
+/// every read chunk passes through it before the consumer sees it, and
+/// its cut is quiet - the raw socket closes under the engine and the
+/// delivered stream closes, no bytes, no reply, no new wire code. The
+/// deadline is why the tracker is hosted here instead of a wrapper
+/// above: a wrapper would hide the `SecureSocket` shape from
+/// `HttpServer.listenOn`'s `is SecureSocket` reads.
 class _RawSecureAdapter implements SecureSocket {
-  _RawSecureAdapter(this.raw) : _rp = raw.remotePort {
+  _RawSecureAdapter(this.raw, {Duration? headerTimeout})
+    : _rp = raw.remotePort,
+      headerTimeout = headerTimeout {
     _out = StreamController<Uint8List>(
       sync: true,
       onListen: () {
@@ -428,6 +445,8 @@ class _RawSecureAdapter implements SecureSocket {
         _g(() => raw.readEventsEnabled = true);
       },
       onCancel: () {
+        // المستهلك انصرف: الساعة تُوقف معه لا قطعٌ على مقبس مُهجور
+        _tracker?.retire();
         _g(() => raw.readEventsEnabled = false);
         unawaited(_sub.cancel());
       },
@@ -437,12 +456,32 @@ class _RawSecureAdapter implements SecureSocket {
       onError: (Object e, StackTrace s) {
         // خطأ يصل بعد إغلاق دفق التسليم لا مستقبل له، وإضافته على دفق
         // مغلق ترمي داخل هذا النداء الراجع — فيُترك والنداء يعود
+        _tracker?.retire();
         if (!_out.isClosed) _out.addError(e, s);
       },
       onDone: () {
         if (!_out.isClosed) _out.close();
       },
     );
+    // الساعة المشتركة تُولد مع المحوّل حصراً حين تُضبط المهلة: الولادة
+    // هنا هي لحظة التسليم — المصافحة قبلها ساعة handshakeTimeout كما هي
+    _tracker = headerTimeout == null
+        ? null
+        : HeaderTracker(
+            deadline: headerTimeout,
+            onCut: () {
+              // القطع الهادئ: إغلاق الخام يبلغ النظير على السلك — لا
+              // بايت ولا رد ولا رمز جديد، وتعليم الموت يمنع تمرير ما
+              // بقي في حدث القراءة الجاري
+              _rawDead = true;
+              try {
+                raw.close();
+              } on SocketException {
+                // الخام ميت أصلاً: لا شيء يبلغ السلك
+              }
+              if (!_out.isClosed) _out.close();
+            },
+          );
   }
 
   final RawSecureSocket raw;
@@ -450,6 +489,12 @@ class _RawSecureAdapter implements SecureSocket {
   // منفذ النظير يُلتقط عند البناء: قراءة الخام بعد إغلاقه ترمي، والتقطيع
   // المبكر يجعل أعضاء العنوان تقرأ حقها من اليد لا من مقبس ميت
   final int _rp;
+
+  /// The request-header completion deadline this adapter carries, null
+  /// when the host runs without one - the same value the plain wrapper
+  /// takes; here it arms the shared [HeaderTracker] at the delivery.
+  final Duration? headerTimeout;
+  HeaderTracker? _tracker;
   late final StreamController<Uint8List> _out;
   late final StreamSubscription<RawSocketEvent> _sub;
   final Encoding _encoding = utf8;
@@ -477,7 +522,11 @@ class _RawSecureAdapter implements SecureSocket {
       // بلا توكيد قاتل على عكس الخام قبل التسليح
       Uint8List? chunk;
       while ((chunk = _g<Uint8List?>(() => raw.read())) != null) {
-        if (chunk!.isNotEmpty && !_out.isClosed) _out.add(chunk);
+        if (chunk!.isEmpty) continue;
+        // كل قطعة تمر بالساعة المشتركة قبل المستهلك: القطع إن وقعت في
+        // وسطها عُلّم الموت وأُغلق الدفق فلا تُمرَّر بعدها بايتات
+        _tracker?.track(chunk);
+        if (!_rawDead && !_out.isClosed) _out.add(chunk);
       }
     } else if (event == RawSocketEvent.write) {
       final ready = _writeReady;
@@ -488,6 +537,8 @@ class _RawSecureAdapter implements SecureSocket {
       ready?.complete();
     } else if (event == RawSocketEvent.readClosed ||
         event == RawSocketEvent.closed) {
+      // النظير أغلق: ساعة الاتصال تنزع معه — لا قطع على مقبس ميت
+      _tracker?.retire();
       if (!_out.isClosed) _out.close();
     }
   }
@@ -554,6 +605,8 @@ class _RawSecureAdapter implements SecureSocket {
 
   @override
   void destroy() {
+    // ساعة الاتصال تنزع مع الهدم: لا قطع على مقبس مدمَّر
+    _tracker?.retire();
     // الإغلاق المفاجئ: إغلاق الخام بلا شرط. لا يُستعمل هنا الواقي _g —
     // فقد علّم المحوّل ميتاً من قبل (قراءة على جهة قراءة مغلقة مثلاً)
     // فيتخطى الإغلاق، وكل قطع يبدؤه الخادم بعد التسليم يمر من هنا:

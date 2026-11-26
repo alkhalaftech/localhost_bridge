@@ -1,6 +1,7 @@
 // تلقيمة مهلة اكتمال الترويسات: باب القبول لكل نقلٍ لا يمرّ من بوابة
-// مصافحة TLS - وغلاف كل مقبس يُسلَّم إلى HttpServer على النقل الآمن بعد
-// بوابته. ملكية المقبس هي المقبض الوحيد للقطع: الطلبات الناقصة ترويساتها
+// مصافحة TLS - وحارس كل مقبس يُسلَّم إلى HttpServer على النقل الآمن
+// يعيش داخل محوّله الآمن بعد بوابته فيبقى المسلَّم على شكله الأصلي.
+// ملكية المقبس هي المقبض الوحيد للقطع: الطلبات الناقصة ترويساتها
 // لا تُولّد HttpRequest أصلاً (توثيق dart:io حرفاً: «Incomplete requests,
 // in which all or part of the header is missing, are ignored») ولا مهلة
 // ترويسات في سطح HttpServer، فالقطع تحت HttpServer حيث المقبس في اليد
@@ -115,7 +116,8 @@ class HeaderWatchdogFeed extends Stream<Socket> implements ServerSocket {
 
 /// The clock and the request-header scanner for one connection - one
 /// class shared by both transports: the plain wrapper
-/// (HeaderDeadlineSocket) and the TLS adapter. The clock arms at
+/// (HeaderDeadlineSocket) and the TLS adapter, which hosts it inside the
+/// delivered `SecureSocket` itself. The clock arms at
 /// construction (accept on the plain transports, delivery on TLS whose
 /// handshake window covers the path before it), is never restarted by
 /// arriving bytes, is dropped at the header terminator, and on a
@@ -137,21 +139,22 @@ class HeaderWatchdogFeed extends Stream<Socket> implements ServerSocket {
 /// grammar to its cycle end.
 // الساعة ومُفرِّص الترويسات معاً لاتصال واحد — صنفٌ واحد يُستعمل في
 // المسارين: الغلاف العادي (HeaderDeadlineSocket) والمحوّل الآمن
-// (_RawSecureAdapter). الساعة تُسلَّح عند الولادة (القبول عادياً،
-// والتسليم آمناً حيث تغطي مهلة المصافحة ما قبلها)، ولا تُعاد بالبايتات،
-// وتُنزع عند مُنهي الترويسات، وعلى الاتصال المُبقى تُسلَّح عند أول بايت
-// من الطلب التالي حصراً — اتصالٌ لا يرسل شيئاً بعد ردّه بلا ساعة ويبقى
-// تحت مهلة الخمول. عند الموعد القطع هادئاً عبر نداء _onCut: المالك
-// يدمّر مقبسه ويغلق دفق تسليمه — لا بايت ولا رد ولا رمز جديد.
-// المُفرِّص يقرأ ما يحتاجه سطر الطلب وحده: الأسطر تنتهي بـ LF (أشمل من
-// CRLF فكل مُنهي يعرفه الخادم يُنهيه هذا الماسح)، وآخر Content-Length
-// وTransfer-Encoding المحصور بـ chunked وUpgrade تُحفظ، وما لا يفهمه
-// الفاحص لا يُسرَّح — في كل حالة من تلك يرفضه dart:io ويغلق الاتصال
-// (برهان مصدر SDK بأرقام الأسطر في تعليق _noteCandidate) فلا اتصال
-// يعاد استعماله ليُقطع خطأً. الأجسام لا تُفحص شكلاً: المعلن يُعدّ
-// بايتاً بايتاً، والمقطّع يُتتبع بقواعد نهاية دورته حصراً.
-class _HeaderTracker {
-  _HeaderTracker({required Duration deadline, required void Function() onCut})
+// (_RawSecureAdapter) الذي يحتضنه داخل المقبس المسلَّم نفسه. الساعة
+// تُسلَّح عند الولادة (القبول عادياً، والتسليم آمناً حيث تغطي مهلة
+// المصافحة ما قبلها)، ولا تُعاد بالبايتات، وتُنزع عند مُنهي الترويسات،
+// وعلى الاتصال المُبقى تُسلَّح عند أول بايت من الطلب التالي حصراً —
+// اتصالٌ لا يرسل شيئاً بعد ردّه بلا ساعة ويبقى تحت مهلة الخمول. عند
+// الموعد القطع هادئاً عبر نداء onCut: المالك يدمّر مقبسه ويغلق دفق
+// تسليمه — لا بايت ولا رد ولا رمز جديد. المُفرِّص يقرأ ما يحتاجه سطر
+// الطلب وحده: الأسطر تنتهي بـ LF (أشمل من CRLF فكل مُنهي يعرفه الخادم
+// يُنهيه هذا الماسح)، وآخر Content-Length وTransfer-Encoding المحصور
+// بـ chunked وUpgrade تُحفظ، وما لا يفهمه الفاحص لا يُسرَّح — في كل
+// حالة من تلك يرفضه dart:io ويغلق الاتصال (برهان مصدر SDK بأرقام
+// الأسطر في تعليق _noteCandidate) فلا اتصال يعاد استعماله ليُقطع
+// خطأً. الأجسام لا تُفحص شكلاً: المعلن يُعدّ بايتاً بايتاً، والمقطّع
+// يُتتبع بقواعد نهاية دورته حصراً.
+class HeaderTracker {
+  HeaderTracker({required Duration deadline, required void Function() onCut})
     : _deadline = deadline,
       _onCut = onCut {
     // الساعة من لحظة الولادة (القبول عادياً، والتسليم آمناً)
@@ -494,18 +497,26 @@ class _HeaderTracker {
   // البايتات — والرابعة (Connection) لأجل معيار ترقية dart:io.
   // **وعائدها لا يُسرّح شيئاً:** كل حالة لا يفهمها الفاحص هنا هي
   // حالة يرفضها dart:io ويغلق الاتصال، فلا اتصال يعاد استعماله
-  // ليُقطع خطأً (برهان مصدر SDK بإصدارات CI الثلاثة):
-  // • تكرار Content-Length يرمي — 3.8.0: http_parser.dart:729-735 ·
-  //   3.13.0/stable: :771-779
-  // • القيمة غير الرقمية ترمي — http_headers.dart: 3.8.0:386-388 ·
-  //   3.13.0/stable: :379-395
+  // ليُقطع خطأً (برهان مصدر SDK بإصدارات CI الثلاثة، أرقام الأسطر
+  // متحقق منها حرفاً على وسمي 3.8.0 و3.13.0 والفرع الرئيسي):
+  // • تكرار Content-Length يرمي — http_parser.dart:
+  //   3.8.0:729-735 · 3.13.0:771-778 · main:772-779
+  // • القيمة غير الرقمية ترمي — http_headers.dart (رميا "Content-Length
+  //   must contain only digits"): 3.8.0:383,387 · 3.13.0:377,391 ·
+  //   main:403,417
   // • Transfer-Encoding لا ينتهي بـ chunked في طلب يرمي —
-  //   3.13.0/stable: http_parser.dart:407-415؛ وفي 3.8.0 يبقى الطلب
-  //   بلا تأطير (القيمة تُقارن كاملة لا بآخر رمز: :740-743) فيقرؤه
-  //   بلا جسم فيفشل في بايتاته التالية ويغلق
-  // • الاسم الذي فيه مسافة لا يطابق "content-length" عند dart:io —
-  //   فطلب يحتاج جسماً يرمي "no ContentLength"
-  //   (http_headers.dart: 3.8.0:147 · 3.13.0/stable: :145)
+  //   http_parser.dart ("Invalid Transfer-Encoding header"):
+  //   3.13.0:406-414 · main:407-414؛ وفي 3.8.0 يبقى الطلب بلا تأطير
+  //   (القيمة تُقارن كاملة لا بآخر رمز: :740-743) فيقرؤه بلا جسم
+  //   فيفشل في بايتاته التالية ("Invalid request line" :496) ويغلق
+  // • الاسم الذي فيه مسافة: المحلل يرميه من أصله ("Invalid header
+  //   field name" — المسافة ليست رمزاً) — http_parser.dart:
+  //   3.8.0:673 · 3.13.0:716 · main:717؛ ولو مرّ اسم مشوّه لَبقي
+  //   الطلب بلا جسم فبايتاته تسقط "Invalid request line"
+  //   (3.8.0:496 · 3.13.0:539 · main:540). أما سطر "no ContentLength"
+  //   في http_headers.dart (3.8.0:147 · 3.13.0/stable: :145) فهو
+  //   مسار بناء ترويسات HTTP/1.0 بعلامة keep-alive لا مسار قراءة
+  //   الطلب — لم يكن استشهاداً على مسار الطلب
   // فبقاء الساعة على غير المفهوم آمن، والقطع لا يصيب طلباً سليماً
   void _noteCandidate() {
     if (_candStarts(_nCl)) {
@@ -515,8 +526,22 @@ class _HeaderTracker {
       _contentLength = value;
     } else if (_candStarts(_nTe)) {
       _te = true;
-      final tokens = _candValue(18).split(',');
-      _chunked = tokens.last.trim().toLowerCase() == 'chunked';
+      // آخر رمز غير فارغ فحسب — دلالة مجزئ dart:io الأحدث: المجزئ
+      // يرمي القطع الفارغة فالفاصلة الختامية الواحدة ("chunked,")
+      // تجعل آخر رمزه chunked فيقبل الطلب مقطّعاً (3.13.0:
+      // http_parser.dart:786-790 بالمجزئ :1118-1139 · main: :787-791)،
+      // ومطابقته هنا يمنع بقاء الطلب مغلقاً عند الفاحص بينما يخدمه
+      // الخادم جسماً مقطّعاً حياً. والفاصلتان الختاميتان تجعلان آخر
+      // رمز المجزئ قطعةً غير chunked فيرمي الطلب ويغلق — وهنا إن
+      // اختلفت المطابقة فاتجاهها الآمن: اتصال يغلق dart:io بنفسه.
+      // وفي 3.8.0 تُقارن القيمة كاملة (:740-743) فالأخير غير الأخير
+      // أقرب الدلالات إلى الإصدارين الأحدث اللذين يجريهما CI
+      var last = '';
+      for (final piece in _candValue(18).split(',')) {
+        final token = piece.trim();
+        if (token.isNotEmpty) last = token;
+      }
+      _chunked = last.toLowerCase() == 'chunked';
     } else if (_candStarts(_nCo)) {
       for (final t in _candValue(11).split(',')) {
         if (t.trim().toLowerCase() == 'upgrade') _connUpgrade = true;
@@ -581,9 +606,10 @@ class _HeaderTracker {
     _disarm();
     if (_connUpgrade) {
       // ترقية dart:io وحدها تُسرّح: Connection يحمل الرمز upgrade
-      // (3.8.0: http_parser.dart:752-759 · 3.13.0/stable: :801-808) —
-      // عندها يُفصل المقبس إلى القناة بمهلاتها أو يُدمَّر بعد الرد،
-      // فلا اتصال HTTP يعاد استعماله ليظل بلا حاكم
+      // (http_parser.dart: 3.8.0:751-759 · 3.13.0:795-808 · main:
+      // :796-809، الإسناد في نهاية الحلقة) — عندها يُفصل المقبس إلى
+      // القناة بمهلاتها أو يُدمَّر بعد الرد، فلا اتصال HTTP يعاد
+      // استعماله ليظل بلا حاكم
       _phase = _phaseRetired;
       _awaitingFirstByte = false;
       return;
@@ -633,9 +659,9 @@ class _HeaderTracker {
 /// the delivered object stays a `SecureSocket`.
 // غلاف `Socket` على الأبواب العادية: كل شيء يمرّ للمقبس الداخلي كما هو
 // (القراءة والكتابة وعقد الإغلاق)، والحارس وحده المضاف — ساعة ومُفرِّص
-// من `_HeaderTracker` الصنف المشترك مع محوّل TLS. القطع: المالك يدمّر
-// المقبس الداخلي ويغلق دفق تسليمه، فيبلغ النظير على السلك بلا بايت
-// ولا رد ولا رمز جديد.
+// من `HeaderTracker` الصنف المشترك الذي يحتضنه محوّل TLS داخله. القطع:
+// المالك يدمّر المقبس الداخلي ويغلق دفق تسليمه، فيبلغ النظير على السلك
+// بلا بايت ولا رد ولا رمز جديد.
 class HeaderDeadlineSocket implements Socket {
   HeaderDeadlineSocket(this._inner, this._deadline, {void Function()? onDead})
     : _onDead = onDead {
@@ -649,7 +675,7 @@ class HeaderDeadlineSocket implements Socket {
         return _sub.cancel();
       },
     );
-    _scanner = _HeaderTracker(
+    _scanner = HeaderTracker(
       deadline: _deadline,
       onCut: () {
         // القطع الهادئ: تدمير المقبس الداخلي يبلغ النظير على السلك - لا
@@ -671,7 +697,7 @@ class HeaderDeadlineSocket implements Socket {
   final void Function()? _onDead;
   late final StreamController<Uint8List> _out;
   late final StreamSubscription<Uint8List> _sub;
-  late _HeaderTracker _scanner;
+  late HeaderTracker _scanner;
   bool _dead = false;
 
   void _markDead() {
