@@ -1218,8 +1218,12 @@ CLI clients on Linux and macOS.
   way the body limit does. An explicit `headerTimeout` must be positive
   and no longer than `requestTimeout`, otherwise building the server
   throws `ArgumentError`. On the TLS transport the deadline starts at
-  the handshake delivery - the path before it is `tlsHandshakeTimeout`'s.
-  The deadline in force reads as `server.effectiveHeaderTimeout`.
+  the handshake delivery - the path before it is `tlsHandshakeTimeout`'s -
+  and it rides inside the delivered socket itself, which keeps its
+  `SecureSocket` shape: a handler reads `requestedUri.scheme` as `https`
+  and the certificate getter answers while the deadline is armed,
+  exactly as with it off. The deadline in force reads as
+  `server.effectiveHeaderTimeout`.
 - `dart:io` never bounds the sockets a listening server has accepted,
   so a host that wants a hard ceiling on open connections sets
   `BridgeConfig.maxOpenConnections` above zero: a request arriving while

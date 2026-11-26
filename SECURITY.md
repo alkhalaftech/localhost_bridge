@@ -355,7 +355,13 @@ What remains:
   delivered connection is never counted as an in-flight handshake and
   is never refused for open sockets — and every in-flight handshake is
   cut at `tlsHandshakeTimeout` at the latest, so the ceiling bounds a
-  transient handshake window, never a lasting hold.
+  transient handshake window, never a lasting hold. With the option
+  off, a local program can hold all sixty-four handshake seats with
+  silent connections and block every new TLS handshake for as long as
+  it keeps renewing them - the ceiling is a local-process resource
+  trade on a loopback-only transport, and setting
+  `BridgeConfig.maxOpenConnections` above zero replaces this internal
+  ceiling with the host's own count.
 - **The TLS handshake window is closed at both ends.** The TLS gate
   bounds the path up to the first record: a non-handshake first byte
   and an over-cap declared length are cut at once, and the whole

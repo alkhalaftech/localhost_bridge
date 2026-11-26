@@ -1,5 +1,33 @@
 ## 0.2.0
 
+- Behavior: the header deadline never switches off. Every shape the
+  acceptance scanner cannot make sense of keeps its deadline clock - a
+  header line longer than the scanner's cap, a lone `Upgrade` header,
+  a chunked request body, and a three-hundred-line header block are
+  served or bounded exactly like the plain shapes, and a request whose
+  headers never complete is cut on the wire at the deadline with no
+  reply on every listener. One request can no longer disarm the
+  deadline for the connection that follows it.
+- Behavior: on the TLS transport the deadline rides inside the
+  delivered socket itself, which keeps its `SecureSocket` shape - a
+  handler reads `requestedUri.scheme` as `https` and the certificate
+  getter answers while `headerTimeout` is armed, exactly as with it
+  off.
+- Security: a stalled request header no longer costs per-byte growth
+  for the connection that holds it - the scanner tracks each line by
+  its length and copies only a bounded candidate buffer, so holding a
+  candidate line costs no more than holding a non-candidate line of
+  the same length, and a connection past the scanner's line cap stops
+  buffering entirely while its deadline keeps running.
+- Compatibility: `Transfer-Encoding` whose last non-empty comma piece
+  is `chunked` - a single trailing comma included - is served as a
+  chunked request on Dart 3.13 and later, exactly as the parser's
+  tokenizer reads it; on Dart 3.8.0 the parser compares the value
+  whole, refuses such a request, and closes the connection. `Upgrade:
+  h2c` without `Connection: upgrade` stays a plain served request on
+  every supported SDK - the parser upgrades on the Connection token
+  alone - and the stalled header that follows it is still cut at the
+  deadline, with the next request on a fresh connection served.
 - **Breaking: one sender can no longer monopolize the seats** -
   `BridgeConfig.maxSeatsPerOrigin` (default 4 of the 16) bounds the
   seats a single origin holds at once; requests without an `Origin`

@@ -1122,8 +1122,10 @@ blocking requirement and are not needed as a fallback» ([دليل Chrome: Local
   `requestTimeout` كما يتبعه حدّ الجسم. والقيمة الصريحة يجب أن تكون
   موجبة ولا تزيد على `requestTimeout` وإلا رمى بناء الخادم
   `ArgumentError`. وعلى نقل TLS تبدأ المهلة عند تسليم المصافحة — وما
-  قبلها من حق `tlsHandshakeTimeout`. والحدّ النافذ يُقرأ من
-  `server.effectiveHeaderTimeout`.
+  قبلها من حق `tlsHandshakeTimeout` — وتعيش المهلة داخل المقبس المسلَّم
+  نفسه فيبقى على شكله `SecureSocket`: يعالجُ الطلب `requestedUri.scheme`
+  مقروءاً `https` وسؤال الشهادة يجيب والمهلة مسلَّحة، كما هي مطفأة
+  تماماً. والحدّ النافذ يُقرأ من `server.effectiveHeaderTimeout`.
 - `BridgeConfig.extraHosts` يضيف سلطات مضيف يجيب عنها الخادم (الاسم
   المجرد يطابق `name:boundPort` كالمدمجين). كل مدخل اسم تحت
   سيطرتك يحل إلى هذا الجهاز — الاسم غير المحلي هناك (عام كان أم
