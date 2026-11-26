@@ -130,34 +130,42 @@ Future<void> _witnessUpgradeWithoutConnection({
       '\r\n["BROWSER-LAB"]',
     ),
   );
-  // ignore: avoid_print
-  print('UPG-DBG-REQ: plain / Upgrade witness sent');
-  try {
-    await link.answeredFuture.timeout(const Duration(seconds: 10));
-  } on TimeoutException {
-    // ignore: avoid_print
-    print(
-      'UPG-DBG bytes=${link.receivedBytes} '
-      'text=${link.text.length > 400 ? link.text.substring(0, 400) : link.text}',
-    );
-    rethrow;
-  }
+  await link.answeredFuture.timeout(const Duration(seconds: 10));
   expect(
     link.statusLine,
     contains(' 200 '),
     reason:
         'Upgrade without Connection: upgrade is a plain request at '
-        'dart:io (the upgrade token rides Connection alone: '
-        'http_parser.dart:752-759 / :801-808) - served, never upgraded',
+        'dart:io - the parser upgrades on the Connection upgrade token '
+        'alone (http_parser.dart 3.8.0:751-759, 3.13.0/stable:795-808) '
+        'and the Upgrade header itself plays no part, measured on a '
+        'plain HttpServer without the bridge: served 200, never '
+        'upgraded',
   );
+  // الاتصال العالق: ترويسات الطلب التالي لا تكتمل - الساعة تقطعه في
+  // الحد فلا اتصال يبقى معلقاً خارجها
   link.send(utf8.encode('GET / HTTP/1.1\r\nHost: $host\r\nX-Bridge-Trail'));
   final cut = await link.eofWithin(bound + _cutMargin);
   expect(
     cut,
     true,
     reason:
-        'the next stalled header is cut from its first byte - the '
-        'Upgrade line did not retire the tracker',
+        'the stuck connection is cut at the header deadline '
+        '(${bound.inMilliseconds} ms + margin) - the Upgrade line did '
+        'not retire the tracker, so the stalled header it leaves behind '
+        'is bounded by the clock',
+  );
+  // الطلب التالي على اتصال جديد يُخدم: لا معلّق يتبع القطع
+  final fresh = await _Link.connect(await clientSocket(), host: host);
+  addTearDown(fresh.destroy);
+  fresh.sendPost(contentLength: 15, firstBytes: utf8.encode('["BROWSER-LAB"]'));
+  await fresh.answeredFuture.timeout(const Duration(seconds: 10));
+  expect(
+    fresh.statusLine,
+    contains(' 200 '),
+    reason:
+        'the next request on a fresh connection is served after the cut '
+        '- no stuck connection follows the cut to the next sender',
   );
 }
 
@@ -740,8 +748,9 @@ void main() {
         await _runSceneWitness(_witnessLongLineCut, scene: scene, srv: srv);
       }, timeout: const Timeout(Duration(seconds: 45)));
 
-      test('an Upgrade header without Connection: upgrade serves the request '
-          'and the next stalled header is still cut', () async {
+      test('an Upgrade header without Connection: upgrade is a plain '
+          'request, the next stalled header is cut at the deadline, and '
+          'a fresh connection is served', () async {
         final srv = await _start(_config(scene));
         addTearDown(srv.stop);
         await _runSceneWitness(
@@ -880,6 +889,73 @@ void main() {
               'live witness runs on Linux/macOS'
         : false,
   );
+
+  group('transfer-encoding trailing comma semantics', () {
+    // حكم القيمة على الفاصلة الختامية: مجزئ dart:io الأحدث يرمي القطع
+    // الفارغة فيقبل "chunked," مقطّعاً، ومجزئ 3.8.0 يقارن القيمة كاملة
+    // فيقرأ الطلب بلا جسم فيفشل في بايتاته ويغلق - والفاحص يلزم دلالة
+    // الإصدار الجاري على مشهد واحد عادي: المُفرِّص صنف واحد على كل
+    // النقلات فالمشهد العادي هو الحكم
+    test('a trailing-comma transfer-encoding follows the running SDK '
+        'parser semantics', () async {
+      final srv = await _start(_config(const _Scene('plain')));
+      addTearDown(srv.stop);
+      final host = '127.0.0.1:${srv.port}';
+      final link = await _Link.connect(
+        await Socket.connect(InternetAddress.loopbackIPv4, srv.port),
+        host: host,
+      );
+      addTearDown(link.destroy);
+      link.send(
+        utf8.encode(
+          'POST / HTTP/1.1\r\n'
+          'Host: $host\r\n'
+          'Origin: $_listed\r\n'
+          'Content-Type: application/json\r\n'
+          'Transfer-Encoding: chunked,\r\n'
+          '\r\n'
+          'f\r\n["BROWSER-LAB"]\r\n'
+          '0\r\n\r\n',
+        ),
+      );
+      final version = RegExp(r'^(\d+)\.(\d+)').firstMatch(Platform.version);
+      final minor = version == null ? 0 : int.parse(version.group(2)!);
+      if (minor >= 13) {
+        await link.answeredFuture.timeout(const Duration(seconds: 10));
+        expect(
+          link.statusLine,
+          contains(' 200 '),
+          reason:
+              'the parser tokenizer drops the empty piece after a single '
+              'trailing comma, so "chunked," ends in chunked and the '
+              'full cycle is served - the scanner reads the same last '
+              'non-empty token',
+        );
+        link.send(
+          utf8.encode('GET / HTTP/1.1\r\nHost: $host\r\nX-Bridge-Trail'),
+        );
+        final cut = await link.eofWithin(_bound(srv) + _cutMargin);
+        expect(
+          cut,
+          true,
+          reason:
+              'the next stalled header after the served cycle is still '
+              'cut - the trailing comma left the clock honest',
+        );
+      } else {
+        final closed = await link.eofWithin(const Duration(seconds: 4));
+        expect(
+          closed,
+          true,
+          reason:
+              'on this SDK the transfer-encoding value is compared whole, '
+              'so "chunked," is not chunked: the request is read with no '
+              'body and fails in its own body bytes - the connection '
+              'closes and the scanner never retires on the shape',
+        );
+      }
+    });
+  });
 
   group('headerTimeout value rule', () {
     // قاعدة القيمة كقاعدة حدّ الجسم حرفاً: القيمة الصريحة وحدها تُفحص -
