@@ -740,13 +740,34 @@ class HeaderDeadlineSocket implements Socket {
   Future close() => _inner.close();
 
   @override
+  Future get done => _inner.done;
+
+  @override
+  bool setOption(SocketOption option, bool enabled) =>
+      _inner.setOption(option, enabled);
+
+  @override
+  Uint8List getRawOption(RawSocketOption option) => _inner.getRawOption(option);
+
+  @override
+  void setRawOption(RawSocketOption option) => _inner.setRawOption(option);
+
+  @override
+  int get port => _inner.port;
+
+  @override
+  int get remotePort => _inner.remotePort;
+
+  @override
+  InternetAddress get address => _inner.address;
+
+  @override
   InternetAddress get remoteAddress => _inner.remoteAddress;
 
   @override
   dynamic noSuchMethod(Invocation invocation) {
-    // الأعضاء غير المُعاوَرة من عقد Socket (getRawOption وsetRawOption
-    // وأعضاء Stream الأخرى) تُرفض مسمّاة كما في سلف الغلاف — الاتصال
-    // المُسلَّم عبر هذا الغلاف يُستهلك من HttpServer فحسب
+    // أعضاء Stream الأخرى غير المُمرَّرة تُرفض مسمّاة كما في سلف الغلاف
+    // - الاتصال المُسلَّم عبر هذا الغلاف يُستهلك من HttpServer فحسب
     throw UnsupportedError(
       'HeaderDeadlineSocket: ${invocation.memberName} is not implemented',
     );
