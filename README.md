@@ -965,18 +965,6 @@ the behavior they share.
 | Safari, and iOS browsers built on WebKit | not supported over plain HTTP — WebKit's own mixed-content checker treats a plain-HTTP loopback address as insecure "unless loaded over HTTPS" ([WebKit bug 281149](https://bugs.webkit.org/show_bug.cgi?id=281149), reopened, last change 2026-04-20, fetched 2026-11-22); the spec-level exemption requests remain open ([WebKit bug 171934](https://bugs.webkit.org/show_bug.cgi?id=171934), NEW with activity through 2026-08-19, fetched 2026-11-22 · [WebKit bug 218623](https://bugs.webkit.org/show_bug.cgi?id=218623), NEW, fetched 2026-11-22), and MDN's mixed-content page (last modified 2026-08-15, fetched 2026-11-22) names Safari as the browser whose default blocks all mixed content while loopback origins stay secure contexts as origins. The TLS option above is exactly the condition WebKit's checker names ("unless loaded over HTTPS") — but whether a current shipped Safari build admits `https://127.0.0.1` with a device-trusted certificate is **not** claimed here: it is the device-lab witness (`tool/safari_https_loopback_lab.dart`), unverified until a trusted-certificate mac runs it. Apple permits other engines in the EU (iOS 17.4+); none is tested here | 2026-11-22 | [WebKit bug 281149](https://bugs.webkit.org/show_bug.cgi?id=281149) · [WebKit bug 171934](https://bugs.webkit.org/show_bug.cgi?id=171934) · [MDN: Mixed content](https://developer.mozilla.org/en-US/docs/Web/Security/Defenses/Mixed_content) · [Apple: alternative browser engines](https://developer.apple.com/support/alternative-browser-engines) |
 | Android WebView | tested on the emulator (Android 16 and 17) — no permission prompt of its own; reachability follows the permissions of the app embedding the WebView. An app that loads a loopback page over plain HTTP into a WebView on Android 16 or below must opt into cleartext for the loopback names in its network security config (the guide's bullet below carries the example), or the platform refuses the page with `ERR_CLEARTEXT_NOT_PERMITTED` before it reaches the bridge; Android 17 allows the loopback page without the declaration, as measured on the emulator. On Android 17, WebView traffic inherits the host app's local-network permission state, and the `ACCESS_LOCAL_NETWORK` permission applies only to apps targeting SDK 37; the official local-network definition does not mention loopback | 2026-11-23 | [Android: Network security configuration](https://developer.android.com/privacy-and-security/security-config) · [Android: local network permission](https://developer.android.com/privacy-and-security/local-network-permission) · [Android: local network definition](https://developer.android.com/privacy-and-security/local-network-definition) |
 
-<!-- EDIT-MARKER (Firefox rows): the two Firefox rows keep their
-documented status until the desktop browser lab measures Firefox itself;
-when that run lands green, add a row (or extend these) with the measured
-Firefox version, the date, and what the measured run actually did,
-including the streamed request body observation that runs from Firefox
-161 upward. Nothing measured, nothing written. -->
-<!-- EDIT-MARKER (Safari row): the Safari row keeps its documented status
-until a real Safari measure lands from the macOS browser lab; when it
-does, update the Status and As-of columns with the measured Safari
-version and date, and name the certificate condition exactly as measured.
-Nothing measured, nothing written. -->
-
 "Shipped" means the page can send and read a reply after the user grants
 the prompt. The fetch-mode hardening does not depend on any prompt — it
 applies wherever the request arrives.

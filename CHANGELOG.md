@@ -115,7 +115,7 @@
   as `https`. On Dart 3.8.0 the parser refuses a `Transfer-Encoding`
   whose value is not exactly `chunked` and closes the connection; on
   Dart 3.13 and later it reads the value's last comma piece.
-- Behavior: `BridgeConfig.maxOpenConnections` - an optional hard
+- API: `BridgeConfig.maxOpenConnections` - an optional hard
   ceiling on open connections (`dart:io` never bounds them): a request
   arriving while more sockets than the cap are open answers `503`, and
   once the count drops the next request is served. `0` - the default -
