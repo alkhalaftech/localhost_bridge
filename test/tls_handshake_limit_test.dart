@@ -669,8 +669,9 @@ void main() {
     // قارئ المقابض الساكن على ويندوز حصراً: عملية واحدة تولد مرة وتدفق
     // قراءاتها متواصل — بدل توليد متزامن بارد لكل قراءة، فقراءاتٌ
     // متعددة متزامنة تحجب حلقة الأحداث وتخترق ميزانية الشاهد تحت حمل
-    // المشغّل. القيمة المقيسة نفسها والفحوص نفسها: قراءة قبل الدورات
-    // وسقف الفيض في كل دورة، بلا مهلة أوسع ولا حد أوسع
+    // المشغّل. العدُّ لمقابض عملية الاختبار نفسها كمساري لينكس وماك،
+    // والفحوص نفسها: قراءة قبل الدورات وسقف الفيض في كل دورة، بلا
+    // مهلة أوسع ولا حد أوسع
     final reader = Platform.isWindows ? await _ResidentHandles.spawn() : null;
     addTearDown(() => reader?.kill());
     Future<int?> openHandlesNow() async {
@@ -1319,16 +1320,21 @@ Completer<bool> watchPeerClose(Socket client) {
 }
 
 // قارئ المقابض الساكن على ويندوز: عملية PowerShell واحدة تعيش طول
-// الشاهد وتطبع HandleCount بتدفق متواصل بغسل صريح بعد كل سطر — توليد
-// بارد واحد بدل توليد متزامن بارد لكل قراءة، فقراءاتٌ متعددة متزامنة
-// تحجب حلقة الأحداث وتخترق ميزانية الشاهد تحت حمل المشغّل. بلا تفاعل
-// مدخلات: الكتابة على مدخلات المضيف بعد أول دورة تفقد الاستيقاظ (مقيس
-// هنا: أول جواب يصل والثاني لا يصل مهما طال الانتظار، والأسطر المرسلة
-// مقداماً تجيب فوراً) — فالإخراج باتجاه واحد هو المتين. القيمة المقيسة
-// نفسها التي كان كل توليد متزامن يجيبها (HandleCount للعملية المضيفة
-// للقارئ)، وفشل التوليد يعيد null فيسلك الشاهد فرع العدّ غير المقروء
+// الشاهد وتطبع عدُّ مقابض عملية الاختبار نفسها بتدفق متواصل بغسل صريح
+// بعد كل سطر — توليد بارد واحد بدل توليد متزامن بارد لكل قراءة،
+// فقراءاتٌ متعددة متزامنة تحجب حلقة الأحداث وتخترق ميزانية الشاهد
+// تحت حمل المشغّل. ومدخلات القارئ تُغلق عند ولادته: المضيف يفحص
+// مدخلاته الموجهة ما دامت مفتوحة فيتجمد التدفق بعد أول سطر تحت مشغّل
+// الاختبار (مقيس)، وبإغلاقها يسيل بلا توقف. وعدُّ القارئ لعدّ نفسه
+// عمىً تاماً: مقابس المضيف المفتوحة بعد ولادته لا يراها فلا يقرر
+// شيئاً. وفشل التوليد يعيد null فيسلك الشاهد فرع العدّ غير المقروء
+// نفسه
 class _ResidentHandles {
   _ResidentHandles._(this._process) {
+    // مدخلات القارئ تُغلق فور ولادته: المضيف يفحص مدخلاته الموجهة ما
+    // دامت مفتوحة فيتجمد التدفق بعد أول سطر تحت مشغّل الاختبار (مقيس
+    // هنا)، وبإغلاقها يسيل التدفق بلا توقف — والقارئ لا مدخلات يحتاجها
+    unawaited(_process.stdin.close().catchError((Object _) {}));
     _process.stdout
         .transform(utf8.decoder)
         .transform(const LineSplitter())
@@ -1336,22 +1342,31 @@ class _ResidentHandles {
           final value = int.tryParse(line.trim());
           if (value != null) _readings.add(value);
         });
+    // وخطأ المضيف يُستهلك صامتاً: أنبوب غير مستهلك يحجبه إن كتب إليه
+    unawaited(
+      _process.stderr
+          .listen((_) {}, onError: (Object _) {}, onDone: () {})
+          .asFuture<void>()
+          .catchError((Object _) {}),
+    );
   }
 
   final Process _process;
   final List<int> _readings = <int>[];
+  int _handedOut = 0;
 
-  /// One long-lived PowerShell printing its handle count continuously:
-  /// spawns once per witness instead of once per read. Null when the
-  /// platform refuses the spawn, which the witness treats exactly like
-  /// its unreachable-count branch.
+  /// One long-lived PowerShell printing the test process's handle count
+  /// continuously: spawns once per witness instead of once per read,
+  /// its stdin closed at once so the host never waits on it. Null when
+  /// the platform refuses the spawn, which the witness treats exactly
+  /// like its unreachable-count branch.
   static Future<_ResidentHandles?> spawn() async {
     final Process process;
     try {
       process = await Process.start('powershell', <String>[
         '-NoProfile',
         '-Command',
-        _handleReaderScript,
+        _handleReaderScript(pid),
       ]);
     } on Object {
       return null;
@@ -1359,18 +1374,22 @@ class _ResidentHandles {
     return _ResidentHandles._(process);
   }
 
-  /// The latest reading the reader produced, waiting on the clock so a
-  /// wedged reader can never hang the witness past its own budget.
+  /// The latest reading newer than everything already handed out,
+  /// waiting on the clock: a reader that stopped producing can never
+  /// hand the witness a frozen value - it fails named instead.
   Future<int> read() async {
     final sw = Stopwatch()..start();
     while (sw.elapsed < const Duration(seconds: 10)) {
-      if (_readings.isNotEmpty) {
-        return _readings.last;
+      if (_handedOut < _readings.length) {
+        final value = _readings.last;
+        _handedOut = _readings.length;
+        return value;
       }
       await Future<void>.delayed(const Duration(milliseconds: 50));
     }
     throw StateError(
-      'the resident handle reader produced no reading within its budget',
+      'the resident handle reader produced no fresh reading within its '
+      'budget',
     );
   }
 
@@ -1380,11 +1399,14 @@ class _ResidentHandles {
   }
 }
 
-// نص القارئ: عدّ للمضيف نفسه في حلقة متواصلة، وغسل صريح بعد كل سطر —
-// التخزين المؤقت للمخرجات الموجهة يمتص الأسطر لو لا الغسل
-const String _handleReaderScript = r'''
-while ($true) {
-  [Console]::Out.WriteLine((Get-Process -Id $pid).HandleCount);
+// نص القارئ: عدُّ مقابض عملية الاختبار (pid يُحشو من دارت قبل التسليم
+// للمضيف — النص الخام يجعل المعرّفة تتظائر عند المضيف نفسه فيقرأ القارئ
+// عدَّ نفسه)، في حلقة متواصلة بغسل صريح بعد كل سطر — التخزين المؤقت
+// للمخرجات الموجهة يمتص الأسطر لو لا الغسل
+String _handleReaderScript(int hostPid) =>
+    '''
+while (\$true) {
+  [Console]::Out.WriteLine((Get-Process -Id $hostPid).HandleCount);
   [Console]::Out.Flush();
   Start-Sleep -Milliseconds 200
 }
