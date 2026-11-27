@@ -1355,6 +1355,14 @@ class _ResidentHandles {
   final List<int> _readings = <int>[];
   int _handedOut = 0;
 
+  // عدد المحاولات المسمّى ونوافذها: خمس محاولات بنافذة ثانيتين وفاصل ربع
+  // ثانية — نافذة قصيرة تعيد القراءة الحية قبل أن تورّط الشاهد فوق
+  // ميزانيته، والمجموع محدود كي يقع الفشل المسمّى بدل الصمت أو القراءة
+  // الناقصة
+  static const int _readAttempts = 5;
+  static const Duration _attemptWindow = Duration(seconds: 2);
+  static const Duration _retryInterval = Duration(milliseconds: 250);
+
   /// One long-lived PowerShell printing the test process's handle count
   /// continuously: spawns once per witness instead of once per read,
   /// its stdin closed at once so the host never waits on it. Null when
@@ -1374,22 +1382,37 @@ class _ResidentHandles {
     return _ResidentHandles._(process);
   }
 
-  /// The latest reading newer than everything already handed out,
-  /// waiting on the clock: a reader that stopped producing can never
-  /// hand the witness a frozen value - it fails named instead.
+  /// The latest reading newer than everything already handed out, with a
+  /// bounded named retry: a single window passing without a fresh line
+  /// must not decide the witness by itself, so a stalled window re-probes
+  /// a named number of attempts at short intervals; exhaustion stays a
+  /// named failure - one line naming the attempt count and the last read
+  /// error, and never a partial or stale value.
   Future<int> read() async {
-    final sw = Stopwatch()..start();
-    while (sw.elapsed < const Duration(seconds: 10)) {
-      if (_handedOut < _readings.length) {
-        final value = _readings.last;
-        _handedOut = _readings.length;
-        return value;
+    Object? lastError;
+    for (var attempt = 1; attempt <= _readAttempts; attempt++) {
+      final sw = Stopwatch()..start();
+      while (sw.elapsed < _attemptWindow) {
+        if (_handedOut < _readings.length) {
+          final value = _readings.last;
+          _handedOut = _readings.length;
+          return value;
+        }
+        await Future<void>.delayed(const Duration(milliseconds: 50));
       }
-      await Future<void>.delayed(const Duration(milliseconds: 50));
+      lastError =
+          'attempt $attempt produced no fresh reading within '
+          '${_attemptWindow.inMilliseconds} ms';
+      await Future<void>.delayed(_retryInterval);
     }
+    // ignore: avoid_print
+    print(
+      'HANDLE-READ-EXHAUSTED: attempts=$_readAttempts last-error=$lastError',
+    );
     throw StateError(
-      'the resident handle reader produced no fresh reading within its '
-      'budget',
+      'the resident handle reader produced no fresh reading across '
+      '$_readAttempts attempts of ${_attemptWindow.inMilliseconds} ms each; '
+      'last read error: $lastError',
     );
   }
 
