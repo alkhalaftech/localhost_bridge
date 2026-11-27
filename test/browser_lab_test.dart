@@ -69,6 +69,26 @@ final String? _firefoxChannelSkip =
     : 'the channel refuses to arm without a transport ceiling below '
           'Dart 3.13 - the firefox channel scenes ride the channel';
 
+// بوابة قصة الصفحة المقترنة على Firefox: من 161 فأعلى فقط — على محرك 160
+// يموت المحرك نفسه في منتصف القصة بعد علامة LAB-UNPAIRED (RenderCompositor
+// SWGL failed mapping default framebuffer على المشغّل بلا واجهة) فلا تصل
+// القصة علامة نهايتها، وعلى 161 تكتمل القصة بأحكامها الثلاثة — وتحت 161
+// يقيس المشهد موتَ محركٍ لا حكمَ جسر، فيتخطى بسبب مسمّى يحمل الرقمين
+// والدليل. بقية مشاهد Firefox (tokened/options/preflight/unpaired) تعمل
+// على 160 وتثبت شيئاً فلا تُمسّ
+final String? _firefoxPairedStorySkip =
+    _firefoxSkipReason ??
+    ((_firefoxMajor ?? 0) >= 161
+        ? null
+        : 'the paired page story scenes run on Firefox from engine version '
+              '161 - on engine 160 the compositor itself dies mid-story '
+              'after the LAB-UNPAIRED mark (RenderCompositorSWGL failed '
+              'mapping default framebuffer on the headless runner) and the '
+              'story never reaches its LAB-PAIRED-STORY-END marker, while '
+              'the very same story completes with all three verdicts on '
+              'engine 161 - below 161 the scene would measure an engine '
+              'death, not a bridge verdict');
+
 /// Locates geckodriver and reads the Firefox major version for the
 /// streamed-body floor: the BRIDGE_GECKODRIVER override first, then
 /// PATH, then the standard locations; the version comes from
@@ -2167,7 +2187,7 @@ function wsScenario() {
     );
     expect(sharedStatus, 200, reason: 'the shared token stays a valid proof');
     expect(sharedBody, contains('"ok":true'));
-  });
+  }, skip: _firefoxPairedStorySkip);
 
   firefoxScene('on Firefox the paired page reports its verdicts through '
       'the collector: the channel the emulator witness reads, on a '
@@ -2198,7 +2218,7 @@ function wsScenario() {
     );
     expect(marks, contains('LAB-PAIRED-REPLAY:403:pair_signature_replay'));
     expect(marks, contains('LAB-STRICT-BARE:403:token_required'));
-  });
+  }, skip: _firefoxPairedStorySkip);
 
   firefoxScene('on Firefox the streaming reply runs: three progress frames '
       'then the result frame, in the arrival order the page reads', () async {
