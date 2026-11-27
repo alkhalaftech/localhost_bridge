@@ -295,6 +295,15 @@ class HeaderTracker {
     _candLen += n;
   }
 
+  /// Bytes currently reserved for the candidate request-line buffer -
+  /// the allocated capacity of the buffer, not the filled length. For
+  /// tests only: the deterministic memory witness reads it to pin the
+  /// reservation under the scanner's cap. The class is not exported, so
+  /// the package's public surface stays unchanged.
+  // القارئ للاختبار حصراً: ما يحجزه المخزن يُعدّ لا يُقاس — الشاهد
+  // الحتمي يقرأ السعة المحجوزة مباشرة بدل قياس ذاكرة عملية فرعية
+  int get candidateReservedBytes => _cand.length;
+
   void _lineStart(int b) {
     _lineFirst = b;
     final l = b | 0x20;
@@ -727,6 +736,14 @@ class HeaderDeadlineSocket implements Socket {
   void stopClock() {
     _scanner.stopClock();
   }
+
+  /// Reserved bytes of the wrapped tracker's candidate request-line
+  /// buffer - for tests only: the deterministic memory witness reads it
+  /// through this wrapper, the exact object the plain door builds.
+  // التغليفة أقصر طريق من الشاهد إلى نسخة الفاحص على الباب العادي:
+  // الموضع الذي يصنعه الكود نفسه (قبول التلقيمة يغلّف، والغلاف يبني
+  // الفاحص) بلا استيراد داخلي إضافي وبلا توسيع سطح الحزمة
+  int get candidateReservedBytes => _scanner.candidateReservedBytes;
 
   @override
   StreamSubscription<Uint8List> listen(
