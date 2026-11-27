@@ -659,9 +659,32 @@ void main() {
       ),
     );
     final hello = await captureClientHello();
-    await srv.start(preferredPort: 0);
+    // المنفذ من قيمة البدء المعادة لا من قراءة الخادم: الإيقاف يصفّر
+    // منفذ الخادم من أول جسمه، والجسم المهجور بعد مهلة الشاهد لا يُلغى
+    // فيكمل دوراته متسابقاً مع تصفيته الخاصة — فكل وصلات الدورة على
+    // القيمة الملتقطة لا على حالة الخادم اللحظية، ولا وصلة إلى منفذ
+    // صفر مهما تأخر المشغّل
+    var port = await srv.start(preferredPort: 0);
     addTearDown(srv.stop);
-    final before = _openHandles();
+    // قارئ المقابض الساكن على ويندوز حصراً: عملية واحدة تولد مرة وتدفق
+    // قراءاتها متواصل — بدل توليد متزامن بارد لكل قراءة، فقراءاتٌ
+    // متعددة متزامنة تحجب حلقة الأحداث وتخترق ميزانية الشاهد تحت حمل
+    // المشغّل. القيمة المقيسة نفسها والفحوص نفسها: قراءة قبل الدورات
+    // وسقف الفيض في كل دورة، بلا مهلة أوسع ولا حد أوسع
+    final reader = Platform.isWindows ? await _ResidentHandles.spawn() : null;
+    addTearDown(() => reader?.kill());
+    Future<int?> openHandlesNow() async {
+      if (reader != null) {
+        try {
+          return await reader.read();
+        } on Object {
+          return null;
+        }
+      }
+      return _openHandles();
+    }
+
+    final before = await openHandlesNow();
     if (before == null) {
       // في CI لا يتخطى الشاهد: كل منصة تُجري عليها الاختبارات يجب أن تُقرأ
       // عدّتها، والفشل المسمّى أصدق من نجاحٍ بلا قياس
@@ -686,13 +709,11 @@ void main() {
     // (64 مصافحة جارية) ثم stop يحصد الكل ثم start جيل جديد — المقابض
     // المفتوحة تعود لمستواها قبل الطوفان ولا يتجاوز مجموعها السقف أبداً
     for (var cycle = 1; cycle <= 3; cycle++) {
-      final armedA = await replayClientHello(hello, srv.port);
-      final armedB = await replayClientHello(hello, srv.port);
+      final armedA = await replayClientHello(hello, port);
+      final armedB = await replayClientHello(hello, port);
       final silents = <Socket>[];
       for (var i = 0; i < 62; i++) {
-        silents.add(
-          await Socket.connect(InternetAddress.loopbackIPv4, srv.port),
-        );
+        silents.add(await Socket.connect(InternetAddress.loopbackIPv4, port));
       }
       unawaited(armedA.done.catchError((Object _) {}));
       unawaited(armedB.done.catchError((Object _) {}));
@@ -740,15 +761,28 @@ void main() {
         reason:
             'cycle $cycle: every armed socket is reaped, not only the first',
       );
+      final handlesNow = await openHandlesNow();
+      // ignore: avoid_print
+      print('HANDLE-READ cycle=$cycle handles=$handlesNow before=$before');
       expect(
-        _openHandles()!,
+        handlesNow,
+        isNotNull,
+        reason:
+            'cycle $cycle: the handle count must be readable at the cycle '
+            'boundary - an unreadable count is a named failure, never a '
+            'silent pass',
+      );
+      expect(
+        handlesNow!,
         lessThanOrEqualTo(before + 64),
         reason:
             'cycle $cycle: the process handle count returns to its '
             'pre-flood level - a stop that left its sockets stuck would '
             'grow the handles by the whole cap every cycle',
       );
-      await srv.start(preferredPort: 0);
+      // بداية الجيل التالي على قيمته المعادة نفسها: المنفذ للدورة التالية
+      // من قيمة البدء لا من قراءة الخادم بعد إيقافه
+      port = await srv.start(preferredPort: 0);
     }
   }, timeout: const Timeout(Duration(seconds: 90)));
 
@@ -1283,6 +1317,78 @@ Completer<bool> watchPeerClose(Socket client) {
   );
   return closed;
 }
+
+// قارئ المقابض الساكن على ويندوز: عملية PowerShell واحدة تعيش طول
+// الشاهد وتطبع HandleCount بتدفق متواصل بغسل صريح بعد كل سطر — توليد
+// بارد واحد بدل توليد متزامن بارد لكل قراءة، فقراءاتٌ متعددة متزامنة
+// تحجب حلقة الأحداث وتخترق ميزانية الشاهد تحت حمل المشغّل. بلا تفاعل
+// مدخلات: الكتابة على مدخلات المضيف بعد أول دورة تفقد الاستيقاظ (مقيس
+// هنا: أول جواب يصل والثاني لا يصل مهما طال الانتظار، والأسطر المرسلة
+// مقداماً تجيب فوراً) — فالإخراج باتجاه واحد هو المتين. القيمة المقيسة
+// نفسها التي كان كل توليد متزامن يجيبها (HandleCount للعملية المضيفة
+// للقارئ)، وفشل التوليد يعيد null فيسلك الشاهد فرع العدّ غير المقروء
+class _ResidentHandles {
+  _ResidentHandles._(this._process) {
+    _process.stdout
+        .transform(utf8.decoder)
+        .transform(const LineSplitter())
+        .listen((line) {
+          final value = int.tryParse(line.trim());
+          if (value != null) _readings.add(value);
+        });
+  }
+
+  final Process _process;
+  final List<int> _readings = <int>[];
+
+  /// One long-lived PowerShell printing its handle count continuously:
+  /// spawns once per witness instead of once per read. Null when the
+  /// platform refuses the spawn, which the witness treats exactly like
+  /// its unreachable-count branch.
+  static Future<_ResidentHandles?> spawn() async {
+    final Process process;
+    try {
+      process = await Process.start('powershell', <String>[
+        '-NoProfile',
+        '-Command',
+        _handleReaderScript,
+      ]);
+    } on Object {
+      return null;
+    }
+    return _ResidentHandles._(process);
+  }
+
+  /// The latest reading the reader produced, waiting on the clock so a
+  /// wedged reader can never hang the witness past its own budget.
+  Future<int> read() async {
+    final sw = Stopwatch()..start();
+    while (sw.elapsed < const Duration(seconds: 10)) {
+      if (_readings.isNotEmpty) {
+        return _readings.last;
+      }
+      await Future<void>.delayed(const Duration(milliseconds: 50));
+    }
+    throw StateError(
+      'the resident handle reader produced no reading within its budget',
+    );
+  }
+
+  /// Stops the reader process - the witness teardown owns it.
+  void kill() {
+    _process.kill();
+  }
+}
+
+// نص القارئ: عدّ للمضيف نفسه في حلقة متواصلة، وغسل صريح بعد كل سطر —
+// التخزين المؤقت للمخرجات الموجهة يمتص الأسطر لو لا الغسل
+const String _handleReaderScript = r'''
+while ($true) {
+  [Console]::Out.WriteLine((Get-Process -Id $pid).HandleCount);
+  [Console]::Out.Flush();
+  Start-Sleep -Milliseconds 200
+}
+''';
 
 // عدد مقابض/واصفات العملية الحالية حيثما يمكن قراءته محلياً لعملية
 // الاختبار نفسها: /proc/self/fd على لينكس، و/dev/fd على ماك واصفاً
