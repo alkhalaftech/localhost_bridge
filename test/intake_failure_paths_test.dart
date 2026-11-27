@@ -130,6 +130,36 @@ int? _openDescriptors() {
   return null;
 }
 
+// مجلد الشاهد المؤقت يحسم owner-only بالبناء على كل إصدار لا بالحظ:
+// `Directory.systemTemp.createTemp` يولّد 40755 على dart 3.8.0 و3.13.0
+// مقابل 40700 على المستقر، وبوابة مجلد الأب في الحزمة ترفض المجلد
+// المتساهل قبل أي ربط فيمارِس الشاهد مسار فشل غير مساره. الأمضية بطريق
+// الحزمة نفسه (_refusePermissiveUnixParent/_enforceUnixOwnerOnly): chmod
+// بمسار الأداة الكامل — نداء الاسم المجرّد يورّث حارساً يمكن إزاحته
+// بترتيب PATH الموروث — ثم التحقق بقراءة الصلاحيات الفعلية من المجلد
+// بنفس قناع البتات (0x3F) الذي تحكم به الحزمة، وعند أي عائق يرمي
+// الشاهد فيفشل صاخباً لا يمرّ متساهلاً
+Future<Directory> _ownerOnlyTempDir(String prefix) async {
+  final dir = await Directory.systemTemp.createTemp(prefix);
+  final result = await Process.run('/bin/chmod', <String>['700', dir.path]);
+  if (result.exitCode != 0) {
+    throw StateError(
+      'the witness could not tighten its temp directory ${dir.path} '
+      'to owner-only: /bin/chmod exited ${result.exitCode}',
+    );
+  }
+  final stat = dir.statSync();
+  if (stat.type != FileSystemEntityType.directory || (stat.mode & 0x3F) != 0) {
+    throw StateError(
+      'the witness temp directory ${dir.path} is not owner-only after '
+      'tightening: mode ${stat.mode.toRadixString(8)} still carries '
+      'group or other bits, so the parent gate would refuse it and '
+      'the witness would exercise the wrong failure path',
+    );
+  }
+  return dir;
+}
+
 void main() {
   test('two pipelined requests in one write with one extra trailing byte '
       'serve both replies and the stray byte is cut at the deadline', () async {
@@ -232,7 +262,7 @@ void main() {
       return false;
     }
 
-    final dir = await Directory.systemTemp.createTemp('lb-fp-unix-');
+    final dir = await _ownerOnlyTempDir('lb-fp-unix-');
     addTearDown(() async {
       try {
         await dir.delete(recursive: true);
@@ -320,7 +350,7 @@ void main() {
     final oldPort = squatter.port;
     await squatter.close();
     await Future<void>.delayed(const Duration(milliseconds: 200));
-    final dir = await Directory.systemTemp.createTemp('lb-fp-orphan-');
+    final dir = await _ownerOnlyTempDir('lb-fp-orphan-');
     addTearDown(() async {
       try {
         await dir.delete(recursive: true);
