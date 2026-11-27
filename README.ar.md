@@ -892,6 +892,16 @@ Chromium، فمصادر Chromium في هذا الجدول هي حاكمة للس
 | Safari وكل متصفحات iOS المبنية على WebKit | غير مدعوم على HTTP الخام — فاحص المحتوى المختلط في WebKit نفسه يعامل عنوان الحلقة الراجعة على HTTP الخام بوصفه غير آمن «ما لم يُحمَّل عبر HTTPS» ([WebKit bug 281149](https://bugs.webkit.org/show_bug.cgi?id=281149)، مُعاد فتحه، آخر تغيير 2026-04-20، جُلب 2026-11-22)؛ وطلبات الإعفاء بمستوى المواصفة ما تزال مفتوحة ([WebKit bug 171934](https://bugs.webkit.org/show_bug.cgi?id=171934)، حالة NEW بنشاط إلى 2026-08-19، جُلب 2026-11-22 · [WebKit bug 218623](https://bugs.webkit.org/show_bug.cgi?id=218623)، حالة NEW، جُلب 2026-11-22)، وصفحة المحتوى المختلط في MDN (آخر تعديل 2026-08-15، جُلبت 2026-11-22) تسمي Safari المتصفحَ الذي يحجب افتراضياً كل المحتوى المختلط بينما تبقى أصول الحلقة الراجعة سياقات آمنة بوصفها أصولاً. وخيار TLS أعلاه هو الشرط الذي يسميه فاحص WebKit حرفاً («ما لم يُحمَّل عبر HTTPS») — لكن هل يقبُل إصدار Safari شاحن حالي `https://127.0.0.1` بشهادة موثوقة في الجهاز **لا يُدَّعى هنا**: فهو شاهد مختبر الأجهزة (`tool/safari_https_loopback_lab.dart`)، غير متحقق إلى أن يشغّله ماك بشهادة موثوقة. أبل تسمح بمحركات أخرى في الاتحاد الأوروبي (iOS 17.4+)؛ ولا واحد منها مختبر هنا | 2026-11-22 | [WebKit bug 281149](https://bugs.webkit.org/show_bug.cgi?id=281149) · [WebKit bug 171934](https://bugs.webkit.org/show_bug.cgi?id=171934) · [MDN: Mixed content](https://developer.mozilla.org/en-US/docs/Web/Security/Defenses/Mixed_content) · [Apple: alternative browser engines](https://developer.apple.com/support/alternative-browser-engines) |
 | Android WebView | مُختبَر على المحاكي (Android 16 و17) — بلا مطالبة إذن خاصة به؛ الوصول يخضع لصلاحيات التطبيق الذي يضمّ الـ WebView. وعلى Android 16 وما قبله، على التطبيق الذي يعرض صفحة حلقة راجعة على HTTP الخام داخل WebView أن يصرّح بـcleartext لأسماء الحلقة في إعداد أمن الشبكة لديه (مثاله في البند أدناه من الدليل)، وإلا منعت المنصةُ الصفحةَ بالخطأ `ERR_CLEARTEXT_NOT_PERMITTED` قبل أن تصل الجسر؛ وعلى Android 17 تُسمح الصفحة الحلقية بلا تصريح، كما قيس على المحاكي. وعلى Android 17 ترث حركة WebView حالة إذن الشبكة المحلية من التطبيق المضيف، وإذن `ACCESS_LOCAL_NETWORK` لمن يستهدف SDK 37 فقط؛ وتعريف «الشبكة المحلية» الرسمي لا يذكر loopback | 2026-11-23 | [Android: Network security configuration](https://developer.android.com/privacy-and-security/security-config) · [Android: local network permission](https://developer.android.com/privacy-and-security/local-network-permission) · [Android: local network definition](https://developer.android.com/privacy-and-security/local-network-definition) |
 
+<!-- علامة تحرير (سطرا Firefox): يبقى السطران على حالتهما الموثقة حتى
+يقيس مختبر المتصفح المكتبي Firefox نفسه؛ عند خضرة التشغيل أضف سطراً
+(أو أمّد هذين) بنسخة Firefox المقيسة وتاريخها وما فعله التشغيل المقيس
+فعلاً، بينها ملاحظة الجسم المتدفق التي تجري من Firefox 161 فأعلى.
+لا قياس فلا كتابة. -->
+<!-- علامة تحرير (سطر Safari): يبقى سطر Safari على حالته الموثقة حتى
+يقيس مختبر المتصفح على macOS سفاري حقيقياً؛ عندئذ حدّث عمودَي الحالة
+والتاريخ بنسخة Safari المقيسة وتاريخها، وسمِّ شرط الشهادة كما قيس حرفاً.
+لا قياس فلا كتابة. -->
+
 «صدر» تعني أن الصفحة ترسل وتقرأ الرد بعد منح المستخدم الإذن. وتحصين
 طريقة الإرسال لا يعتمد على أي مطالبة — يسري حيثما وصل الطلب.
 
