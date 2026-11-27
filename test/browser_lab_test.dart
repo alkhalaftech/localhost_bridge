@@ -392,6 +392,11 @@ async function signProof(tokenHex, pairingId, method, path, correlationId) {
   // المعروض، ثم التوقيع، ثم الأمر الموقَّع، ثم إعادة التوقيع نفسه، ثم
   // الصفحة بلا إثبات. يشتغل حين يحمل الجسر رمز عرض فقط
   if (PAIRING_CODE !== '') {
+    // كل خطوة في القصة تمسك رفضها الشبكي موضعياً وتطبع علامتها المسمّاة
+    // ثم تكمل ما بعدها: مسك واحد مشترك للقصة كلها كان يهضم أي خطوة
+    // منحببة تحت LAB-PAIRED:THREW وحده فيمحو بقيّة القصة ويخفي أي خطوة
+    // انحجبت ولماذا — والمحجوب يبقى محجوباً مسمّى لا صامتاً
+    let proof = null;
     try {
       const pairRes = await boundedFetch(ADMITTED_BRIDGE + '/pair', {
         method: 'POST',
@@ -400,32 +405,62 @@ async function signProof(tokenHex, pairingId, method, path, correlationId) {
       });
       const pairBody = await pairRes.json().catch(() => null);
       if (pairRes.status === 200 && pairBody && pairBody.token) {
-        const proof = await signProof(
-            pairBody.token, pairBody.pairingId, 'POST', '/', 'lab-paired-1');
-        const signed = await postJson(ADMITTED_BRIDGE, {
-          'X-Bridge-Pairing': proof,
-          'X-Correlation-Id': 'lab-paired-1',
-        });
-        const signedBody = await signed.json().catch(() => null);
-        mark('LAB-PAIRED:' + signed.status + ':' +
-             (signedBody && signedBody.ok === true ? 'true' : 'false'));
-        // إعادة التوقيع نفسه: الطابع نفسه لا يثبت مرتين — والمتصفح
-        // يقرأ الرمز الحرفي من الرفض القابل للقراءة
-        const replay = await postJson(ADMITTED_BRIDGE, {
-          'X-Bridge-Pairing': proof,
-          'X-Correlation-Id': 'lab-paired-1',
-        });
-        const replayBody = await replay.json().catch(() => null);
-        mark('LAB-PAIRED-REPLAY:' + replay.status + ':' +
-             (replayBody && replayBody.error ? replayBody.error
-                                             : 'no-error'));
-        // الصفحة نفسها بلا إثبات: الرفض الصادق المقروء تعيد منه
-        const bare = await postJson(ADMITTED_BRIDGE, {
-          'X-Correlation-Id': 'lab-bare-1',
-        });
-        const bareBody = await bare.json().catch(() => null);
-        mark('LAB-STRICT-BARE:' + bare.status + ':' +
-             (bareBody && bareBody.error ? bareBody.error : 'no-error'));
+        try {
+          proof = await signProof(
+              pairBody.token, pairBody.pairingId, 'POST', '/', 'lab-paired-1');
+        } catch (browserError) {
+          mark('LAB-PAIRED:SIGN-THREW');
+        }
+        if (proof !== null) {
+          try {
+            const signed = await postJson(ADMITTED_BRIDGE, {
+              'X-Bridge-Pairing': proof,
+              'X-Correlation-Id': 'lab-paired-1',
+            });
+            const signedBody = await signed.json().catch(() => null);
+            mark('LAB-PAIRED:' + signed.status + ':' +
+                 (signedBody && signedBody.ok === true ? 'true' : 'false'));
+          } catch (browserError) {
+            if (browserError && browserError.name === 'AbortError') {
+              mark('LAB-PAIRED:FETCH-ABORTED:' + FETCH_LIMIT_MS + 'ms');
+            } else {
+              mark('LAB-PAIRED:THREW');
+            }
+          }
+          // إعادة التوقيع نفسه: الطابع نفسه لا يثبت مرتين — والمتصفح
+          // يقرأ الرمز الحرفي من الرفض القابل للقراءة
+          try {
+            const replay = await postJson(ADMITTED_BRIDGE, {
+              'X-Bridge-Pairing': proof,
+              'X-Correlation-Id': 'lab-paired-1',
+            });
+            const replayBody = await replay.json().catch(() => null);
+            mark('LAB-PAIRED-REPLAY:' + replay.status + ':' +
+                 (replayBody && replayBody.error ? replayBody.error
+                                                 : 'no-error'));
+          } catch (browserError) {
+            if (browserError && browserError.name === 'AbortError') {
+              mark('LAB-PAIRED-REPLAY:FETCH-ABORTED:' + FETCH_LIMIT_MS + 'ms');
+            } else {
+              mark('LAB-PAIRED-REPLAY:BLOCKED-NO-VERDICT');
+            }
+          }
+          // الصفحة نفسها بلا إثبات: الرفض الصادق المقروء تعيد منه
+          try {
+            const bare = await postJson(ADMITTED_BRIDGE, {
+              'X-Correlation-Id': 'lab-bare-1',
+            });
+            const bareBody = await bare.json().catch(() => null);
+            mark('LAB-STRICT-BARE:' + bare.status + ':' +
+                 (bareBody && bareBody.error ? bareBody.error : 'no-error'));
+          } catch (browserError) {
+            if (browserError && browserError.name === 'AbortError') {
+              mark('LAB-STRICT-BARE:FETCH-ABORTED:' + FETCH_LIMIT_MS + 'ms');
+            } else {
+              mark('LAB-STRICT-BARE:BLOCKED-NO-VERDICT');
+            }
+          }
+        }
       } else {
         mark('LAB-PAIRED:' + pairRes.status + ':' +
              (pairBody && pairBody.error ? pairBody.error : 'unreadable'));
@@ -437,6 +472,10 @@ async function signProof(tokenHex, pairingId, method, path, correlationId) {
         mark('LAB-PAIRED:THREW');
       }
     }
+    // نهاية القصة الصريحة: آخر علامة في كل مسار من مسارات القصة — السائق
+    // ينتظرها بدل سابقة سطرٍ أوسطي فلا يُقضى على قصة ناقصة ولا يُنتظر
+    // سطر قد لا يأتي، وأي تخطٍّ قبلها يظهر بالاسم في السجل المجمّع
+    mark('LAB-PAIRED-STORY-END');
   }
   // وضع التقرير: العلامات كلها تعود إلى مجمع المختبر على أصل الصفحة —
   // آخر نداء في الصفحة كي تجمع كل ما سبقها
@@ -2079,8 +2118,17 @@ function wsScenario() {
         client,
         'http://127.0.0.1:$pagePort/',
         'ff-paired-log.txt',
-        untilContains: 'LAB-STRICT-BARE:',
+        untilContains: 'LAB-PAIRED-STORY-END',
       ),
+    );
+    // نهاية القصة كاملة السطر قبل أي حكم: قراءة سابقةٍ بأوسط سطرٍ كانت
+    // تعيد سجلاً ناقصاً فيحكم على قصة لم تكتمل
+    expect(
+      log,
+      contains('LAB-PAIRED-STORY-END\n'),
+      reason:
+          'the paired story ran to its explicit end marker, not a '
+          'mid-story prefix read',
     );
     expect(
       log,
