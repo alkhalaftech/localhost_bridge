@@ -12,7 +12,7 @@
 //
 // إصدار الملصق أمر بأثر (استهلاك شريط/تكلفة ناقل): المضيف الجاد يضعه
 // خلف تأكيد بشري ودفتر عدم تكرار — انظر example/idempotent_handler.dart
-// وقسم «Recommended setup» في SECURITY.md.
+// وقسم «Recommended setup for irreversible commands» في SECURITY.md.
 import 'dart:convert';
 import 'dart:io';
 
@@ -26,8 +26,8 @@ const _lanes = {'A', 'B', 'C'};
 // سقف عناصر الشحنة الواحدة — حد تجريدي داخلي باسم.
 const _maxItemsPerConsignment = 500;
 
-/// التحقق المجالي لأمر ملصق واحد: مواصفة مغلقة ثم قيم مغلقة، وكل رفض
-/// يحمل رمزاً ثابتاً يقرأه مطور البوابة.
+// التحقق المجالي لأمر ملصق واحد: مواصفة مغلقة ثم قيم مغلقة، وكل رفض
+// يحمل رمزاً ثابتاً يقرأه مطور البوابة.
 CommandOutcome _createLabel(String payload) {
   final Object? decoded;
   try {

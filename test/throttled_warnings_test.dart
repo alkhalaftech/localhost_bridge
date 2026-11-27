@@ -265,8 +265,6 @@ void main() {
         1,
         reason: 'the refused requests never reach the handler',
       );
-      // ignore: avoid_print
-      print('A9-RED-PROOF busy warn lines = ${_busyWarns(rec).length}');
       expect(
         _busyWarns(rec).length,
         1,
@@ -307,7 +305,12 @@ void main() {
       final srv = _server(
         rec,
         nowMs: () => fakeNow,
-        config: const BridgeConfig(maxConcurrentRequests: 16),
+        config: const BridgeConfig(
+          maxConcurrentRequests: 16,
+          // موضوع الشاهد سطر الكبح لا حصص الأصول — البذرة ستة عشر
+          // من أصل واحد فالسقف لكل أصل يُرفع صراحة هنا
+          maxSeatsPerOrigin: 16,
+        ),
         handlerTimeout: const Duration(milliseconds: 200),
         onCommandCall: () => handlerCalls++,
         handler: () => Completer<CommandOutcome>().future,
@@ -341,10 +344,6 @@ void main() {
         reason:
             'the refused requests never reach the handler - only the '
             'sixteen seeds ever did',
-      );
-      // ignore: avoid_print
-      print(
-        'A9-RED-PROOF orphan-busy warn lines = ${_orphanBusyWarns(rec).length}',
       );
       expect(
         _orphanBusyWarns(rec).length,
@@ -383,7 +382,12 @@ void main() {
       final srv = _server(
         rec,
         nowMs: () => fakeNow,
-        config: const BridgeConfig(maxConcurrentRequests: 2000),
+        config: const BridgeConfig(
+          maxConcurrentRequests: 2000,
+          // موضوع الشاهد سطر كبح مهلة المعالج لا حصص الأصول — وفيض
+          // الألف من أصل واحد يجعل السقف لكل أصل مصارحاً هنا
+          maxSeatsPerOrigin: 2000,
+        ),
         handlerTimeout: const Duration(milliseconds: 30),
         onCommandCall: () => handlerCalls++,
         handler: () async {
@@ -406,10 +410,6 @@ void main() {
         handlerCalls,
         1000,
         reason: 'every request still reaches the handler',
-      );
-      // ignore: avoid_print
-      print(
-        'A9-RED-PROOF handler-timeout warn lines = ${_timeoutWarns(rec).length}',
       );
       expect(
         _timeoutWarns(rec).length,
@@ -450,7 +450,12 @@ void main() {
       final srv = _server(
         rec,
         nowMs: () => fakeNow,
-        config: const BridgeConfig(maxConcurrentRequests: 2000),
+        config: const BridgeConfig(
+          maxConcurrentRequests: 2000,
+          // موضوع الشاهد القطع الكلية لا حصص الأصول — وفيض الألف من
+          // أصل واحد يجعل السقف لكل أصل مصارحاً هنا
+          maxSeatsPerOrigin: 2000,
+        ),
         requestTimeout: const Duration(milliseconds: 400),
         onCommandCall: () => handlerCalls++,
         handler: () => Completer<CommandOutcome>().future,
@@ -477,8 +482,6 @@ void main() {
             'the deadline guards the pre-handler phase alone - none of the '
             'cut requests ever reaches a handler',
       );
-      // ignore: avoid_print
-      print('A9-RED-PROOF deadline warn lines = ${_deadlineWarns(rec).length}');
       expect(
         _deadlineWarns(rec).length,
         1,

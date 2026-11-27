@@ -110,6 +110,13 @@ final class ReviewArrival extends ArrivalDecision {
 /// and monotonic stamps only. Tracked fingerprints are capped at
 /// [maxFingerprints], and idle ones are swept oldest-insertion-first at
 /// most once per 1000 ms.
+///
+/// Experimental: a standalone host-side meter, deliberately not wired
+/// into the server - the intake never calls it, and its facts are yours
+/// to record ([ArrivalFacts] takes a fingerprint you compute). The
+/// bridge's own admission path enforces its per-origin budgets on the
+/// wire without this class, so depend on it as a helper you call
+/// yourself, not as a protection the package applies for you.
 class ArrivalGuard {
   /// Builds a guard with the given sliding window and fingerprint cap -
   /// defaults: a [windowMs] of 60000 ms and [maxFingerprints] of 500.

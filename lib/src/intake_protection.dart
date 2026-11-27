@@ -4,6 +4,7 @@ import 'dart:convert';
 import 'dart:math';
 
 import 'bridge_telemetry.dart';
+import 'digest.dart';
 
 /// The host's answer to an unknown-origin question. [allowAlways] and
 /// [reject] are remembered for the session, [allowOnce] grants a single
@@ -13,14 +14,48 @@ import 'bridge_telemetry.dart';
 /// window expired, or the session ended before the user answered).
 enum OriginConsent { allowAlways, allowOnce, reject, dismissed }
 
+/// How much the platform vouches for an admission's origin fact - the
+/// origin and its trust grade travel together, and the grade is recorded
+/// on the admission record ([IntakeAdmission.originTrust]), never on any
+/// wire reply. The grade decides one thing only: whether the browser-only
+/// Fetch Metadata gates may punish their absence. A channel where the
+/// platform itself verified the origin has no such headers at all, so the
+/// absence is honest there; a channel claiming the browser-header grade
+/// without producing the headers stays closed exactly like the HTTP wire.
+/// An origin whose sender cannot vouch for it is not passed at all - the
+/// native client then crosses by its token alone with the [none] grade.
+enum OriginTrustLevel {
+  /// The value rode a browser-controlled `Origin` header (the HTTP wire).
+  /// The browser is the vouching platform, and the Fetch Metadata gates
+  /// keep reading it exactly as they always have.
+  browserHeader,
+
+  /// The platform verified the origin itself - Android's
+  /// `WebMessageListener` against its allowed-origin rules, or iOS's
+  /// `WKScriptMessage.frameInfo.securityOrigin`. As binding as a browser
+  /// header, with none of its headers on the channel: the Fetch Metadata
+  /// absence gates do not fire for this grade, and every other gate (the
+  /// origin form, the policy, the quotas, the token layer) applies
+  /// unchanged.
+  platformVerified,
+
+  /// No origin fact at all - a native client that crosses by its token
+  /// alone (or is refused by the origin paths like any headerless
+  /// request). An origin value must never ride this grade: the entry
+  /// points refuse that combination loudly instead of silently ignoring
+  /// the value.
+  none,
+}
+
 /// Origin policy - the single concept left after the open mode was merged in:
 /// the list rules; allow-all is its widest value with the hardening attached; discovery grows it. Closed by default (an empty list denies all).
 class OriginPolicy {
   /// Builds the policy - every field is optional and defaults to the
   /// closed shape: an empty `allowed` list with no allow-all and no
   /// discovery callback, a per-origin quota of 30 requests/minute on the
-  /// allow-all path only, listed origins unquotaed, Fetch Metadata
-  /// required, and a 60-second consent-question timeout.
+  /// allow-all path, a listed-origin quota of 120 requests/minute, Fetch
+  /// Metadata required, and a 60-second consent-question timeout with no
+  /// per-parent question budget (the global ceiling alone).
   const OriginPolicy({
     this.allowed = const [],
     this.allowAllHardened = false,
@@ -28,9 +63,11 @@ class OriginPolicy {
     this.reportOnly = false,
     this.onUnknownOrigin,
     this.perOriginPerMinute = 30,
-    this.listedPerOriginPerMinute = 0,
+    this.listedPerOriginPerMinute = 120,
     this.requireFetchMetadata = true,
+    this.requireOriginWithToken = false,
     this.askTimeout = const Duration(seconds: 60),
+    this.askFiresPerParentPerWindow = 0,
   });
 
   /// Accepted entries - a full origin (https://host) or a bare host, and the
@@ -61,10 +98,13 @@ class OriginPolicy {
   /// (sane values that never break a legitimate gate and bound one origin's damage).
   final int perOriginPerMinute;
 
-  /// Optional per-origin quota for the listed path - 0 (the default) keeps
-  /// listed origins unquotaed; a positive value bounds a compromised listed
-  /// origin's flood over the shared seats. Rejections use the same
-  /// `origin_rate_limited` code as the allow-all quota.
+  /// Per-origin quota for the listed path - 120 requests/minute shipped
+  /// (two sustained commands a second per listed origin: a real page
+  /// fires commands per user action and sits far below it, while a
+  /// compromised listed origin cannot flood the shared seats faster).
+  /// `0` is the explicit opt-out keeping listed origins unquotaed.
+  /// Rejections use the same `origin_rate_limited` code as the allow-all
+  /// quota, with the honest `Retry-After`.
   final int listedPerOriginPerMinute;
 
   /// Refuse requests that carry no `Sec-Fetch-Mode: cors` /
@@ -76,10 +116,45 @@ class OriginPolicy {
   /// are never affected either way.
   final bool requireFetchMetadata;
 
+  /// Require BOTH facts together on every qualified origin: an admitted
+  /// origin AND a token bound to it. Off by default - the default keeps the
+  /// token as an independent path and the origin paths open, wire-identical
+  /// to previous releases. On, the mode closes the two one-legged doors:
+  /// a qualified origin without a valid token answers `403 token_required`,
+  /// and the token alone - correct or not, from an unqualified origin or
+  /// with no Origin at all - never admits (the origin rejection answers it,
+  /// never a token verdict, so a wrong-origin sender learns nothing about
+  /// its token). The proof that satisfies the mode is the shared token
+  /// (constant-time compared, as always) or a paired origin-bound token
+  /// presented as an HMAC signature (the pairing layer). The preflight for
+  /// the token header keeps its usual echo decision: a qualified origin's
+  /// preflight is answered, so its page can read `token_required` and
+  /// retry with the proof. With the mode on, headerless non-browser clients
+  /// have no door at all - run them on a separate listener (or turn the
+  /// mode off there), and pair browser pages through the pairing layer.
+  final bool requireOriginWithToken;
+
   /// Timeout of a single discovery question - a window left unanswered is
   /// closed after this long, freeing its place among the 3 open-question
   /// slots (injectable for tests).
   final Duration askTimeout;
+
+  /// Optional per-parent budget on NEW consent questions: one parent domain
+  /// may open at most this many new questions per 10-minute window, beside
+  /// the global 10-per-10-minutes ceiling. The parent domain is the last
+  /// two labels of the origin's host (`x.r1.example.com`,
+  /// `x.r2.example.com` and `example.com` all share `example.com`); a
+  /// two-label host or an IP literal is its own parent; hosts under a
+  /// multi-label public suffix (`bank.co.uk`, `shop.github.io`) share that
+  /// suffix. `0` - the default - keeps the global-only ceiling, so the
+  /// default wire is unchanged; a negative value is a configuration
+  /// mistake and throws at `update()` time. A question past this parent's
+  /// budget still answers `429 origin_parent_rate_limited` with the honest
+  /// `Retry-After`, but it fires nothing and spends nothing from the
+  /// global budget - one site rotating subdomains at any depth can no
+  /// longer starve another origin's question. The global ceiling keeps its
+  /// own `origin_pending`.
+  final int askFiresPerParentPerWindow;
 }
 
 /// The intake rejection - the code is the developer contract, the message neutral English.
@@ -95,15 +170,16 @@ class IntakeRejection {
     this.retryAfterMs,
   });
 
-  /// 403 for denial, 429 for the origin quota.
+  /// 403 for denial, 429 for the origin budgets (the rate quota and the
+  /// parent ask budget).
   final int status;
 
   /// The stable developer contract for the rejection - one of the codes
   /// this class produces (`origin_not_listed`, `origin_pending`,
   /// `origin_declined`, `origin_unknown`, `origin_rate_limited`,
-  /// `token_locked`, `cross_site_blocked`, `origin_blocked`,
-  /// `protection_disposed`). The message text may change; the code does
-  /// not.
+  /// `origin_parent_rate_limited`, `token_locked`, `cross_site_blocked`,
+  /// `origin_blocked`, `protection_disposed`). The message text may
+  /// change; the code does not.
   final String code;
 
   /// The package's constant neutral English sentence for the rejection -
@@ -115,6 +191,432 @@ class IntakeRejection {
   /// new-question budget). The server emits it as the Retry-After header
   /// (seconds, rounded up); null keeps the caller's own default.
   final int? retryAfterMs;
+}
+
+/// The acceptance route one request took through the protection layers -
+/// the recorded value in [IntakeAdmission.acceptedPath]. Eight routes
+/// exist and an accepted admission names exactly one: the host's list, a
+/// saved always-allow consent from discovery, a consumed one-time grant,
+/// the hardened allow-all path, a correct token alone, a correct token
+/// over a listed origin, a paired origin-bound signature, or the bridge's
+/// own served origin.
+enum IntakeAdmissionPath {
+  /// The origin matches the host's allowlist (full origin, bare host, or
+  /// `*.domain` pattern).
+  listed,
+
+  /// Discovery answered `allowAlways` for this origin earlier and the
+  /// decision is still remembered for the session.
+  savedConsent,
+
+  /// A discovery `allowOnce` grant was valid and this request consumed it.
+  onceGrant,
+
+  /// The hardened allow-all path with its origin and send-method hardening.
+  allowAll,
+
+  /// The token alone admitted the request: a correct token over an origin
+  /// the policy does not qualify (or with no Origin at all).
+  token,
+
+  /// Both layers agreed: a correct token over a listed origin.
+  originWithToken,
+
+  /// The pairing proof agreed: a valid origin-bound HMAC signature over a
+  /// qualified origin - the page proves possession of its paired token
+  /// without ever sending it.
+  originWithPairedToken,
+
+  /// The bridge's own served origin: the local-pages option armed the
+  /// origin this listener itself serves pages from, and the page's
+  /// requests cross on this explicit path - never on the allow-all path.
+  /// The same browser send-method gates and the listed quota bind it.
+  /// Added at the enum's end; a host switch that must know every route
+  /// reads this value explicitly.
+  bridgeOrigin,
+}
+
+/// The one admission record for one request - the single projection of the
+/// protection state that replaces the per-question probes. Built by
+/// [IntakeProtection.admit]; the caller reads the record and never probes
+/// the protection object again for this request. The verdict is recorded
+/// at build time from a pure read - and [settle] re-checks the consumable
+/// facts (a one-time grant, a pairing proof's replay slot, the per-origin
+/// quota seat, the token guess budget) on the live state before it lands:
+/// a fact a concurrent request already consumed flips the record into the
+/// standing refusal for the live state, and the getters below are the
+/// only view of that final verdict. Read them after [settle].
+///
+/// The projection is deliberately side-effect free: a caller that never
+/// calls [settle] leaves no state behind - that is what keeps preflights,
+/// shape-gate rejects, and busy rejects stamp-free. [settle] lands the
+/// decision's state effects exactly where the old admission gate stood.
+class IntakeAdmission {
+  const IntakeAdmission._({
+    required IntakeRejection? recordedRejection,
+    required IntakeAdmissionPath? recordedPath,
+    required this.echoesCors,
+    required this.verboseErrors,
+    required this.origin,
+    required this.normalizedOrigin,
+    required this.path,
+    required this.originTrust,
+    _AdmissionDecision? decision,
+    IntakeProtection? owner,
+  }) : _recordedRejection = recordedRejection,
+       _recordedPath = recordedPath,
+       _verdict = null,
+       _decision = decision,
+       _owner = owner;
+
+  /// The live-built record [IntakeProtection.admit] returns - its verdict
+  /// sits in a refreshable holder so the settle-time re-check can flip it
+  /// in place without rebuilding the record.
+  IntakeAdmission._live({
+    required IntakeRejection? recordedRejection,
+    required IntakeAdmissionPath? recordedPath,
+    required this.echoesCors,
+    required this.verboseErrors,
+    required this.origin,
+    required this.normalizedOrigin,
+    required this.path,
+    required this.originTrust,
+    required _AdmissionDecision decision,
+    required IntakeProtection owner,
+  }) : _recordedRejection = recordedRejection,
+       _recordedPath = recordedPath,
+       _verdict = _AdmissionVerdict(recordedRejection, recordedPath),
+       _decision = decision,
+       _owner = owner;
+
+  /// The hand-built placeholder for a [TrustedCommand] constructed outside
+  /// the intake (host tests): no rejection, no path, no decisions - and
+  /// [settle] and [noteAuthorityReject] refuse it loudly.
+  static const IntakeAdmission unrecorded = IntakeAdmission._(
+    recordedRejection: null,
+    recordedPath: null,
+    echoesCors: false,
+    verboseErrors: false,
+    origin: null,
+    normalizedOrigin: null,
+    path: null,
+    originTrust: null,
+  );
+
+  /// The verdict as recorded at build time - the getters read the
+  /// settle-refreshed verdict when one exists.
+  final IntakeRejection? _recordedRejection;
+  final IntakeAdmissionPath? _recordedPath;
+
+  /// The refreshable verdict holder - null only on the const [unrecorded]
+  /// placeholder, which refuses to settle.
+  final _AdmissionVerdict? _verdict;
+
+  /// The policy rejection when the request was refused - null when it was
+  /// accepted. The status, code, and message are the wire contract the
+  /// caller replies with. Read it after [settle]: the settle-time
+  /// re-check may flip an accepted record whose consumable fact (a
+  /// one-time grant, a proof's replay slot, a budget seat) was already
+  /// consumed by a concurrent request, and this getter is the only view
+  /// of the final verdict.
+  IntakeRejection? get rejection {
+    final verdict = _verdict;
+    // الحامل حيث وُجد هو الحقيقة الحية — وُلد بالحكم المسجل وقلبه
+    // التسوي يكتب فيه، فلا تراجع إلى المسجل يقنع قلباً صار خالياً
+    if (verdict != null) return verdict.rejection;
+    return _recordedRejection;
+  }
+
+  /// The route that accepted the request - null when [rejection] is
+  /// non-null, including after a settle-time refresh flipped an accepted
+  /// record into the standing refusal.
+  IntakeAdmissionPath? get acceptedPath {
+    final verdict = _verdict;
+    if (verdict != null) return verdict.acceptedPath;
+    return _recordedPath;
+  }
+
+  /// Whether the reply to this request may carry the CORS echo. For an
+  /// accepted request this is the qualified-origin decision; for a
+  /// rejection it folds the consent-question rule (always echo) and the
+  /// wait-budget rule (echo when the origin qualifies) into one recorded
+  /// value.
+  final bool echoesCors;
+
+  /// Whether the reply may carry host error text for this sender - a
+  /// correct token (whose miss window is not locked) or a listed origin.
+  final bool verboseErrors;
+
+  /// The Origin request fact this admission was built from - the value the
+  /// counter and the security log key this request by.
+  final String? origin;
+
+  /// [origin] lower-cased with trailing slashes stripped - the canonical
+  /// key every per-origin window in the protection uses.
+  final String? normalizedOrigin;
+
+  /// The request path fact this admission was built from.
+  final String? path;
+
+  /// The trust grade the origin fact carried - how much the platform
+  /// vouches for it. Recorded here and nowhere else: no wire reply, HTTP
+  /// or channel, ever carries the grade. Null only on the hand-built
+  /// [unrecorded] placeholder.
+  final OriginTrustLevel? originTrust;
+
+  final _AdmissionDecision? _decision;
+  final IntakeProtection? _owner;
+
+  /// Lands this admission's state effects - the token miss stamp or miss
+  /// window clear, the quota stamp (or its withdrawal on a rejection), the
+  /// one-time grant consumption, the consent question, the report-only
+  /// would-reject line, and the counted, throttled security line for a
+  /// rejection. The server calls it exactly once, at the acceptance gate;
+  /// a request answered from a pure read (preflight, shape-gate reject,
+  /// busy reject) never settles, so it leaves no state behind - the same
+  /// property the old gate position gave.
+  ///
+  /// Before anything lands, the consumable facts behind an accepted
+  /// verdict are re-read on the live state: a one-time grant still
+  /// present, a pairing proof's replay key still unused, the per-origin
+  /// quota seat and the token guess budget not yet full. A fact a
+  /// concurrent request already consumed flips the record into the
+  /// standing refusal for the live state (`origin_pending`,
+  /// `pair_signature_replay`, `origin_rate_limited`, or `token_locked`)
+  /// and only that refusal's effects land - read [rejection] and
+  /// [acceptedPath] after this call for the final verdict.
+  ///
+  /// Throws [StateError] on a hand-built [IntakeAdmission.unrecorded] or a
+  /// second settle of the same record.
+  void settle() {
+    final owner = _owner;
+    final decision = _decision;
+    if (owner == null || decision == null) {
+      throw StateError(
+        'this admission was not built by IntakeProtection.admit - '
+        'nothing to settle',
+      );
+    }
+    if (decision.settled) {
+      throw StateError(
+        'this admission was already settled - one settle per request',
+      );
+    }
+    decision.settled = true;
+    // إعادة فحص الوقائع المستهلكة على الحالة الحية قبل إنزال أي أثر:
+    // الحكم قراءة خالصة لحظة الإسقاط، وما بين الإسقاط والتسوية منفذُ
+    // القياس يملكه المضيف فقد يُحكَم طلبان متزامنان على الحالة نفسها.
+    // ما تغير يجعل السجل رفضاً برمز الواقع القائم (لا رمز جديد) -
+    // والمسار يقرأ الرفض من السجل بعد التسوية لا من فحص سابق
+    final flip = owner._recheckConsumedFacts(decision, origin);
+    if (flip != null) {
+      _verdict!
+        ..rejection = flip
+        ..acceptedPath = null;
+      owner._applyDecision(decision, origin);
+      final detail = decision.pairFailure == null
+          ? ''
+          : ' (pairing proof: ${decision.pairFailure})';
+      owner._noteAuthority('${flip.code}: ${flip.message}$detail', origin);
+      return;
+    }
+    owner._applyDecision(decision, origin);
+    // طابع الإثبات الموثق يسجل هنا حصرا — الإسقاط الخالص قرأه لا كتبه
+    final replayKey = decision.pairReplayKey;
+    if (replayKey != null) {
+      owner._recordPairReplay(replayKey, decision.stampMs);
+    }
+    final rejection = decision.rejection;
+    if (rejection != null) {
+      // العد والسطر الأمني هنا حصراً كما كانت noteRejection من الخادم في
+      // موضع بوابة القبول — check القديمة لا تعد أبداً. وسبب فشل الإثبات
+      // الداخلي يسمى في السطر المكبوح لا في الرد
+      final detail = decision.pairFailure == null
+          ? ''
+          : ' (pairing proof: ${decision.pairFailure})';
+      owner._noteAuthority(
+        '${rejection.code}: ${rejection.message}$detail',
+        origin,
+      );
+    }
+  }
+
+  /// Counts and logs a rejection decided outside the protection patterns -
+  /// the host-authority rejects - through the same counter and throttled
+  /// security line the protection's own rejections use: denial is never
+  /// silent. Throws [StateError] on a hand-built
+  /// [IntakeAdmission.unrecorded].
+  void noteAuthorityReject(String reason) {
+    final owner = _owner;
+    if (owner == null || _decision == null) {
+      throw StateError(
+        'this admission was not built by IntakeProtection.admit - '
+        'no counter behind it',
+      );
+    }
+    owner._noteAuthority(reason, origin);
+  }
+}
+
+/// The refreshable verdict holder of one admission record: the projection
+/// writes the admit-time verdict once, and only the settle-time re-check
+/// of the consumable facts writes again (the flip into the standing
+/// refusal). Internal to this library - the record exposes its verdict
+/// through getters, never this holder.
+class _AdmissionVerdict {
+  _AdmissionVerdict(this.rejection, this.acceptedPath);
+
+  IntakeRejection? rejection;
+  IntakeAdmissionPath? acceptedPath;
+}
+
+/// The recorded decision one admission projection produced - the verdict
+/// plus the deferred state effects [IntakeAdmission.settle] lands.
+/// Internal to this library: the record exposes the fields, never the
+/// effect bookkeeping.
+class _AdmissionDecision {
+  _AdmissionDecision({
+    required this.rejection,
+    required this.acceptedPath,
+    required this.echoesCors,
+    required this.verboseErrors,
+    required this.stampMs,
+    required this.key,
+    required this.fetchMode,
+    required this.fetchDest,
+    required this.sendMethod,
+    required this.platformVerified,
+    required this.mayAskConsent,
+    this.tokenAttempt = false,
+    this.tokenCompared = false,
+    this.tokenMatched = false,
+    this.tokenMissStamped = false,
+    this.tokenBudgetSpent = false,
+    this.quotaLimit = 0,
+    this.grantExisted = false,
+    this.reachedAskTrim = false,
+    this.fireAsk = false,
+    this.reportOnlyLine,
+    this.pairReplayKey,
+    this.pairFailure,
+    this.askParent = '',
+  });
+
+  final IntakeRejection? rejection;
+  final IntakeAdmissionPath? acceptedPath;
+  final bool echoesCors;
+  final bool verboseErrors;
+
+  /// The projection's clock reading - every stamp settle lands carries it,
+  /// so the effects match what the old inline gate wrote at this position.
+  final int stampMs;
+
+  /// The canonical origin key for the grant and the ask (empty when the
+  /// request carried no origin).
+  final String key;
+
+  /// The request facts the discovery re-walk at the settle-time re-check
+  /// replays: the same non-secret request shape the projection judged,
+  /// so the fresh walk reads the live state against the same request.
+  final String? fetchMode;
+  final String? fetchDest;
+  final String sendMethod;
+  final bool platformVerified;
+
+  /// The may-ask value the projection judged with - the fresh discovery
+  /// walk keeps it so a twin never opens a question its own admission
+  /// verdict forbade.
+  final bool mayAskConsent;
+
+  /// Whether the token block ran (a token was supplied and a secret is
+  /// configured) - its window fetch owns the periodic sweep, exactly like
+  /// the old gate.
+  final bool tokenAttempt;
+
+  /// Whether the token was compared - false when the header was absent,
+  /// so an absent token is never compared; the comparison runs whatever
+  /// the miss-window history.
+  final bool tokenCompared;
+
+  /// Whether the comparison matched - a match clears the miss window.
+  final bool tokenMatched;
+
+  /// Whether the wrong-token miss lands a stamp on settle - under the
+  /// budget every miss counts; above it nothing stamps, so the window
+  /// drains honestly and the announced wait stays true. The settle-time
+  /// re-check clears it when the live window is already full, so
+  /// concurrent misses never inflate the window past the budget.
+  bool tokenMissStamped = false;
+
+  /// Whether the request presented a wrong token above the spent budget -
+  /// settle writes the muted budget line for it. Set by the re-check
+  /// when it flips a stamp-planning record into the standing lock.
+  bool tokenBudgetSpent = false;
+
+  /// The quota limit that governed the branch (0 = the branch ran no
+  /// quota) - settle re-runs the same mutating quota call so the stamp, or
+  /// its withdrawal on a would-reject, lands as before. The re-check
+  /// clears it when the live window is already full, so a concurrent
+  /// settle never stamps over a consumed seat.
+  int quotaLimit = 0;
+
+  /// A one-time grant existed for the origin (valid or expired) - settle
+  /// consumes it either way, like the old gate. The re-check clears it
+  /// (and the acceptance it backed) when the live map no longer holds it.
+  bool grantExisted = false;
+
+  /// The discovery branch reached the ask-budget trim point - settle runs
+  /// the real trim there. The re-check refreshes it from the fresh walk.
+  bool reachedAskTrim = false;
+
+  /// The consent question fires on settle. The re-check refreshes it
+  /// from the fresh discovery walk when the grant behind the acceptance
+  /// is gone.
+  bool fireAsk = false;
+
+  /// The full report-only would-reject line - settle warns it verbatim.
+  String? reportOnlyLine;
+
+  /// The replay-cache key a verified pairing proof records on settle -
+  /// `(pairingId, stamp)` bound to the full proof; null when no verified
+  /// proof rode the request. The re-check reads this same proof-bound key
+  /// (never a fresh timestamp) and flips the record into the standing
+  /// replay refusal when a concurrent settle already recorded it.
+  final String? pairReplayKey;
+
+  /// The internal reason a pairing proof failed (malformed, unknown id,
+  /// expired, origin mismatch, signature) - it names the muted security
+  /// line on settle and never travels the wire: the wire sees
+  /// token_required alone for every invalid-proof shape. The re-check
+  /// names `reused-stamp` on the replay flip.
+  String? pairFailure;
+
+  /// The parent domain the recorded question is budgeted against (empty
+  /// when no parent budget is armed or no question fires) - settle stamps
+  /// the same parent the projection decided with, whatever the policy does
+  /// between the projection and the settle. The re-check refreshes it
+  /// from the fresh discovery walk.
+  String askParent = '';
+
+  /// One-shot guard: a record settles once.
+  bool settled = false;
+}
+
+/// The after-the-token-layer projection - verdict plus the branch effect
+/// flags, mirroring the acceptance order branch by branch.
+class _BeyondOutcome {
+  IntakeRejection? rejection;
+  IntakeAdmissionPath? accepted;
+  int quotaLimit = 0;
+  bool grantExisted = false;
+  bool reachedAskTrim = false;
+  bool fireAsk = false;
+  String? reportOnlyLine;
+
+  /// The parent domain the recorded question was budgeted against (empty
+  /// when no parent budget is armed or no question fires) - settle stamps
+  /// the same parent the projection decided with.
+  String askParent = '';
 }
 
 /// Optional protection for the local command intake - host-configured.
@@ -130,14 +632,17 @@ class IntakeRejection {
 /// - Discovery (onUnknownOrigin): a new origin is put to the host exactly
 /// once - always allow, allow once, or deny - so the list grows on
 /// knowledge, not guessing.
-/// - The token layer: an X-Portal-Token header matching a shared secret - an
+/// - The token layer: an X-Bridge-Token header matching a shared secret - an
 /// integrated client proves itself with it and crosses without browser
 /// headers (server-side integrations, or when origins multiply).
 ///
 /// The remembered state is bounded: discovery decisions kept for the
-/// session are capped at 1,000 (oldest evicted), one-time grants at 64,
-/// consent questions open at once at 3, and new questions at 10 per
-/// 10 minutes.
+/// session are capped at 1,000 (at the cap the oldest remembered denial
+/// is evicted before any always-allow; a cap with no denial evicts the
+/// oldest entry), one-time grants at 64, consent questions open at once
+/// at 3, and new questions at 10 per 10 minutes - with an optional
+/// per-parent budget ([OriginPolicy.askFiresPerParentPerWindow]) beside
+/// that global ceiling.
 class IntakeProtection {
   /// [nowMs] is an injectable test clock (lock, grant, and quota windows);
   /// the default is an internal monotonic clock owned by the object.
@@ -163,7 +668,30 @@ class IntakeProtection {
 
   /// Called after every rejection so the counter refreshes live in the UI -
   /// with no subscriber (the protection object also runs inside the intake with no UI).
+  ///
+  /// Kept for hosts until the planned removal: the admission record is the
+  /// single rejection surface, and the counter remains readable on its own.
+  @Deprecated(
+    'Refresh your UI from the admission records you settle - a record '
+    'whose rejection field is non-null is a rejection - and route '
+    'rejections decided outside the protection through '
+    'IntakeAdmission.noteAuthorityReject; or read the rejectedCount '
+    'getter (removal planned in 0.3.0)',
+  )
   void Function()? onRejected;
+
+  /// Fired exactly once when a consent question window ends - the answer
+  /// arrived (applied or not), the host's future threw, or the ask timeout
+  /// closed it - with the normalized origin the question was asked with.
+  /// The host dialog closes on this instead of racing [OriginPolicy.askTimeout]
+  /// with its own timer. `onUnknownOrigin`'s signature is untouched: this
+  /// is a separate seam. A question the question budget suppressed never
+  /// opened, so it never signals; a callback that throws before the window
+  /// opens never opened one either; and `dispose()` closes the remaining
+  /// windows silently (the host tearing the object down already knows).
+  /// A throwing callback is contained with one telemetry warning and never
+  /// breaks the answer, error, or timeout path closing the window.
+  void Function(String origin)? onQuestionClosed;
 
   /// Discovery decisions kept for the session (always-allow / deny) - the
   /// host may persist them across sessions if it wants.
@@ -214,37 +742,90 @@ class IntakeProtection {
   static const _askBudgetWindowMs = 600_000;
   final Queue<int> _askFireStamps = Queue<int>();
 
+  /// Per-parent stamps of the same fires - the parent question budget when
+  /// the policy arms one. Every queue is born from a real fire, and the
+  /// global ceiling bounds fires at 10 per window, so the map itself is
+  /// bounded by that ceiling and its idle queues leave on the same trim
+  /// pass the global stamps take.
+  final Map<String, Queue<int>> _parentAskFires = <String, Queue<int>>{};
+
   /// Cap on discovery decisions kept in the session (without one they grow unbounded).
   static const _maxConsents = 1000;
   final Queue<String> _consentOrder = ListQueue<String>();
 
   /// Persist a discovery decision (always-allow and deny) within the map cap -
   /// used alike by the awaiter and the standalone listener of a late reply.
+  /// At the cap the oldest remembered DENIAL leaves before any always-allow:
+  /// a denial is the cheaper loss (the origin is merely asked again), while
+  /// an always-allow is the user's standing approval a flood of denied
+  /// origins must not wash out. Only a cap holding no denial at all falls
+  /// back to the oldest entry whatever its kind.
   void _rememberConsent(String key, OriginConsent decision) {
     if (decision == OriginConsent.allowOnce) return;
     if (!_consents.containsKey(key)) {
       _consentOrder.addLast(key);
       if (_consentOrder.length > _maxConsents) {
-        _consents.remove(_consentOrder.removeFirst());
+        String? evict;
+        for (final candidate in _consentOrder) {
+          if (_consents[candidate] == OriginConsent.reject) {
+            evict = candidate;
+            break;
+          }
+        }
+        evict ??= _consentOrder.first;
+        _consents.remove(evict);
+        _consentOrder.remove(evict);
       }
     }
     _consents[key] = decision;
   }
 
-  /// Token-guessing lockout - the window is per-origin for web requests (a
-  /// guessing origin locks only itself: a collective web window let any
-  /// visited site lock the bridge for the legitimate origin), one shared
-  /// window for originless requests (local integrations), and idle windows
-  /// swept once a second exactly like the origin quota windows below.
+  /// Token-guessing budget windows - per-origin for web requests (a
+  /// guessing origin spends only its own budget), one shared window for
+  /// originless requests (local integrations), and idle windows swept once
+  /// a second exactly like the origin quota windows below.
   final Map<String, Queue<int>> _tokenMissWindows = <String, Queue<int>>{};
   final Queue<String> _tokenMissOrder = ListQueue<String>();
   int _nextTokenSweepMs = 0;
-  static const _tokenLockThreshold = 5;
-  static const _tokenLockWindowMs = 60_000;
 
-  /// The length floor a configured portal token must meet (UTF-8 bytes):
+  /// The wrong-guess budget, in wrong token attempts per budget window:
+  /// a sender that spends it - an origin its five attempts, or the shared
+  /// originless window - gets `429 token_locked` for further wrong tokens
+  /// until the window drains, while the correct token is compared and
+  /// accepted whatever the failure history. The window is a signal about
+  /// wrong guesses (a counter, a muted security line, a refusal for wrong
+  /// guesses above the budget), never a refusal of the verified token.
+  /// Internal constants with their unit written here - no public option.
+  static const _tokenGuessBudget = 5;
+
+  /// The budget window length in milliseconds - the unit of
+  /// [_tokenGuessBudget] is wrong attempts per this window.
+  static const _tokenBudgetWindowMs = 60_000;
+
+  /// The length floor a configured bridge token must meet (UTF-8 bytes):
   /// update() refuses anything shorter - see the guard there.
   static const _minTokenBytes = 32;
+
+  /// The character-diversity floor a configured token must meet: below it
+  /// (fewer than 8 distinct characters — a repeated-character token is
+  /// guessable at a glance) update() refuses at set time. The floor sits
+  /// far below what a random 64-hex generator produces (the symbols are 16
+  /// and 64 draws practically never fall below 15 distinct), so generated
+  /// tokens never trip it. Internal constant - no public option. The check
+  /// lives in update() alone: a legitimately saved state keeps loading at
+  /// startup with a rotation warning (see updateFromSaved).
+  static const _minTokenDistinctChars = 8;
+
+  /// The `X-Bridge-Token` header length cap the intake enforces on the
+  /// wire, in UTF-8 bytes: the same number the server's token-length gate
+  /// refuses with `400 token_too_long` before any comparison. update()
+  /// refuses a configured token over this ceiling with the same number,
+  /// so a correct token that every request would reject at the gate can
+  /// never sit configured silently - the constant-time comparison would
+  /// never see it. One constant, both sides of the wire. The value is
+  /// internal, the name public, so a host configuring tokens can read the
+  /// ceiling it must stay under.
+  static const maxBridgeTokenHeaderBytes = 1024;
   final Queue<int> _anonTokenMisses = Queue<int>();
 
   /// Origin quota windows: stamps trimmed from the front of a queue, and the
@@ -267,6 +848,685 @@ class IntakeProtection {
   /// candidate, so the stamp the request is about to record always lands
   /// in a live window and the token lockout still forms under the flood.
   static const _maxOriginWindows = 10000;
+
+  // ══ طبقة الاقتران — الحالة والسقوف مكتوبة في تقرير التصميم قبل الكود ══
+
+  /// Cap on live pairing sessions (a session = one displayed code): a
+  /// host shows one at a time; eight bounds the broadcast abuse and the
+  /// memory with it. The ninth insert evicts the oldest-inserted session,
+  /// and expired ones are swept on every insert and every read.
+  static const _maxPairingSessions = 8;
+
+  /// The life of one pairing session (and its code), in milliseconds -
+  /// short by design: the user reads the code from the host screen now.
+  static const _pairingTtlMs = 120_000;
+
+  /// The wrong-code guess budget, in wrong code attempts per pairing
+  /// session (the unit is written here): every wrong attempt is charged to
+  /// every live session - a guess could have been aimed at any of them -
+  /// so once a session has absorbed the budget, further attempts against
+  /// it answer `429 pair_budget_exceeded` with the session's honest
+  /// remainder. Per-session, never per-origin: on loopback the address is
+  /// one, and a per-origin split would hand a multi-page attacker one
+  /// fresh budget per forged origin. Above the budget the code is not
+  /// compared at all - the budget decides first, so the answer never
+  /// tells how close a guess was.
+  static const _pairGuessBudget = 5;
+
+  /// Cap on paired-origin records (one binding per paired token): expired
+  /// records are swept on insert; a 65th insert into a full house evicts
+  /// the oldest-inserted LIVE record - fail-closed: the evicted page's
+  /// signatures stop verifying and it re-pairs. The ceiling is the worst
+  /// case for memory, never the flood.
+  static const _maxPairedOrigins = 64;
+
+  /// The life of a paired token, in milliseconds - 24 hours: long enough
+  /// for a workday, bounded so no secret lives forever in page code. The
+  /// host revokes or rotates earlier at will; after expiry the page
+  /// re-pairs.
+  static const _pairedTokenTtlMs = 86_400_000;
+
+  /// The sessions map - insertion order IS the eviction queue (a
+  /// LinkedHashMap assigns to an existing key without moving it).
+  final Map<String, _PairingSession> _pairingSessions =
+      <String, _PairingSession>{};
+
+  /// The paired records keyed by sha256(token) hex - the raw token bytes
+  /// never become a lookup key.
+  final Map<String, _PairedRecord> _pairedRecords = <String, _PairedRecord>{};
+
+  /// The pairing-id index: derived id -> record (its ceiling is the
+  /// records cap by construction).
+  final Map<String, _PairedRecord> _pairingIdIndex = <String, _PairedRecord>{};
+
+  /// Whether the pairing layer is armed: the host turns it on once
+  /// through [enablePairing], which is also where the callbacks arrive.
+  bool _pairingArmed = false;
+
+  /// Whether the pairing layer is armed right now.
+  bool get pairingEnabled => _pairingArmed;
+
+  /// Fired once per successful pairing with the bound origin.
+  void Function(PairingInfo info)? onPaired;
+
+  /// Save hook (brought in [enablePairing]): the host persists the paired
+  /// token for its own storage - the package writes no file and never
+  /// waits on the hook; a throwing hook is contained and said, never
+  /// allowed to break the wire.
+  Future<void> Function(String origin, String token, int lifetimeMs)?
+  onPairedSave;
+
+  /// Save hook (brought in [enablePairing]): the host drops its persisted
+  /// copy when a binding is revoked (explicitly or by rotation).
+  void Function(String origin)? onPairedRevoke;
+
+  /// Save hook (brought in [enablePairing]): the host persists a discovery
+  /// decision (allowAlways or reject) the moment it is remembered.
+  void Function(String origin, OriginConsent consent)? onConsentSave;
+
+  /// Arms the pairing layer: `POST /pair` starts answering on the server,
+  /// bound tokens start counting, and the host's callbacks take their
+  /// seats. Calling it again re-arms with the new callbacks (the state
+  /// maps survive); [disablePairing] closes the route and drops the
+  /// bindings.
+  void enablePairing({
+    void Function(PairingInfo info)? onPaired,
+    Future<void> Function(String origin, String token, int lifetimeMs)?
+    onPairedSave,
+    void Function(String origin)? onPairedRevoke,
+    void Function(String origin, OriginConsent consent)? onConsentSave,
+  }) {
+    _pairingArmed = true;
+    this.onPaired = onPaired;
+    this.onPairedSave = onPairedSave;
+    this.onPairedRevoke = onPairedRevoke;
+    this.onConsentSave = onConsentSave;
+  }
+
+  /// Disarms the pairing layer and drops every binding: pages paired so
+  /// far must pair again. The route stops answering; the wire contracts
+  /// of everything else are untouched.
+  void disablePairing() {
+    _pairingArmed = false;
+    onPaired = null;
+    onPairedSave = null;
+    onPairedRevoke = null;
+    onConsentSave = null;
+    _pairingSessions.clear();
+    _pairedRecords.clear();
+    _pairingIdIndex.clear();
+  }
+
+  /// Creates a new one-time code for the host to display. No origin
+  /// involved here - the qualification gate lives in [pair], where the
+  /// page's origin arrives. After [dispose] it throws [StateError]: the
+  /// admission path refuses with `protection_disposed`, and an entrance
+  /// that still minted codes against a disposed object would read as a
+  /// working gate.
+  PairingOffer startPairing() {
+    if (_disposed) {
+      throw StateError('the protection object is disposed - create a new one');
+    }
+    if (!_pairingArmed) {
+      throw StateError('pairing is not enabled - call enablePairing first');
+    }
+    _sweepPairingSessions();
+    final rnd = Random.secure();
+    final code = rnd.nextInt(1_000_000).toString().padLeft(6, '0');
+    // الطرد عند السقف: الأقدم إدراجاً يخرج (الخريطة نفسها الطابور)
+    while (_pairingSessions.length >= _maxPairingSessions) {
+      _pairingSessions.remove(_pairingSessions.keys.first);
+    }
+    _pairingSessions[code] = _PairingSession(code, _now + _pairingTtlMs);
+    return PairingOffer(code: code, expiresInSeconds: _pairingTtlMs ~/ 1000);
+  }
+
+  /// The pairing gate: the page's origin must qualify under the current
+  /// policy (one qualification source - the same list / allow-all /
+  /// remembered consent the admission paths read), then the code decides.
+  /// Every wrong attempt is charged to every live session; the code is
+  /// one-time; the issued token is bound to this origin, expires in 24
+  /// hours, and is revocable and rotatable by the host. Rejections here
+  /// count and log through the same throttled path as every other
+  /// rejection - denial is never silent. After [dispose] it throws
+  /// [StateError] - a disposed object judges no codes, matching the
+  /// admission path's `protection_disposed` refusal.
+  PairingOutcome pair({String? origin, required String code}) {
+    if (_disposed) {
+      throw StateError('the protection object is disposed - create a new one');
+    }
+    if (!_pairingArmed) {
+      throw StateError('pairing is not enabled - call enablePairing first');
+    }
+    final key = origin == null ? '' : normalize(origin);
+    // بوابة التأهيل أولاً: غير المؤهل يُجاب برمز الأصل ولا يحرق الرمز
+    // ولا ميزانية الجلسة — مصدر تأهيل واحد لا اثنان
+    if (!_pairingQualified(origin)) {
+      _noteAuthority('pairing refused: origin_not_listed', origin);
+      return const PairingOutcome.rejected(
+        IntakeRejection(
+          403,
+          'origin_not_listed',
+          'Origin is not on the allowed list',
+        ),
+      );
+    }
+    // مقارنة الرمز سادة المقارنة الزمنية-الثابتة: الميزانية لكل جلسة هي
+    // الحارس (خمس محاولات فأقل فضاء الرمز)، ومقارنة الزمن-الثابت هنا
+    // كانت ستلوث عدّاد مقارنات التوكن بشاهد قبوله. البحث يشمل الجلسة
+    // المنتهية بعد — رمز معروف انتهى عمره يُجاب برمز الانتهاء لا برمز
+    // المجهول، ثم تموت الجلسة هنا
+    _PairingSession? matched;
+    for (final session in _pairingSessions.values) {
+      if (session.code == code) {
+        matched = session;
+        break;
+      }
+    }
+    if (matched != null && _now > matched.expiresAtMs) {
+      _pairingSessions.remove(matched.code);
+      _noteAuthority('pairing refused: pair_code_expired', origin);
+      return const PairingOutcome.rejected(
+        IntakeRejection(
+          403,
+          'pair_code_expired',
+          'This pairing code has expired — ask the host for a new one',
+        ),
+      );
+    }
+    if (matched == null) {
+      // ما لا يطابق حيّاً: الكنس أولا فيخرج الموتى قبل التسعير
+      _sweepPairingSessions();
+      // محاولة خاطئة تُحسب على كل جلسة حية — كان يمكن أن تستهدف أيّها.
+      // الحكم قبل التسعير: المنفق هو من بلغ الميزانية قبل هذه المحاولة،
+      // فالمحاولات الخمس كلها تُجاب invalid والسادسة وحدها 429
+      var allSpent = _pairingSessions.isNotEmpty;
+      for (final session in _pairingSessions.values) {
+        if (session.wrongAttempts < _pairGuessBudget) allSpent = false;
+      }
+      var longestRemainderMs = 0;
+      for (final session in _pairingSessions.values) {
+        session.wrongAttempts++;
+        final remainder = session.expiresAtMs - _now;
+        if (remainder > longestRemainderMs) longestRemainderMs = remainder;
+      }
+      if (allSpent) {
+        _noteAuthority(
+          'pairing refused: pair_budget_exceeded '
+          '($_pairGuessBudget wrong code attempts per pairing session)',
+          origin,
+        );
+        return PairingOutcome.rejected(
+          IntakeRejection(
+            429,
+            'pair_budget_exceeded',
+            'Too many wrong pairing codes — retry after a short wait',
+            retryAfterMs: longestRemainderMs < 1000 ? 1000 : longestRemainderMs,
+          ),
+        );
+      }
+      _noteAuthority('pairing refused: pair_code_invalid', origin);
+      return const PairingOutcome.rejected(
+        IntakeRejection(
+          403,
+          'pair_code_invalid',
+          'Unknown or already-used pairing code',
+        ),
+      );
+    }
+    // الميزانية تحسم قبل أي مقارنة إضافية: فوقها الجواب لا يكشف قرب
+    // المحاولة من الهدف
+    if (matched.wrongAttempts >= _pairGuessBudget) {
+      final remainder = matched.expiresAtMs - _now;
+      _noteAuthority(
+        'pairing refused: pair_budget_exceeded '
+        '($_pairGuessBudget wrong code attempts per pairing session)',
+        origin,
+      );
+      return PairingOutcome.rejected(
+        IntakeRejection(
+          429,
+          'pair_budget_exceeded',
+          'Too many wrong pairing codes — retry after a short wait',
+          retryAfterMs: remainder < 1000 ? 1000 : remainder,
+        ),
+      );
+    }
+    // النجاح: الجلسة تموت بالاستهلاك (الرمز لمرة واحدة)، والتوكن المربوط
+    // يولد من مولده المستقل — لا اشتقاق من المفتاح المشترك إطلاقاً
+    _pairingSessions.remove(matched.code);
+    final token = generateBridgeToken();
+    final digest = hexEncode(sha256(utf8.encode(token)));
+    final id = digest.substring(0, 16);
+    final existing = _pairingIdIndex[id];
+    if (existing != null && existing.digest != digest) {
+      // التصادم عملياً مستحيل (64 مدخلاً على فضاء 64 بتاً) — لكن الفشل
+      // الصاخب أفضل من حفظ ربط غامض
+      telemetry?.error(
+        'pairing id collision on issue - refusing this pairing loudly',
+        category: BridgeCategory.security,
+      );
+      return const PairingOutcome.rejected(
+        IntakeRejection(
+          403,
+          'pair_code_invalid',
+          'Unknown or already-used pairing code',
+        ),
+      );
+    }
+    _insertPairedRecord(
+      _PairedRecord(
+        origin: key,
+        token: token,
+        digest: digest,
+        issuedAtMs: _now,
+        expiresAtMs: _now + _pairedTokenTtlMs,
+      ),
+    );
+    onPaired?.call(
+      PairingInfo(
+        origin: key,
+        pairingId: id,
+        expiresInSeconds: _pairedTokenTtlMs ~/ 1000,
+      ),
+    );
+    _containHook(() {
+      final hook = onPairedSave;
+      if (hook == null) return null;
+      return Future<void>.sync(() => hook(key, token, _pairedTokenTtlMs));
+    }, origin: key);
+    return PairingOutcome.paired(
+      token: token,
+      pairingId: id,
+      expiresInSeconds: _pairedTokenTtlMs ~/ 1000,
+    );
+  }
+
+  /// Revokes every binding of one origin at once: its signatures stop
+  /// verifying in the very next admission, and the revoke hook carries the
+  /// origin to the host's storage.
+  void revokePairedOrigin(String origin) {
+    final key = normalize(origin);
+    final dead = _pairedRecords.keys
+        .where((digest) => _pairedRecords[digest]!.origin == key)
+        .toList();
+    for (final digest in dead) {
+      final record = _pairedRecords.remove(digest);
+      if (record != null) _pairingIdIndex.remove(record.pairingId);
+    }
+    if (dead.isNotEmpty) {
+      telemetry?.warn(
+        'paired origin revoked: every binding of this origin is dead '
+        '— its page must pair again',
+        category: BridgeCategory.security,
+      );
+      _containHook(() {
+        onPairedRevoke?.call(key);
+        return null;
+      }, origin: key);
+    }
+  }
+
+  /// Rotation = revoke + a fresh offer: the host displays the new code,
+  /// the page pairs again, the old bindings stay dead.
+  PairingOffer rotatePairedOrigin(String origin) {
+    revokePairedOrigin(origin);
+    return startPairing();
+  }
+
+  /// Re-arms a persisted binding after a host restart: same token, same
+  /// derived pairing id, whatever lifetime the host's own timestamps say
+  /// is left - bounded by the exported paired-token age: a remainder
+  /// above 24 hours throws [ArgumentError], because a pairing never
+  /// outlives the token age it was issued with and a bigger remainder is
+  /// a corrupt host timestamp, not a binding. Returns the derived pairing
+  /// id (identical to the one the original pairing issued - it is a
+  /// function of the token alone). A non-positive remainder, a remainder
+  /// past the token age, or a token below the length floor throws
+  /// [ArgumentError] - a loud setup error, never a silent entry.
+  String restorePairedOrigin({
+    required String origin,
+    required String token,
+    required int remainingMs,
+  }) {
+    if (!_pairingArmed) {
+      throw StateError('pairing is not enabled - call enablePairing first');
+    }
+    final bytes = utf8.encode(token.trim()).length;
+    if (remainingMs <= 0) {
+      throw ArgumentError.value(
+        remainingMs,
+        'remainingMs',
+        'must be positive - an expired binding is not restored',
+      );
+    }
+    if (remainingMs > _pairedTokenTtlMs) {
+      throw ArgumentError.value(
+        remainingMs,
+        'remainingMs',
+        'exceeds the paired-token age ($_pairedTokenTtlMs ms - 24 hours): '
+            'a pairing never outlives the token age it was issued with, '
+            'so a bigger remainder is a corrupt host timestamp',
+      );
+    }
+    if (bytes < _minTokenBytes) {
+      throw ArgumentError.value(
+        bytes,
+        'token',
+        'is $bytes bytes (UTF-8) - a paired token needs at least '
+            '$_minTokenBytes bytes, as generateBridgeToken produces',
+      );
+    }
+    // شكل التوكن المقترن واحد: 64-hex كنتاج المولد — التوقيع يفتح مفتاحه
+    // من الhex فالشكل الآخر يرفض وقت الاستعادة صاخبا لا صمتا عند أول توقيع
+    if (token.trim().length != 64 || !_pairTokenHex.hasMatch(token.trim())) {
+      throw ArgumentError.value(
+        token.trim().length,
+        'token',
+        'is not the 64-hex shape generateBridgeToken produces - a paired '
+            'token signs with its 32 raw bytes decoded from that hex',
+      );
+    }
+    final digest = hexEncode(sha256(utf8.encode(token.trim())));
+    final id = digest.substring(0, 16);
+    final existing = _pairingIdIndex[id];
+    if (existing != null && existing.digest != digest) {
+      throw ArgumentError.value(
+        id,
+        'pairingId',
+        'collides with a different binding - refusing loudly instead of '
+            'storing an ambiguous record',
+      );
+    }
+    _insertPairedRecord(
+      _PairedRecord(
+        origin: normalize(origin),
+        token: token.trim(),
+        digest: digest,
+        issuedAtMs: _now,
+        expiresAtMs: _now + remainingMs,
+      ),
+    );
+    return id;
+  }
+
+  /// Re-arms a persisted discovery decision after a host restart: only the
+  /// two persistent values are accepted - `allowOnce` is a 30-second
+  /// grant by contract and [ArgumentError] says so, `dismissed` stores
+  /// nothing by contract.
+  void restoreSavedConsent(String origin, OriginConsent consent) {
+    if (consent == OriginConsent.allowOnce) {
+      throw ArgumentError.value(
+        consent,
+        'consent',
+        'allowOnce is a short one-request grant, never a saved decision - '
+            'the origin will be asked again',
+      );
+    }
+    if (consent == OriginConsent.dismissed) {
+      throw ArgumentError.value(
+        consent,
+        'consent',
+        'dismissed closes a question with no decision - nothing is stored',
+      );
+    }
+    _rememberConsent(normalize(origin), consent);
+  }
+
+  /// How many paired-origin records are armed right now - the read-only
+  /// counter a settings UI reads; the wire behavior never does.
+  int get pairedCount => _pairedRecords.length;
+
+  /// Does this origin qualify for pairing under the current policy? The
+  /// same qualification the admission paths grant: the list (with its
+  /// remembered always-allow consents), the bridge's own served origin
+  /// while the local-pages option is armed, or the hardened allow-all
+  /// shape. Discovery is deliberately absent: an origin whose question is
+  /// still open has not been vouched for yet.
+  bool _pairingQualified(String? origin) {
+    if (origin == null || origin.isEmpty || origin == 'null') return false;
+    if (_isListed(origin)) return true;
+    if (_isBridgeServed(origin)) return true;
+    if (!_policy.allowAllHardened) return false;
+    final uri = Uri.tryParse(origin);
+    if (uri == null || uri.host.isEmpty) return false;
+    if (uri.scheme == 'https') return true;
+    final host = uri.host.toLowerCase();
+    return _policy.allowLocalHttp &&
+        uri.scheme == 'http' &&
+        (host == 'localhost' || host == '127.0.0.1' || host == '::1');
+  }
+
+  /// Sweeps expired sessions - on every insert and every read.
+  void _sweepPairingSessions() {
+    final now = _now;
+    _pairingSessions.removeWhere((_, session) => now > session.expiresAtMs);
+  }
+
+  /// The pairing idle-sweep gate - at most once a second, driven by the
+  /// same window passes that sweep the quota and token-miss maps below:
+  /// dead pairing state must not wait for the next pairing insert to die.
+  int _nextPairingSweepMs = 0;
+
+  /// Sweeps the expired pairing state - the live sessions, the paired
+  /// records (their id-index mirror leaves with them), and the replay
+  /// cache - at most once a second, called from the periodic window
+  /// sweeps. Wire-invisible for records and replay (the expiry and
+  /// freshness checks precede any effect their presence could have); the
+  /// one documented wire difference is a session swept by idleness: its
+  /// code answers `pair_code_invalid` instead of `pair_code_expired`
+  /// (both 403, both telling the page to pair again). A live record is
+  /// never a candidate - only `now > expiresAtMs` leaves.
+  void _sweepPairingIdle(int now) {
+    if (_pairingSessions.isEmpty &&
+        _pairedRecords.isEmpty &&
+        _pairReplay.isEmpty) {
+      return;
+    }
+    if (now < _nextPairingSweepMs) return;
+    _nextPairingSweepMs = now + 1000;
+    _sweepPairingSessions();
+    _pairedRecords.removeWhere((_, record) {
+      if (now > record.expiresAtMs) {
+        if (_pairingIdIndex[record.pairingId] == record) {
+          _pairingIdIndex.remove(record.pairingId);
+        }
+        return true;
+      }
+      return false;
+    });
+    _pairReplay.removeWhere((_, seen) => now - seen > _pairReplayWindowMs);
+  }
+
+  /// Inserts a paired record under the cap: expired records swept first,
+  /// then the oldest-inserted live record is evicted fail-closed.
+  void _insertPairedRecord(_PairedRecord record) {
+    final now = _now;
+    _pairedRecords.removeWhere(
+      (digest, existing) => now > existing.expiresAtMs,
+    );
+    final previous = _pairedRecords[record.digest];
+    if (previous != null) {
+      // إعادة ربط نفس التوكن (استعادة أو إعادة اقتران) تستبدل السجل لا
+      // تكرره، وفهرس المعرف يبقى على الأحدث
+      _pairingIdIndex.remove(previous.pairingId);
+      _pairedRecords.remove(record.digest);
+    }
+    while (_pairedRecords.length >= _maxPairedOrigins) {
+      final oldestDigest = _pairedRecords.keys.first;
+      final oldest = _pairedRecords.remove(oldestDigest);
+      if (oldest != null && _pairingIdIndex[oldest.pairingId] == oldest) {
+        _pairingIdIndex.remove(oldest.pairingId);
+      }
+    }
+    _pairedRecords[record.digest] = record;
+    _pairingIdIndex[record.pairingId] = record;
+  }
+
+  /// Runs a save hook with its failures contained: the hook belongs to the
+  /// host's storage, so its crash is said once (telemetry) and never
+  /// allowed to break the pairing or revocation path. A null return means
+  /// the body ran synchronously.
+  void _containHook(Future<void>? Function() body, {required String origin}) {
+    Future<void>? work;
+    try {
+      work = body();
+    } catch (e) {
+      telemetry?.warn(
+        'pairing save hook threw synchronously (origin='
+        '${originForLog(origin) ?? 'none'}) — the binding is live in '
+        'memory; the host storage missed it',
+        category: BridgeCategory.security,
+      );
+      return;
+    }
+    if (work != null) {
+      unawaited(
+        work.catchError((Object e) {
+          telemetry?.warn(
+            'pairing save hook failed (origin='
+            '${originForLog(origin) ?? 'none'}) — the binding is live in '
+            'memory; the host storage missed it: $e',
+            category: BridgeCategory.security,
+          );
+        }),
+      );
+    }
+  }
+
+  // ══ إثبات الحيازة — التحقق من توقيع HMAC وباب الإعادة ══
+
+  /// The accepted stamp-skew window in milliseconds: the page stamps its
+  /// signature with its own wall clock, and the server accepts what stays
+  /// within one minute of its own. Both clocks read the same machine on
+  /// loopback, so honest skew is microseconds - the window exists for
+  /// embedded clocks, not for patience.
+  static const _pairStampSkewMs = 60_000;
+
+  /// The replay-cache window in milliseconds - double the skew window with
+  /// margin: a stamp either sits inside the skew (the cache is young
+  /// enough to remember it) or outside it (freshness refuses before the
+  /// cache matters). No third case.
+  static const _pairReplayWindowMs = 120_000;
+
+  /// Cap on replay-cache entries (pairingId + stamp + signature keys): the
+  /// oldest inserted is evicted past it. The cache ceiling is the worst
+  /// case for memory, never an open replay door - a stamp outside the skew
+  /// window refuses whatever its cache fate was.
+  static const _maxPairReplayEntries = 4096;
+
+  /// The replay cache: `(pairingId.stamp.signature)` -> first-seen
+  /// reading. The projection reads it (a pure read); settle records into
+  /// it.
+  final Map<String, int> _pairReplay = <String, int>{};
+  int _nextPairReplaySweepMs = 0;
+
+  /// The proof's wire shape: `pairingId(16 hex).stamp(digits).signature
+  /// (64 hex)` - everything else is malformed before any lookup.
+  static final RegExp _pairProofShape = RegExp(
+    r'^([0-9a-f]{16})\.([0-9]{1,16})\.([0-9a-f]{64})$',
+  );
+
+  /// The paired token's only shape: 64 hex characters, exactly what
+  /// generateBridgeToken produces - the proof's key decodes from it.
+  static final RegExp _pairTokenHex = RegExp(r'^[0-9a-f]{64}$');
+
+  /// The outcome of one proof verification - pure, no state touched. The
+  /// internal failure name travels the muted security line only.
+  _PairCheck _verifyPairProof(
+    String? raw,
+    String? origin,
+    String key,
+    String method,
+    String path,
+    String correlationId,
+    int now,
+  ) {
+    if (raw == null || raw.isEmpty) {
+      return _PairCheck.bad('missing');
+    }
+    final match = _pairProofShape.firstMatch(raw);
+    if (match == null) {
+      return _PairCheck.bad('malformed');
+    }
+    final id = match.group(1)!;
+    final stampText = match.group(2)!;
+    final sigHex = match.group(3)!;
+    final record = _pairingIdIndex[id];
+    if (record == null) {
+      return _PairCheck.bad('unknown-id');
+    }
+    if (now > record.expiresAtMs) {
+      return _PairCheck.bad('token-expired');
+    }
+    if (key.isEmpty || record.origin != key) {
+      return _PairCheck.bad('origin-mismatch');
+    }
+    // نافذة الانحراف على ساعة الجدار: الطابع epoch من ساعة الصفحة
+    final stampMs = int.parse(stampText);
+    final serverEpoch = DateTime.now().millisecondsSinceEpoch;
+    if ((serverEpoch - stampMs).abs() > _pairStampSkewMs) {
+      return _PairCheck.bad('stale', replay: true);
+    }
+    // مفتاح الإعادة بالإثبات الكامل (المعرف والطابع والتوقيع): إعادة
+    // الإثبات الأسير بعينها تصل بمفتاحها نفسه فتُرفض، بينما أمران
+    // مشروعان وقّعتهما الصفحة داخل الملي ثانية نفسها (طابع واحد
+    // وتوقيعان مختلفان لاختلاف معرف الارتباط) لا يتصادمان — الطابع
+    // وحده كان يرفض الثاني زورا بإعادة لم تحدث
+    final replayKey = '$id.$stampText.$sigHex';
+    if (_pairReplay.containsKey(replayKey)) {
+      return _PairCheck.bad('reused-stamp', replay: true);
+    }
+    // الرسالة الموقعة بنص التصميم الحرفي — الطريقة والمسار ومعرف
+    // الارتباط تربط التوقيع بطلبه فيلا نقل توقيع صالح إلى أمر آخر
+    final canonical =
+        'v1\n$id\n$stampText\n${method.toUpperCase()}\n$path\n'
+        '$correlationId';
+    // المفتاح بايتات التوكن الخام الاثنتان والثلاثون (hex التوكن مفكوكاً)
+    // لا بايتات سلسلته السداسية — نفس ما يبنيه كود الصفحة في WebCrypto،
+    // والتوكن المقترن دائما 64-hex (مولدها أو استعادتها بنفس الشكل).
+    // اكتشف شاهد المتصفح الحقيقي هذا الالتباس: جانبا Dart اتفقا على
+    // utf8(السلسلة) بينما بنى المتصفح على النثر الحاكم فرفض
+    final keyBytes = _hexToBytes(record.token);
+    final expected = hmacSha256(
+      keyBytes ?? utf8.encode(record.token),
+      utf8.encode(canonical),
+    );
+    final supplied = _hexToBytes(sigHex);
+    if (supplied == null || !fixedTimeEquals(expected, supplied)) {
+      return _PairCheck.bad('signature');
+    }
+    return _PairCheck.ok(record, replayKey);
+  }
+
+  /// Sixty-four hex characters to 32 bytes - null on anything else (the
+  /// proof's regex has already guaranteed hex, so this is belt and
+  /// suspenders).
+  static List<int>? _hexToBytes(String hex) {
+    if (hex.length != 64) return null;
+    final out = List<int>.filled(32, 0);
+    for (var i = 0; i < 32; i++) {
+      final high = int.tryParse(hex[i * 2], radix: 16);
+      final low = int.tryParse(hex[i * 2 + 1], radix: 16);
+      if (high == null || low == null) return null;
+      out[i] = high * 16 + low;
+    }
+    return out;
+  }
+
+  /// Records a verified proof's stamp on settle - the projection's pure
+  /// read never writes here. Expired entries sweep at most once a second,
+  /// and the cap evicts the oldest-inserted key.
+  void _recordPairReplay(String replayKey, int now) {
+    if (_pairReplay.isNotEmpty && now >= _nextPairReplaySweepMs) {
+      _nextPairReplaySweepMs = now + 1000;
+      _pairReplay.removeWhere((_, seen) => now - seen > _pairReplayWindowMs);
+    }
+    while (_pairReplay.length >= _maxPairReplayEntries) {
+      _pairReplay.remove(_pairReplay.keys.first);
+    }
+    _pairReplay[replayKey] = now;
+  }
 
   /// The policy currently in force - replaced live by [update] and
   /// [updateFromSaved]. Read it to mirror settings UI state; admission
@@ -299,8 +1559,18 @@ class IntakeProtection {
   /// sessions is the host's business).
   ///
   /// Throws [ArgumentError] for a configured token below the length floor
-  /// of 32 UTF-8 bytes BEFORE anything is applied, so a host that catches
-  /// the error keeps its previous protection state untouched.
+  /// of 32 UTF-8 bytes, or over the [maxBridgeTokenHeaderBytes] header cap
+  /// the intake enforces on the wire (such a token would be refused by
+  /// every request before any comparison - a correct secret that can
+  /// never match must not sit configured silently), BEFORE anything is
+  /// applied, so a host that catches the error keeps its previous
+  /// protection state untouched.
+  /// The character-diversity floor refuses the same way, for a token the
+  /// call passes explicitly; a token INHERITED from the current state
+  /// (a policy-only call) is exempt - it is the same legitimately saved
+  /// state [updateFromSaved] loads with a rotation warning, and refusing
+  /// it here would lock a host out of every policy update until it
+  /// rotated the key.
   /// The error names the offending length, never the token itself.
   /// The policy's numbers are validated the same way and at the same point:
   /// a negative quota and a non-positive ask timeout are configuration
@@ -320,9 +1590,46 @@ class IntakeProtection {
       throw ArgumentError.value(
         tokenBytes,
         'token',
-        'is $tokenBytes bytes (UTF-8) - a portal token needs at least '
-            '$_minTokenBytes random bytes (generatePortalToken produces one); '
+        'is $tokenBytes bytes (UTF-8) - a bridge token needs at least '
+            '$_minTokenBytes random bytes (generateBridgeToken produces one); '
             'a short token is guessable from a web page',
+      );
+    }
+    // سقف ترويسة التوكن: توكن مضبوط فوق ما تقبله الترويسة على السلك
+    // يستحيل مطابقته — كل طلب حامل له يُرد token_too_long قبل أي
+    // مقارنة فيظل سرٌّ صحيح منضبطاً بلا أثر (نقض عملي لـ«الصحيح لا
+    // يُرفض أبداً»). الرفض وقت الإعداد بلا أثر جانبي كأخويه، والرسالة
+    // تسمي البديل
+    if (tokenBytes > maxBridgeTokenHeaderBytes) {
+      throw ArgumentError.value(
+        tokenBytes,
+        'token',
+        'is $tokenBytes bytes (UTF-8) - over the '
+            '$maxBridgeTokenHeaderBytes-byte header cap the intake '
+            'enforces on the wire (token_too_long), so no request could '
+            'ever match it; use generateBridgeToken, whose tokens sit '
+            'far below the cap',
+      );
+    }
+    // فحص التنوع فوق أرضية الطول: توكن متطابق المحارف أو فقيرها قابل
+    // للتخمين بنظرة واحدة — الرفض وقت الإعداد بلا أثر جانبي كأخيه
+    // الطولي، والرمي قبل _apply فمن يلتقطه يبقى على حالته السابقة.
+    // والأرضية على المُمرَّر صراحةً حصراً: التوكن الموروث (استدعاء بلا
+    // token على كائن أُقلع من حالة محفوظة شرعية) هو ذاته ما أعفاها
+    // updateFromSaved من الرفض عند الإقلاع بتحذير تدوير — ورفُضه هنا
+    // كان يحبس المضيف خارج كل تحديث سياسة حتى يدوّر المفتاح، فينقلب
+    // الإعفاء المعلن فخاً صامتاً
+    final distinctChars = effectiveToken.trim().runes.toSet().length;
+    if (token != null &&
+        tokenBytes >= _minTokenBytes &&
+        distinctChars < _minTokenDistinctChars) {
+      throw ArgumentError.value(
+        distinctChars,
+        'token',
+        'has only $distinctChars distinct characters - a token this '
+            'repetitive is guessable at a glance; use generateBridgeToken '
+            'or another random source (the floor is '
+            '$_minTokenDistinctChars distinct characters)',
       );
     }
     _apply(policy: effectivePolicy, token: effectiveToken);
@@ -335,7 +1642,7 @@ class IntakeProtection {
     if (configuredBytes > _tokenComparePad) {
       // تحذير إعداد لا رفض طلب — لا يلوث عدّاد المرفوضات
       telemetry?.warn(
-        'portal token length $tokenBytes bytes (UTF-8) exceeds the '
+        'bridge token length $tokenBytes bytes (UTF-8) exceeds the '
         'comparison pad ($_tokenComparePad) — the whole token is still '
         'compared, but every extra byte widens the fixed-time loop; '
         'prefer a token of at most $_tokenComparePad bytes',
@@ -361,7 +1668,7 @@ class IntakeProtection {
   /// counts first), so it answers 429 to every request, and a zero ask
   /// timeout closes every consent question before any answer can arrive.
   /// Zero [OriginPolicy.listedPerOriginPerMinute] stays legal - it is the
-  /// documented "listed origins are unquotaed" default.
+  /// documented explicit "listed origins are unquotaed" opt-out.
   void _validatePolicyNumbers(OriginPolicy policy) {
     if (policy.perOriginPerMinute <= 0) {
       throw ArgumentError.value(
@@ -383,6 +1690,13 @@ class IntakeProtection {
         'policy.askTimeout',
         'must be positive - a value at or below zero closes every consent '
             'question instantly',
+      );
+    }
+    if (policy.askFiresPerParentPerWindow < 0) {
+      throw ArgumentError.value(
+        policy.askFiresPerParentPerWindow,
+        'policy.askFiresPerParentPerWindow',
+        'must not be negative - 0 keeps the global question ceiling alone',
       );
     }
   }
@@ -491,7 +1805,22 @@ class IntakeProtection {
   /// counter - capability is never widened silently. [savedMode] is a closed
   /// list no matter what the host passes: any value outside {null,
   /// 'allowlist', 'token'} lands on the closed default, never on a wider
-  /// mode read back out of storage.
+  /// mode read back out of storage. A saved token that cannot legally sit
+  /// configured - below the length floor or over the
+  /// [maxBridgeTokenHeaderBytes] header cap - boots the token layer inert
+  /// (fail-closed) with one security warning naming the rotation path;
+  /// updateFromSaved never throws.
+  ///
+  /// Kept for hosts until the planned removal: the policy objects are the
+  /// single shape now, and [update] validates at set time instead of
+  /// landing a corrupt saved value on a silent fallback.
+  @Deprecated(
+    'Build the OriginPolicy from your own saved settings and call '
+    'update(policy: ..., token: ...) - it validates the token and the '
+    'policy numbers at set time and names the mistake, instead of '
+    'landing an unknown savedMode string on the closed default in '
+    'silence (removal planned in 0.3.0)',
+  )
   void updateFromSaved({
     required String? savedMode,
     List<String> allowedOrigins = const [],
@@ -516,10 +1845,43 @@ class IntakeProtection {
     if (savedTokenBytes > 0 && savedTokenBytes < _minTokenBytes) {
       effectiveToken = '';
       telemetry?.warn(
-        'saved portal token is short ($savedTokenBytes bytes) and stays '
+        'saved bridge token is short ($savedTokenBytes bytes) and stays '
         'inert - the token layer is off until a fresh '
         '$_minTokenBytes-byte token is saved (fail-closed, not a crash '
         'loop)',
+        category: BridgeCategory.security,
+      );
+    } else if (savedTokenBytes > maxBridgeTokenHeaderBytes) {
+      // التوكن المحفوظ فوق سقف الترويسة كالقصير المحفوظ عينه: لا يطابقه
+      // طلب أصلاً (بوابة token_too_long تردّه على السلك قبل أي مقارنة)
+      // فتفعيله سرٌّ صحيح بلا أثر، والرمي هنا يقلب الأمر فخ قفل — كل
+      // update(policy:) بعده يرفض التوكن الموروث فوق السقف فيُحبس المضيف
+      // خارج كل تحديث حتى يدوّر المفتاح. تُطفأ الطبقة (فشل مغلق) بتحذير
+      // واحد عال الصوت يسمي الطول والسقف ومسار التدوير، ولا رمي أبداً
+      effectiveToken = '';
+      telemetry?.warn(
+        'saved bridge token is $savedTokenBytes bytes (UTF-8) - over the '
+        '$maxBridgeTokenHeaderBytes-byte header cap the intake enforces '
+        'on the wire (token_too_long), so no request could ever match '
+        'it; the token layer is off until a fresh token is saved with '
+        'generateBridgeToken (fail-closed, not a crash loop)',
+        category: BridgeCategory.security,
+      );
+    }
+    // فحص التنوع لا يرفض الحالة المحفوظة الشرعية عند الترقية: توكن محفوظ
+    // طويل لكن فقير التنوع يبقى عاملاً كما أُقلع من الإصدار السابق —
+    // تحذير واحد يسمي الضعف والتدوير، والرفض وقت الضبط في update() حصراً.
+    // والتوكن المُطفأ طولاً (قصير أو فوق السقف) لا يعود من فحص التنوع:
+    // عيبه الطولي قال تحذيره فلا تحذير ثانٍ يوهم بعيبين
+    final savedDistinct = effectiveToken.trim().runes.toSet().length;
+    if (savedTokenBytes >= _minTokenBytes &&
+        savedTokenBytes <= maxBridgeTokenHeaderBytes &&
+        savedDistinct < _minTokenDistinctChars) {
+      telemetry?.warn(
+        'saved bridge token has only $savedDistinct distinct characters '
+        '(the floor is $_minTokenDistinctChars) and stays active - rotate '
+        'it with generateBridgeToken; update() now refuses such tokens at '
+        'set time',
         category: BridgeCategory.security,
       );
     }
@@ -581,6 +1943,18 @@ class IntakeProtection {
 
   /// Is the origin listed? - full match, bare host, or `*.domain` pattern
   /// (the pattern covers subdomains only; the root must be listed explicitly).
+  ///
+  /// Port semantics are per entry form, and this is the settled contract:
+  /// a full origin entry matches the exact origin string the browser
+  /// sends - scheme, host, and port exactly as written, so an entry for a
+  /// non-default port must carry that port and an entry without a port
+  /// matches only the portless form (a browser omits default ports, so
+  /// `https://host` is what `https://host:443` pages send). A bare-host
+  /// entry matches the host name alone on ANY port, and a `*.domain`
+  /// entry matches its subdomains on ANY port: the page's port is chosen
+  /// by whoever serves the page, so the bare and wildcard forms gate on
+  /// the domain while the full form pins the origin. All forms keep the
+  /// scheme rule below (https, or local http under allowLocalHttp).
   bool _isListed(String? origin) {
     if (origin == null || origin.isEmpty) return false;
     if (_consents[normalize(origin)] == OriginConsent.allowAlways) {
@@ -614,9 +1988,42 @@ class IntakeProtection {
     return false;
   }
 
+  // ══ أصل الجسر المُخدم ذاته — باب الصفحة المحلية ══
+
+  /// The origins the bridge itself serves pages from (the local-pages
+  /// option), armed by the server at bind time from the port it actually
+  /// bound. Empty while the option is off - every read below stays
+  /// letter-identical to previous releases.
+  final Set<String> _bridgeServedOrigins = <String>{};
+
+  /// Arms (or re-arms) the origins the bridge itself serves pages from.
+  /// An exact, port-bound set: the values are normalized and compared
+  /// whole, so a different port is a different origin and never matches.
+  /// The server re-arms at every bind, so a restart on a new port replaces
+  /// the set; [disarmBridgeServedOrigins] restores the off state.
+  void armBridgeServedOrigins(Set<String> origins) {
+    _bridgeServedOrigins
+      ..clear()
+      ..addAll(origins.map(normalize));
+  }
+
+  /// Clears the served-origin set - the option's off state.
+  void disarmBridgeServedOrigins() => _bridgeServedOrigins.clear();
+
+  /// Is this origin the bridge's own served origin? An exact normalized
+  /// match against the armed set - another loopback port is a foreign
+  /// origin and stays exactly where the policy keeps it.
+  bool _isBridgeServed(String? origin) =>
+      origin != null && _bridgeServedOrigins.contains(normalize(origin));
+
   /// Lower-cases an Origin value and strips trailing slashes - the canonical
-  /// key for every per-origin window in this object. Used by this package's
-  /// server, not a stable host-facing interface.
+  /// key for every per-origin window in this object.
+  /// Kept for hosts until the planned removal: the admission record carries
+  /// the canonical form as [IntakeAdmission.normalizedOrigin].
+  @Deprecated(
+    'Read IntakeAdmission.normalizedOrigin from the record built by '
+    'admit() (removal planned in 0.3.0)',
+  )
   static String normalize(String origin) =>
       _stripTrailingSlashes(origin.toLowerCase());
 
@@ -627,65 +2034,946 @@ class IntakeProtection {
     return uri != null && uri.scheme == 'https' && uri.host.isNotEmpty;
   }
 
-  /// Accept the request - null means allowed; [IntakeRejection] carries status,
-  /// code, and message. Order: the token layer passes on its own, then the list,
-  /// then allow-all with its hardening, then discovery or an explicit reject.
-  /// Used by this package's server, not a stable host-facing interface.
+  /// Accept the request - null means allowed; [IntakeRejection] carries
+  /// status, code, and message. Order: the token layer passes on its own,
+  /// then the list, then allow-all with its hardening, then discovery or an
+  /// explicit reject.
+  /// Kept for hosts until the planned removal: the package's own server
+  /// builds the admission record with [admit] instead.
+  @Deprecated(
+    'Build the one admission record with admit() and read its rejection '
+    'field - the record carries the verdict, the CORS echo, and the '
+    'verbose-error decision together (removal planned in 0.3.0)',
+  )
   Future<IntakeRejection?> check({
     String? origin,
-    String? portalToken,
+    String? bridgeToken,
     String? fetchMode,
     String? fetchDest,
   }) async {
-    // الخمول التام قرارا نهائيا على كل المسارات (لا نصف حي): المدرج
-    // والتوكن والحصص كلها تتوقف — برمز مستقل لا يوهم المطور بأن
-    // إدراج الأصل ينفع
-    if (_disposed) {
-      return const IntakeRejection(
-        503,
-        'protection_disposed',
-        'The protection object is disposed — create a new one',
+    // الإهمال يبقى بالسلوك القديم حرفاً: الإسقاط ثم إرضاء أثره فوراً في
+    // هذا الموضع (طوابع النوافذ واستهلاك المنحة والسؤال وتحذيرات
+    // المراقبة) — بلا عدّ: عدّ الرفض كان من خارج check (noteRejection من
+    // الخادم) وما زال
+    final decision = _project(origin, bridgeToken, fetchMode, fetchDest);
+    _applyDecision(decision, origin);
+    return decision.rejection;
+  }
+
+  /// The one admission step: projects the whole request decision against
+  /// the live policy state in a single pass and returns the record. No
+  /// state is touched here - the projection is a pure read; the caller
+  /// lands the effects with [IntakeAdmission.settle] at its acceptance
+  /// gate, so requests answered from the record alone (a preflight, a
+  /// shape-gate reject, a busy reject) leave no stamps, no grants, no
+  /// questions, and no rejection lines behind.
+  ///
+  /// The token is compared at most once per request: the comparison happens
+  /// here and its outcome is recorded, so the verbose-error decision reads
+  /// the record instead of ever comparing again.
+  ///
+  /// [pairingProof] is the raw `X-Bridge-Pairing` value - verified here
+  /// under [OriginPolicy.requireOriginWithToken] against the armed pairing
+  /// records, its replay recorded on settle. [method] and [correlationId]
+  /// bind the proof to the request it signs (the canonical string carries
+  /// both), so a captured proof cannot be transplanted to another verb,
+  /// path, or story.
+  ///
+  /// [originTrust] is the grade the origin fact carries
+  /// ([OriginTrustLevel]). The default keeps the HTTP contract byte-for-byte
+  /// (every value this step has ever seen rode a browser header); the
+  /// non-HTTP channels pass their own grade explicitly. A null origin
+  /// always records [OriginTrustLevel.none] whatever was passed, and an
+  /// origin value with the [OriginTrustLevel.none] grade throws
+  /// [ArgumentError] - an origin no one vouches for is never slipped in
+  /// wearing a trust grade it does not hold.
+  Future<IntakeAdmission> admit({
+    String? origin,
+    String? bridgeToken,
+    String? fetchMode,
+    String? fetchDest,
+    String path = '/',
+    String? pairingProof,
+    String method = 'POST',
+    String correlationId = '',
+    bool demandCredential = false,
+    bool deferCredential = false,
+    OriginTrustLevel originTrust = OriginTrustLevel.browserHeader,
+  }) async {
+    if (origin != null && originTrust == OriginTrustLevel.none) {
+      throw ArgumentError.value(
+        origin,
+        'originTrust',
+        'is OriginTrustLevel.none while an origin value is present - an '
+            'origin no one vouches for is never admitted as a browser '
+            'header; pass platformVerified (or browserHeader) or omit the '
+            'origin and cross by the token alone',
       );
     }
-    // (0) طبقة التوكن المستقلة. القفل يفحص قبل المقارنة: المقفول يُرد
-    // 429 حتى بتوكن صحيح — فلا مقارنة صحيحة تسقط حاجز القفل عن التخمين
-    // — والصحيح من نافذة غير مقفولة يصفرها ويعبر فورا.
-    if (_token.isNotEmpty && portalToken != null && portalToken.isNotEmpty) {
-      final now = _now;
-      final window = _tokenMissWindow(origin, now);
-      if (window.length >= _tokenLockThreshold) {
-        // القفل يمنع المقارنة وحدها: التوكن يُعامل كأنه غائب وتُقيَّم
-        // سياسة الأصول — البوابة المدرجة تعبر رغم إخفاقات مهاجم مجهول،
-        // ومن ترفضه السياسة أصلًا يُرَدّ 429 (لا 403: كان يحاول التخمين).
-        // والسؤال الجديد لا يُفتح من وراء القفل: mayAskConsent=false
-        // يمنع فروع الاكتشاف من إطلاق نافذة موافقة لطلب مقفل
-        final verdict = await _checkBeyondToken(
+    // بلا أصل فلا درجة ترويسة مهما ادّعى النداء — الدرجة تُدوَّن من
+    // الحقيقة لا من الادعاء
+    final effectiveTrust = origin == null ? OriginTrustLevel.none : originTrust;
+    final decision = _project(
+      origin,
+      bridgeToken,
+      fetchMode,
+      fetchDest,
+      pairingProof: pairingProof,
+      method: method,
+      path: path,
+      correlationId: correlationId,
+      demandCredential: demandCredential,
+      deferCredential: deferCredential,
+      originTrust: effectiveTrust,
+    );
+    return IntakeAdmission._live(
+      recordedRejection: decision.rejection,
+      recordedPath: decision.acceptedPath,
+      echoesCors: decision.echoesCors,
+      verboseErrors: decision.verboseErrors,
+      origin: origin,
+      normalizedOrigin: origin == null ? null : normalize(origin),
+      path: path,
+      originTrust: effectiveTrust,
+      decision: decision,
+      owner: this,
+    );
+  }
+
+  /// The pure decision projection behind both [admit] and the deprecated
+  /// [check]: one pass over the token layer and the acceptance order,
+  /// recording the verdict and the branch effects - and never mutating a
+  /// thing.
+  _AdmissionDecision _project(
+    String? origin,
+    String? bridgeToken,
+    String? fetchMode,
+    String? fetchDest, {
+    String? pairingProof,
+    String method = 'POST',
+    String path = '/',
+    String correlationId = '',
+    bool demandCredential = false,
+    bool deferCredential = false,
+    OriginTrustLevel originTrust = OriginTrustLevel.browserHeader,
+  }) {
+    final now = _now;
+    final key = origin == null ? '' : normalize(origin);
+    // درجة المنصة الموثقة: القناة لا تحمل ترويسات Sec-Fetch أصلا —
+    // فالغياب فيها صادق وليس تخريا، وبوابات غياب الترويسات لا تنفعل
+    // عنها. كل بوابات الأصل والشكل والحصص باقية كما هي على الدرجتين
+    final platformVerifiedOrigin =
+        originTrust == OriginTrustLevel.platformVerified && origin != null;
+
+    // الخمول التام قرارا نهائيا على كل المسارات (لا نصف حي): المدرج
+    // والتوكن والحصص كلها تتوقف — برمز مستقل لا يوهم المطور بأن
+    // إدراج الأصل ينفع، وبلا أثر تسوية إطلاقاً
+    if (_disposed) {
+      return _AdmissionDecision(
+        rejection: const IntakeRejection(
+          503,
+          'protection_disposed',
+          'The protection object is disposed — create a new one',
+        ),
+        acceptedPath: null,
+        echoesCors: false,
+        verboseErrors: false,
+        stampMs: now,
+        key: key,
+        fetchMode: fetchMode,
+        fetchDest: fetchDest,
+        sendMethod: method,
+        platformVerified: platformVerifiedOrigin,
+        mayAskConsent: true,
+      );
+    }
+
+    var tokenAttempt = false;
+    var tokenCompared = false;
+    var tokenMatched = false;
+    // ميزانية التخمين منفقة لهذا الطلب؟ تُحسب داخل طبقة التوكن وتُقرأ
+    // عند بناء القرار (طابع الإخفاق وسطر الميزانية لا يُطلعان إلا بها)
+    var budgetSpent = false;
+    // قيمة may-ask التي حُكم بها هذا الطلب — مشيُ إعادة الفحص يقرأها
+    // كما قُرئت فلا يفتح التوأم سؤالاً منع حكمُ دخله سؤاله
+    var askConsent = true;
+    IntakeRejection? rejection;
+    IntakeAdmissionPath? accepted;
+    final beyond = _BeyondOutcome();
+    // إثبات الاقتران: يتحقق كسولا في موضع القرار حصرا (أصل مؤهل تحت
+    // الشرط) — بلا شرط ولا إثبات لا تحقق ولا أثر إطلاقا
+    _PairCheck? proofCheck;
+    var pairReplayKey = '';
+    var pairFailure = '';
+    _PairCheck resolveProof() {
+      final existing = proofCheck;
+      if (existing != null) return existing;
+      final checked = _verifyPairProof(
+        pairingProof,
+        origin,
+        key,
+        method,
+        path,
+        correlationId,
+        now,
+      );
+      proofCheck = checked;
+      return checked;
+    }
+
+    // (0) طبقة التوكن المستقلة — قراءة خالصة. المقارنة تجري دائماً: لا
+    // نافذة إخفاق تسقط المقارنة عن التوكن الصحيح فالصحيح يُقارن ويُقبل
+    // أياً كان تاريخ الإخفاقات، والمطابقة تصفر النافذة عند التسوية.
+    // وفوق ميزانية التخمين الخاطئ لا يفتح الخاطئ سؤال موافقة ولا يُقبل
+    // إلا بتأهل الأصل — وإلا فرفض الانتظار الصادق بلا طابع جديد فالنافذة
+    // تنكسر بصدق. والمقارنة مرة واحدة على الأكثر لكل طلب هنا
+    // شرط الأصل والتوكن معاً: المطفأ سلكُ اليوم حرفاً؛ والمفعّل يقلب
+    // معنى الطبقتين على الأصل المؤهل — المؤهل يطلب إثباتاً، والتوكن
+    // وحده لا يفتح أصلاً غير مؤهل (رفض الأصل يجيب فلا يتكلم التوكن)
+    final requireBoth = _policy.requireOriginWithToken;
+    if (_token.isNotEmpty && bridgeToken != null && bridgeToken.isNotEmpty) {
+      tokenAttempt = true;
+      tokenCompared = true;
+      tokenMatched = _fixedTimeEquals(bridgeToken, _token);
+      final liveMisses = _liveTokenMisses(origin, now);
+      budgetSpent = liveMisses.length >= _tokenGuessBudget;
+      if (tokenMatched && !requireBoth) {
+        // الصحيح يعبر فورا على كل نافذة — مسار القبول: التوكن وحده على
+        // أصل غير مؤهل، والطبقتان معاً على أصل مدرج
+        accepted = _isListed(origin)
+            ? IntakeAdmissionPath.originWithToken
+            : IntakeAdmissionPath.token;
+      } else {
+        askConsent = !budgetSpent;
+        _projectBeyondToken(
           origin,
+          key,
           fetchMode,
           fetchDest,
-          mayAskConsent: false,
+          now: now,
+          mayAskConsent: askConsent,
+          out: beyond,
+          method: method,
+          platformVerifiedOrigin: platformVerifiedOrigin,
         );
-        if (verdict == null) return null;
-        // الرأس الصادق: بقايا نافذة القفل نفسها — أقدم إخفاق يخرج من
-        // النافذة فتنكسر، فانتظار الذكرى لا «ثانيتين» لكل الرفوض
-        final lockWaitMs = window.isEmpty
-            ? _tokenLockWindowMs
-            : _tokenLockWindowMs - (now - window.first) + 500;
+        if (!tokenMatched &&
+            budgetSpent &&
+            (beyond.accepted == null || requireBoth)) {
+          // الرأس الصادق: بقايا نافذة الميزانية نفسها — أقدم إخفاق يخرج
+          // منها فتنكسر، فانتظار الذكرى لا «ثانيتين» لكل الرفوض. وتحت
+          // الشرط الجديد يبقى الخاطئ فوق الميزانية محروساً بالإشارة نفسها
+          // أياً كان حكم الأصل — نافذة الإخفاق إشارة عن التوكن المشترك
+          final budgetWaitMs = liveMisses.isEmpty
+              ? _tokenBudgetWindowMs
+              : _tokenBudgetWindowMs - (now - liveMisses.first) + 500;
+          rejection = IntakeRejection(
+            429,
+            'token_locked',
+            'Too many failed token attempts — retry after a short wait',
+            retryAfterMs: budgetWaitMs < 1000 ? 1000 : budgetWaitMs,
+          );
+        } else if ((demandCredential || (requireBoth && !deferCredential)) &&
+            beyond.accepted != null) {
+          if (tokenMatched) {
+            // المؤهل والإثبات المشترك معاً — مسار الطبقتين كما كان
+            accepted = IntakeAdmissionPath.originWithToken;
+          } else if (_pairingArmed) {
+            // التوكن المشترك خاطئ لكن إثبات اقتران قد يكون حاضرا: يتحقق
+            // كسولا هنا — الصحيح يقبل بالمسار المقترن، والإعادة يعود
+            // برمزها الصادق، وسواهما token_required بلا تفصيل يوهم
+            final proof = resolveProof();
+            if (proof.ok) {
+              accepted = IntakeAdmissionPath.originWithPairedToken;
+              pairReplayKey = proof.replayKey!;
+            } else if (proof.replay) {
+              rejection = const IntakeRejection(
+                403,
+                'pair_signature_replay',
+                'This pairing signature was already used — sign a fresh '
+                    'request',
+              );
+              accepted = null;
+              pairFailure = proof.fail!;
+              beyond
+                ..grantExisted = false
+                ..quotaLimit = 0
+                ..fireAsk = false
+                ..reportOnlyLine = null;
+            } else {
+              rejection = const IntakeRejection(
+                403,
+                'token_required',
+                'A token is required for this origin',
+              );
+              accepted = null;
+              pairFailure = proof.fail!;
+              beyond
+                ..grantExisted = false
+                ..quotaLimit = 0
+                ..fireAsk = false
+                ..reportOnlyLine = null;
+            }
+          } else {
+            // المؤهل بلا إثبات صالح: token_required — والقراءة خالصة
+            // تبقى خالصة: أثر الاستحقاق المسجل (المنحة وطابع الحصة
+            // والسؤال وسطر المراقبة) يُصفَّر فلا تسوية تترك شيئاً لطلب
+            // لم يثبت نفسه
+            rejection = const IntakeRejection(
+              403,
+              'token_required',
+              'A token is required for this origin',
+            );
+            accepted = null;
+            beyond
+              ..grantExisted = false
+              ..quotaLimit = 0
+              ..fireAsk = false
+              ..reportOnlyLine = null;
+          }
+        } else {
+          rejection = beyond.rejection;
+          accepted = beyond.accepted;
+        }
+      }
+    } else {
+      _projectBeyondToken(
+        origin,
+        key,
+        fetchMode,
+        fetchDest,
+        now: now,
+        mayAskConsent: true,
+        out: beyond,
+        method: method,
+        platformVerifiedOrigin: platformVerifiedOrigin,
+      );
+      if ((demandCredential || (requireBoth && !deferCredential)) &&
+          beyond.accepted != null &&
+          _pairingArmed) {
+        // المؤهل بلا ترويسة توكن مشترك: إثبات الاقتران هو الباب —
+        // بنفس الأحكام الثلاثة للفرع أعلاه حرفا
+        final proof = resolveProof();
+        if (proof.ok) {
+          accepted = IntakeAdmissionPath.originWithPairedToken;
+          pairReplayKey = proof.replayKey!;
+        } else if (proof.replay) {
+          rejection = const IntakeRejection(
+            403,
+            'pair_signature_replay',
+            'This pairing signature was already used — sign a fresh request',
+          );
+          accepted = null;
+          pairFailure = proof.fail!;
+          beyond
+            ..grantExisted = false
+            ..quotaLimit = 0
+            ..fireAsk = false
+            ..reportOnlyLine = null;
+        } else {
+          rejection = const IntakeRejection(
+            403,
+            'token_required',
+            'A token is required for this origin',
+          );
+          accepted = null;
+          pairFailure = proof.fail!;
+          beyond
+            ..grantExisted = false
+            ..quotaLimit = 0
+            ..fireAsk = false
+            ..reportOnlyLine = null;
+        }
+      } else if ((demandCredential || (requireBoth && !deferCredential)) &&
+          beyond.accepted != null) {
+        // المؤهل بلا إثبات أصلاً والاقتران غير مسلح: نفس الرمز وبنفس
+        // صفاء القراءة — لا أثر استحقاق يسجل لطلب بلا إثبات. ودليل
+        // المسار الجديد (demandCredential) حكمُه نفسه: قناة تطلب
+        // اعتماداً موثقاً لا تقبل أصلاً مؤهلاً بلا اعتماد
+        rejection = const IntakeRejection(
+          403,
+          'token_required',
+          'A token is required for this origin',
+        );
+        accepted = null;
+        beyond
+          ..grantExisted = false
+          ..quotaLimit = 0
+          ..fireAsk = false
+          ..reportOnlyLine = null;
+      } else {
+        rejection = beyond.rejection;
+        accepted = beyond.accepted;
+      }
+    }
+
+    // صدى CORS: قرار الأهلية الخام نفسه الذي كانت echoesCorsFor تجيبه —
+    // هو ما تقرأه بوابات الخادم (الترويسة المكررة والانشغال والمهيّأ)
+    // والقبول معاً؛ وقاعدة طيّ الرفض (السؤال دائماً ورفض الانتظار
+    // للمؤهل) قاعدة قراءة ردٍّ تطبقها بوابة القبول من حقول السجل نفسها
+    final echoesCors = echoesCorsFor(origin);
+    // نص الخطأ: توكن صحيح (على نافذة غير مقفولة — المقارنة أعلاه دليلها)
+    // أو أصل مدرج أو أصل الجسر المُخدم؛ يُقرأ من السجل فلا مقارنة ثانية
+    // على أي طلب
+    final verboseErrors =
+        (tokenCompared && tokenMatched) ||
+        _isListed(origin) ||
+        _isBridgeServed(origin);
+
+    return _AdmissionDecision(
+      rejection: rejection,
+      acceptedPath: accepted,
+      echoesCors: echoesCors,
+      verboseErrors: verboseErrors,
+      stampMs: now,
+      key: key,
+      fetchMode: fetchMode,
+      fetchDest: fetchDest,
+      sendMethod: method,
+      platformVerified: platformVerifiedOrigin,
+      mayAskConsent: askConsent,
+      tokenAttempt: tokenAttempt,
+      tokenCompared: tokenCompared,
+      tokenMatched: tokenMatched,
+      // طابع الإخفاق تحت الميزانية حصراً: فوقها لا طابع جديد فالنافذة
+      // تنكسر بالانتظار المعلن لا بفيض يعيد تسليحها
+      tokenMissStamped: tokenCompared && !tokenMatched && !budgetSpent,
+      tokenBudgetSpent: tokenCompared && !tokenMatched && budgetSpent,
+      quotaLimit: beyond.quotaLimit,
+      grantExisted: beyond.grantExisted,
+      reachedAskTrim: beyond.reachedAskTrim,
+      fireAsk: beyond.fireAsk,
+      reportOnlyLine: beyond.reportOnlyLine,
+      pairReplayKey: pairReplayKey.isEmpty ? null : pairReplayKey,
+      pairFailure: pairFailure.isEmpty ? null : pairFailure,
+      askParent: beyond.askParent,
+    );
+  }
+
+  /// The shared browser-shaped gates of the explicit origins - a listed
+  /// origin, and the bridge's own served origin: the fetch-metadata
+  /// mismatch check and the listed quota branch, recorded into [out].
+  /// Returns the rejection when one fires; a pass returns null.
+  IntakeRejection? _explicitOriginGates(
+    String? origin,
+    String? fetchMode,
+    String? fetchDest,
+    String method,
+    int now,
+    _BeyondOutcome out,
+  ) {
+    // ترويستا الإرسال الحاضرتان بقيمة مخالفة نموذج مخفي أو إرسال
+    // no-cors بلا شك — تُرفضان هنا كالمسارين المتصفحيين
+    final mismatched = _fetchMetadataMismatch(fetchMode, fetchDest, method);
+    if (mismatched != null) return mismatched;
+    final listedQuota = _policy.listedPerOriginPerMinute;
+    if (listedQuota > 0) {
+      final wouldReject = _quotaWouldReject(origin, listedQuota, now);
+      out.quotaLimit = listedQuota;
+      if (wouldReject != null) {
+        if (!_policy.reportOnly) return wouldReject;
+        out.reportOnlyLine =
+            'intake report-only: would reject — ${wouldReject.code}: '
+            '${wouldReject.message} (origin=${originForLog(origin) ?? 'none'})';
+      }
+    }
+    return null;
+  }
+
+  /// The after-the-token-layer projection into [out] - the acceptance order
+  /// branch by branch (list, the bridge's own served origin, allow-all,
+  /// discovery, explicit reject) with every state effect recorded, none
+  /// performed.
+  void _projectBeyondToken(
+    String? origin,
+    String key,
+    String? fetchMode,
+    String? fetchDest, {
+    required int now,
+    required bool mayAskConsent,
+    required _BeyondOutcome out,
+    String method = 'POST',
+    bool platformVerifiedOrigin = false,
+  }) {
+    // (1) القائمة — المخزّن دائماً (موافقة الاكتشاف المحفوظة) قبل الأنماط
+    if (_isListed(origin)) {
+      final listedViaConsent =
+          origin != null && _consents[key] == OriginConsent.allowAlways;
+      final rejected = _explicitOriginGates(
+        origin,
+        fetchMode,
+        fetchDest,
+        method,
+        now,
+        out,
+      );
+      if (rejected != null) {
+        out.rejection = rejected;
+        return;
+      }
+      out.accepted = listedViaConsent
+          ? IntakeAdmissionPath.savedConsent
+          : IntakeAdmissionPath.listed;
+      return;
+    }
+
+    // (1.5) أصل الجسر المُخدم ذاته — باب الصفحة المحلية: أصلٌ سلّحه
+    // الجسر عند الربط خياراً مسلحاً يُقبل بمساره الصريح حصراً ولا يمرّ
+    // بوضع «الكل» مهما كانت مسلحة، وبوابتا المتصفح والحصة المدرجة
+    // نفسُهما كما للمدرج
+    if (_isBridgeServed(origin)) {
+      final rejected = _explicitOriginGates(
+        origin,
+        fetchMode,
+        fetchDest,
+        method,
+        now,
+        out,
+      );
+      if (rejected != null) {
+        out.rejection = rejected;
+        return;
+      }
+      out.accepted = IntakeAdmissionPath.bridgeOrigin;
+      return;
+    }
+
+    // (2) مسار «الكل» — تحصيناته ملازمة له، والوضع المراقب يُعفّي الحصة
+    // وحدها
+    if (_policy.allowAllHardened) {
+      final blocked = _browserRequestBlocked(
+        origin,
+        fetchMode,
+        fetchDest,
+        method: method,
+        platformVerified: platformVerifiedOrigin,
+      );
+      if (blocked != null) {
+        out.rejection = blocked;
+        return;
+      }
+      out.quotaLimit = _policy.perOriginPerMinute;
+      final wouldReject = _quotaWouldReject(origin, null, now);
+      if (wouldReject != null) {
+        if (_policy.reportOnly) {
+          out.reportOnlyLine =
+              'intake report-only: would reject — ${wouldReject.code}: '
+              '${wouldReject.message} (origin=${originForLog(origin) ?? 'none'})';
+          out.accepted = IntakeAdmissionPath.allowAll;
+          return;
+        }
+        out.rejection = wouldReject;
+        return;
+      }
+      out.accepted = IntakeAdmissionPath.allowAll;
+      return;
+    }
+
+    // (3) الاكتشاف — أصل متصفحي صالح غير مدرج يسأل المضيف مرة، وتحصينات
+    // المتصفح أولا، والمنحة والسقوف بترتيبها القديم
+    if (_policy.onUnknownOrigin != null &&
+        origin != null &&
+        origin.isNotEmpty &&
+        _validBrowserOrigin(origin)) {
+      final preBlocked = _browserRequestBlocked(
+        origin,
+        fetchMode,
+        fetchDest,
+        method: method,
+        platformVerified: platformVerifiedOrigin,
+      );
+      if (preBlocked != null) {
+        out.rejection = preBlocked;
+        return;
+      }
+      final remembered = _consents[key];
+      if (remembered == OriginConsent.reject) {
+        out.rejection = const IntakeRejection(
+          403,
+          'origin_declined',
+          'The host declined this origin',
+        );
+        return;
+      }
+      // منحة سماح-مرة: طلب واحد خلال نافذتها القصيرة ثم تُستهلك —
+      // والمنتهية تُستهلك أيضاً كاليوم ثم يعبر الطلب إلى السقوف
+      final grant = _onceGrants[key];
+      if (grant != null) {
+        out.grantExisted = true;
+        if (now <= grant) {
+          out.accepted = IntakeAdmissionPath.onceGrant;
+          return;
+        }
+      }
+      if (_pendingAsks.length >= _maxPendingAsks) {
+        out.rejection = const IntakeRejection(
+          403,
+          'origin_pending',
+          'Too many consent windows are open — answer or dismiss '
+              'them, then retry',
+        );
+        return;
+      }
+      out.reachedAskTrim = true;
+      final liveFires = _liveAskFires(now);
+      if (liveFires.length >= _maxAskFiresPerWindow) {
+        final budgetWaitMs = _askBudgetWindowMs - (now - liveFires.first) + 500;
+        out.rejection = IntakeRejection(
+          403,
+          'origin_pending',
+          'Too many consent questions lately — retry after a short wait',
+          retryAfterMs: budgetWaitMs < 1000 ? 1000 : budgetWaitMs,
+        );
+        return;
+      }
+      // ميزانية الأب بجانب السقف العام: الأب هو آخر مقطعين من المضيف إن
+      // زادت مقاطعه على اثنين — فتدوير أي مستوى فوقهما يبقى تحت أب واحد
+      // — والمضيف ذو المقطعين أو العنوان أبٌ لنفسه. والمضيفات تحت لاحقة
+      // عامة متعددة المقاطع (مثل co.uk) تتشارك أباً واحداً، وهذا قائم في
+      // المستوى الأول أصلاً، ولا قائمة لواحق داخل الحزمة. التطبيع
+      // بأدوات computeAuthorities القائمة (قصّ وتصغير) وعادة Uri نفسها
+      // هنا — بلا دالة تطبيع ثالثة. ما فوق ميزانية أبه يُجاب بلا سؤال
+      // وبلا طابع على أي ميزانية: الكبح حصرٌ على الأب لا استهلاك للسقف
+      // العام
+      if (_policy.askFiresPerParentPerWindow > 0) {
+        final host = Uri.tryParse(origin)?.host.trim().toLowerCase() ?? '';
+        var parent = host;
+        if (host.isNotEmpty && !host.contains(':')) {
+          final labels = host.split('.');
+          final addressShaped = labels.every(
+            (label) => int.tryParse(label) != null,
+          );
+          if (labels.length > 2 && !addressShaped) {
+            parent = labels.sublist(labels.length - 2).join('.');
+          }
+        }
+        final parentFires = _liveParentAskFires(parent, now);
+        if (parentFires.length >= _policy.askFiresPerParentPerWindow) {
+          final parentWaitMs =
+              _askBudgetWindowMs - (now - parentFires.first) + 500;
+          // رمز الأب الخاص يوازي رمز حصة المعدل العام: كبحٌ زمني يحمل
+          // بقايا نافذته الصادقة، فلا يُلبس مع «نافذة موافقة مفتوحة»
+          // ولا مع امتلاء السقف العام — والسقفان الأخيران يبقيان رمزيهما
+          out.rejection = IntakeRejection(
+            429,
+            'origin_parent_rate_limited',
+            'Too many consent questions from this site — retry after a '
+                'short wait',
+            retryAfterMs: parentWaitMs < 1000 ? 1000 : parentWaitMs,
+          );
+          return;
+        }
+        out.askParent = parent;
+      }
+      // الطلب المقفل لا يفتح سؤال موافقة جديداً
+      if (!mayAskConsent) {
+        out.rejection = const IntakeRejection(
+          403,
+          'origin_pending',
+          'The origin is locked; no new consent question opens for it',
+        );
+        return;
+      }
+      out.fireAsk = true;
+      out.rejection = const IntakeRejection(
+        403,
+        'origin_pending',
+        'Consent requested — retry shortly after the host answers '
+            '(see Retry-After)',
+      );
+      return;
+    }
+
+    // (4) لا مدرج ولا «كل» — الرفض الصريح بلا صمت
+    if (_policy.onUnknownOrigin != null) {
+      out.rejection = const IntakeRejection(
+        403,
+        'origin_unknown',
+        'Origin is not listed and cannot be confirmed — '
+            'no discovery callback is available for non-browser requests',
+      );
+      return;
+    }
+    out.rejection = const IntakeRejection(
+      403,
+      'origin_not_listed',
+      'Origin is not on the allowed list',
+    );
+  }
+
+  /// Lands the recorded decision's state effects - the exact mutations the
+  /// old inline gate performed at this position, in the same order, driven
+  /// by the recorded branch flags against the same (un interleave-able)
+  /// state. Pure reads never reach here.
+  void _applyDecision(_AdmissionDecision d, String? origin) {
+    final now = d.stampMs;
+    if (d.tokenAttempt) {
+      // الجلب نفسه يجري إنشاء النافذة وكنسها الدوري كما في بوابة القديم،
+      // والمطابقة تصفر النافذة، والإخفاق تحت الميزانية يُختم وفوقها لا
+      // طابع جديد — والسطر الأمني المكبوح بالعدد يخرج للإخفاق فوق
+      // الميزانية من هنا حصراً (التسوية) لا من الإسقاط الخالص
+      final window = _tokenMissWindow(origin, now);
+      if (d.tokenMatched) {
+        window.clear();
+      } else if (d.tokenMissStamped) {
+        window.addLast(now);
+      }
+      if (d.tokenBudgetSpent) {
+        _warnGuessBudget(origin, window);
+      }
+    }
+    if (d.quotaLimit > 0) {
+      // الحكم المسجل هو المعتمد: هذه الدالة هنا لأثرها (الطابع أو سحبه
+      // مع التقليم والكنس الدوري) لا لحكمها
+      _originQuotaVerdict(origin, d.quotaLimit, now);
+    }
+    if (d.grantExisted) {
+      _onceGrants.remove(d.key);
+    }
+    if (d.reachedAskTrim) {
+      // تقليم ميزانية الأسئلة الجديدة — نفس المشي من الأمام بنفس الشرط
+      while (_askFireStamps.isNotEmpty &&
+          now - _askFireStamps.first > _askBudgetWindowMs) {
+        _askFireStamps.removeFirst();
+      }
+      // وميزانيات الآباء على المسار نفسه: كل طابور وُلد من إطلاق حقيقي
+      // والسقف العام يقيد الإطلاقات فالخريطة صغيرة، والخاملة تخرج هنا
+      _parentAskFires.removeWhere((_, queue) {
+        while (queue.isNotEmpty && now - queue.first > _askBudgetWindowMs) {
+          queue.removeFirst();
+        }
+        return queue.isEmpty;
+      });
+    }
+    if (d.fireAsk) {
+      _fireAsk(d.key, origin!, d.askParent);
+    }
+    final line = d.reportOnlyLine;
+    if (line != null) {
+      telemetry?.warn(line, category: BridgeCategory.security);
+    }
+  }
+
+  // إعادة فحص الوقائع المستهلكة على الحالة الحية لحظة التسوية — سجل
+  // القبول بنى حكمه قراءةً خالصة لحظة الإسقاط، وما بين الإسقاط
+  // والتسوية منفذُ القياس يملكه المضيف فقد يتأخر فيه تنفيذ الطلب
+  // فيحكم طلبان متزامنان على الحالة نفسها. الوقائع التي يستهلكها
+  // طلب واحد (منحة سماح-مرة، مفتاح إثبات الاقتران، خانة حصة الأصل،
+  // خانة ميزانية التخمين) تُعاد قراءتها هنا: ما تغير يجعل السجل
+  // رفضاً برمز الواقع القائم (لا رمز جديد) ويعيد كتابة أعلام الأثر
+  // كي لا يهبط من استحقاقٍ صُرف، وما بقي كما كان لا يلمس القرار
+  // إطلاقاً فسلوكُ الطلب المتسلسل حرفاً. وذاكرة الإعادة تُقرأ
+  // بالمفتاح المقيَّد بالإثبات الكامل كما سُجل — لا بطابع زمني جديد
+  IntakeRejection? _recheckConsumedFacts(_AdmissionDecision d, String? origin) {
+    if (_disposed) return null;
+    final now = _now;
+    // مفتاح إثبات الاقتران: القبول المقترن يبني على غيابه — إثبات
+    // متزامن سوّى قبله سجل مفتاحه فيصير قبولُنا إعادةَ إثبات، ونمط
+    // بوابة الإثبات نفسه: أثر الاستحقاق المسجل يُصفَّر
+    if (d.acceptedPath == IntakeAdmissionPath.originWithPairedToken &&
+        d.pairReplayKey != null &&
+        _pairReplay.containsKey(d.pairReplayKey)) {
+      d
+        ..grantExisted = false
+        ..quotaLimit = 0
+        ..fireAsk = false
+        ..reportOnlyLine = null
+        ..pairFailure = 'reused-stamp';
+      return const IntakeRejection(
+        403,
+        'pair_signature_replay',
+        'This pairing signature was already used — sign a fresh request',
+      );
+    }
+    // منحة سماح-مرة: القبول عليها يبني على حضورها — توأمٌ متزامن
+    // سوّى قبله صرفها فحُكمنا صار على منحة غير موجودة. الحكم سلوك
+    // الطلب نفسه على الحالة الحية: مشيُ فرع الاكتشاف من جديد قراءةً
+    // خالصة فيُنتج رمز الواقع القائم، وسؤال الموافقة إن أطلقه المشي
+    // فهو أثره؛ وإن كان الأصل مقبولاً الآن من غيرها فالقبول الأصلي باقٍ
+    if (d.acceptedPath == IntakeAdmissionPath.onceGrant) {
+      final grant = _onceGrants[d.key];
+      if (grant == null || now > grant) {
+        final fresh = _BeyondOutcome();
+        _projectBeyondToken(
+          origin,
+          d.key,
+          d.fetchMode,
+          d.fetchDest,
+          now: now,
+          mayAskConsent: d.mayAskConsent,
+          out: fresh,
+          method: d.sendMethod,
+          platformVerifiedOrigin: d.platformVerified,
+        );
+        final freshRejection = fresh.accepted == null ? fresh.rejection : null;
+        if (freshRejection != null) {
+          d
+            ..grantExisted = false
+            ..quotaLimit = 0
+            ..fireAsk = fresh.fireAsk
+            ..reachedAskTrim = fresh.reachedAskTrim
+            ..askParent = fresh.askParent
+            ..reportOnlyLine = null;
+          return freshRejection;
+        }
+      }
+    }
+    // خانة حصة الأصل: ختمُ القبول يستهلك خانة — امتلأت النافذة على
+    // توأم متزامن فإنزال الختم تجاوزٌ للحصة والقبولُ على خانية صرفت.
+    // الوضع المراقب لا يرفض أبداً فيبقى على حكمه، والرفض لا يشغل
+    // الحصة فلا ختم يهبط أصلاً
+    if (d.acceptedPath != null &&
+        d.quotaLimit > 0 &&
+        origin != null &&
+        !_policy.reportOnly) {
+      final fresh = _quotaWouldReject(origin, d.quotaLimit, now);
+      if (fresh != null) {
+        d.quotaLimit = 0;
+        return fresh;
+      }
+    }
+    // خانة ميزانية التخمين: طابعُ الإخفاق يستهلك خانة — امتلأت
+    // النافذة على توأم متزامن فالطابعُ الزائد يضخمها ويجعل انتظارها
+    // المعلن كاذباً. الحكم الحي رمزُ القفل القائم ببقايا النافذة
+    // نفسها، والطابع الزائد لا يهبط والسطر المكبوط يخرج للإخفاق
+    if (d.tokenMissStamped) {
+      final liveMisses = _liveTokenMisses(origin, now);
+      if (liveMisses.length >= _tokenGuessBudget) {
+        d
+          ..tokenMissStamped = false
+          ..tokenBudgetSpent = true;
+        final budgetWaitMs = liveMisses.isEmpty
+            ? _tokenBudgetWindowMs
+            : _tokenBudgetWindowMs - (now - liveMisses.first) + 500;
         return IntakeRejection(
           429,
           'token_locked',
           'Too many failed token attempts — retry after a short wait',
-          retryAfterMs: lockWaitMs < 1000 ? 1000 : lockWaitMs,
+          retryAfterMs: budgetWaitMs < 1000 ? 1000 : budgetWaitMs,
         );
       }
-      if (_fixedTimeEquals(portalToken, _token)) {
-        window.clear();
-        return null;
-      }
-      window.addLast(now);
     }
+    return null;
+  }
 
-    return _checkBeyondToken(origin, fetchMode, fetchDest);
+  /// The shared counter+log path: the protection's own rejections (from
+  /// [IntakeAdmission.settle]) and the host-authority ones (via
+  /// [IntakeAdmission.noteAuthorityReject]) alike.
+  void _noteAuthority(String reason, String? origin) {
+    _countRejection();
+    logRejection(reason, origin);
+  }
+
+  /// Read-only peek at the live (unexpired) stamps of [origin]'s miss
+  /// window - the same front-trim walk the mutating fetch performs, without
+  /// creating the window or touching the sweep bookkeeping.
+  List<int> _liveTokenMisses(String? origin, int now) {
+    final Queue<int>? window = origin == null
+        ? _anonTokenMisses
+        : _tokenMissWindows[normalize(origin)];
+    if (window == null) return const <int>[];
+    final live = <int>[];
+    var trimming = true;
+    for (final ts in window) {
+      if (trimming && now - ts > _tokenBudgetWindowMs) continue;
+      trimming = false;
+      live.add(ts);
+    }
+    return live;
+  }
+
+  /// The muted security line for a wrong-token request above the spent
+  /// budget: at most one line per second, and the next admitted line
+  /// carries the muted count — the flood lives in the window counter,
+  /// not in the log. The line names the live attempt count, the unit
+  /// (attempts within the last 60 seconds), and the truth that matters:
+  /// the correct token is still accepted.
+  static const _guessBudgetWarnPacingMs = 1000;
+  int _nextGuessBudgetWarnMs = 0;
+  int _suppressedGuessBudgetWarns = 0;
+
+  void _warnGuessBudget(String? origin, Queue<int> window) {
+    final now = _now;
+    if (now < _nextGuessBudgetWarnMs) {
+      _suppressedGuessBudgetWarns++;
+      return;
+    }
+    final suppressed = _suppressedGuessBudgetWarns;
+    _suppressedGuessBudgetWarns = 0;
+    _nextGuessBudgetWarnMs = now + _guessBudgetWarnPacingMs;
+    final suffix = suppressed > 0 ? ' (+$suppressed more suppressed)' : '';
+    telemetry?.warn(
+      'token guess budget spent: ${window.length} wrong token attempts '
+      'within the last 60 seconds from origin=${originForLog(origin) ?? 'none'} '
+      '— the correct token is still accepted; further wrong tokens answer '
+      '429 token_locked until the window drains$suffix',
+      category: BridgeCategory.security,
+    );
+  }
+
+  /// Read-only peek at the per-origin quota verdict: the same front-trim,
+  /// stamp, and compare the mutating quota call performs - no window
+  /// creation, no sweep, no stamp.
+  IntakeRejection? _quotaWouldReject(
+    String? origin,
+    int? limitOverride,
+    int now,
+  ) {
+    if (origin == null) return null;
+    final window = _originWindows[normalize(origin)];
+    final limit = limitOverride ?? _policy.perOriginPerMinute;
+    var live = 0;
+    int? firstLive;
+    var trimming = true;
+    if (window != null) {
+      for (final ts in window) {
+        if (trimming && now - ts > _windowMs) continue;
+        trimming = false;
+        firstLive ??= ts;
+        live++;
+      }
+    }
+    if (live + 1 > limit) {
+      // بقايا نافذة الحصة: أقدم طلب حي يخرج منها فتفرغ خانة للتابع
+      final quotaWaitMs = firstLive == null
+          ? _windowMs
+          : _windowMs - (now - firstLive) + 500;
+      return IntakeRejection(
+        429,
+        'origin_rate_limited',
+        'Rate limit exceeded for this origin — retry after a short wait',
+        retryAfterMs: quotaWaitMs < 1000 ? 1000 : quotaWaitMs,
+      );
+    }
+    return null;
+  }
+
+  /// Read-only peek at the live ask-fire stamps - the same front-trim walk
+  /// the mutating budget trim performs.
+  List<int> _liveAskFires(int now) {
+    final live = <int>[];
+    var trimming = true;
+    for (final ts in _askFireStamps) {
+      if (trimming && now - ts > _askBudgetWindowMs) continue;
+      trimming = false;
+      live.add(ts);
+    }
+    return live;
+  }
+
+  /// Read-only peek at one parent's live ask fires - the same front-trim
+  /// walk the global peek performs, with no map writes and an empty list
+  /// for a parent that never fired.
+  List<int> _liveParentAskFires(String parent, int now) {
+    final queue = _parentAskFires[parent];
+    if (queue == null) return const <int>[];
+    final live = <int>[];
+    var trimming = true;
+    for (final ts in queue) {
+      if (trimming && now - ts > _askBudgetWindowMs) continue;
+      trimming = false;
+      live.add(ts);
+    }
+    return live;
   }
 
   /// The miss window a token attempt counts against: per-origin for web
@@ -695,7 +2983,7 @@ class IntakeProtection {
   Queue<int> _tokenMissWindow(String? origin, int now) {
     if (origin == null) {
       while (_anonTokenMisses.isNotEmpty &&
-          now - _anonTokenMisses.first > _tokenLockWindowMs) {
+          now - _anonTokenMisses.first > _tokenBudgetWindowMs) {
         _anonTokenMisses.removeFirst();
       }
       return _anonTokenMisses;
@@ -719,7 +3007,7 @@ class IntakeProtection {
         _tokenMissWindows.remove(oldest);
       }
     }
-    while (window.isNotEmpty && now - window.first > _tokenLockWindowMs) {
+    while (window.isNotEmpty && now - window.first > _tokenBudgetWindowMs) {
       window.removeFirst();
     }
     // الكنس الدوري للخاملين: مرة كل ثانية كأقصى — نافذة انقضت لا تبقى
@@ -734,175 +3022,18 @@ class IntakeProtection {
         final ts = _tokenMissWindows[oldest];
         final idle =
             oldest != key &&
-            (ts == null || ts.isEmpty || now - ts.last > _tokenLockWindowMs);
+            (ts == null || ts.isEmpty || now - ts.last > _tokenBudgetWindowMs);
         if (idle) {
           _tokenMissWindows.remove(oldest);
         } else {
           _tokenMissOrder.addLast(oldest);
         }
       }
+      // والكنس نفسه يخرج حالة الاقتران الميتة: جلسات وسجلات وذاكرة
+      // إعادة — لا ينتظر الموتى إدراج اقتران تالياً ليموتوا
+      _sweepPairingIdle(now);
     }
     return window;
-  }
-
-  /// Acceptance after the token layer: the list, then allow-all with its hardening, then discovery.
-  ///
-  /// [mayAskConsent] is false behind the token lockout: a locked request
-  /// whose origin the policy does not accept is refused without opening a
-  /// new consent question - the caller answers `429 token_locked` for it.
-  Future<IntakeRejection?> _checkBeyondToken(
-    String? origin,
-    String? fetchMode,
-    String? fetchDest, {
-    bool mayAskConsent = true,
-  }) async {
-    // (1) القائمة — المدرج يعبر (ومنه من حُفظ سماحه الدائم بالاكتشاف)،
-    // ومع حصة اختيارية إن فعّلها المضيف: المدرج المخترق وحده من
-    // يملأ المقاعد بلا حد، فالحصة هنا تحصر ضرره بنافذته ولا تمس
-    // بقية المدرجين
-    if (_isListed(origin)) {
-      // ترويستا الإرسال الحاضرتان بقيمة مخالفة نموذج مخفي أو إرسال
-      // no-cors بلا شك — تُرفضان هنا كالمسارين المتصفحيين
-      // (نموذج text/plain يمر بوابة الأنواع المسموحة فيغلقه هذا
-      // الفحص). غيابهما يبقى ممراً هنا: العملاء غير المتصفحات المدرجة
-      // لا يرسلونهما
-      final mismatched = _fetchMetadataMismatch(fetchMode, fetchDest);
-      if (mismatched != null) return mismatched;
-      final listedQuota = _policy.listedPerOriginPerMinute;
-      if (listedQuota > 0) {
-        final quota = _originQuotaVerdict(origin, listedQuota);
-        if (quota != null) {
-          // وضع المراقبة يحرس الحصتين معاً — حصة المدرج حصة كحصة
-          // «الكل»: تُسجل كان-سيرفض ويُخدم الطلب
-          if (!_policy.reportOnly) return quota;
-          telemetry?.warn(
-            'intake report-only: would reject — ${quota.code}: '
-            '${quota.message} (origin=${originForLog(origin) ?? 'none'})',
-            category: BridgeCategory.security,
-          );
-        }
-      }
-      return null;
-    }
-
-    // (2) مسار «الكل» — تحصيناته ملازمة له. فحوص شكل الطلب (أصل صالح
-    // + ترويستا Sec-Fetch) تنفَّذ دائماً حتى في وضع المراقبة: لا fetch
-    // شرعيا يفشلها قط فمراقبتها لا تقيس شيئا، وإعفاؤها يفتح الإرسال
-    // الصامت (نموذج مخفي/beacon بلا حاجة لقراءة الرد). الوضع المراقب
-    // يُعفّي الحصة وحدها — هي محل القياس يوم التبديل.
-    if (_policy.allowAllHardened) {
-      final blocked = _browserRequestBlocked(origin, fetchMode, fetchDest);
-      if (blocked != null) return blocked;
-      final quota = _originQuotaVerdict(origin);
-      if (quota == null) return null;
-      if (_policy.reportOnly) {
-        telemetry?.warn(
-          'intake report-only: would reject — ${quota.code}: '
-          '${quota.message} (origin=${originForLog(origin) ?? 'none'})',
-          category: BridgeCategory.security,
-        );
-        return null;
-      }
-      return quota;
-    }
-
-    // (3) الاكتشاف — أصل متصفحي صالح غير مدرج يسأل المضيف مرة (شرط 4).
-    // تحصينات المتصفح أولا: لا يُسأل
-    // المستخدم عن نموذج مخفي ولا عن أصل غير https — السؤال للمتصفح
-    // الصادق وحده، ونافذته مهلوسة ومسقوفة كي لا تكون وسيلة إغراق
-    if (_policy.onUnknownOrigin != null &&
-        origin != null &&
-        origin.isNotEmpty &&
-        _validBrowserOrigin(origin)) {
-      final preBlocked = _browserRequestBlocked(origin, fetchMode, fetchDest);
-      if (preBlocked != null) return preBlocked;
-      final key = normalize(origin);
-      final remembered = _consents[key];
-      if (remembered == OriginConsent.reject) {
-        return const IntakeRejection(
-          403,
-          'origin_declined',
-          'The host declined this origin',
-        );
-      }
-      // منحة سماح-مرة: طلب واحد خلال نافذتها القصيرة ثم تُستهلك — لا
-      // تمرير دفعي لكل المنتظرين (الجواب الواحد لا يجيز غير الطلب
-      // الذي استهلكها)
-      final grant = _onceGrants[key];
-      if (grant != null) {
-        _onceGrants.remove(key);
-        if (_now <= grant) return null;
-      }
-      // السؤال غير المعطِّل: الطلب يطلق النافذة ويعود فورا — لا منتظر
-      // يمسك مقعد خادم (المقاعد الستة عشر ميزانية العمل الحي كلها:
-      // من يمسك مقعداً بلا عمل يعطل المدرج إلى المهلة الكلية)،
-      // والنافذة تبقى محجوزة حتى الجواب أو أقصى عمرها.
-      // السقف هنا وحده — بعد المنحة والمرفوض المحفوظ كي لا يحجبهما
-      // مهاجم يشغل النوافذ الثلاث
-      if (_pendingAsks.length >= _maxPendingAsks) {
-        return const IntakeRejection(
-          403,
-          'origin_pending',
-          'Too many consent windows are open — answer or dismiss '
-              'them, then retry',
-        );
-      }
-      // ميزانية الأسئلة الجديدة زمنيا: سقف النوافذ الثلاث يقيد اللحظة
-      // لا الزمن — تدوير النطاقات الفرعية يفتح أسئلة بلا نهاية. فوق
-      // الميزانية يعود origin_pending بلا سؤال جديد حتى يفرغ كبارها
-      final fireNow = _now;
-      while (_askFireStamps.isNotEmpty &&
-          fireNow - _askFireStamps.first > _askBudgetWindowMs) {
-        _askFireStamps.removeFirst();
-      }
-      if (_askFireStamps.length >= _maxAskFiresPerWindow) {
-        // بقايا نافذة الميزانية نفسها (عشر دقائق): أقدم سؤال يخرج منها
-        // فتتفرغ خانة — الرأس يقول الانتظار الحقيقي لا ثابتاً مضللا
-        final budgetWaitMs =
-            _askBudgetWindowMs - (fireNow - _askFireStamps.first) + 500;
-        return IntakeRejection(
-          403,
-          'origin_pending',
-          'Too many consent questions lately — retry after a short wait',
-          retryAfterMs: budgetWaitMs < 1000 ? 1000 : budgetWaitMs,
-        );
-      }
-      // الطلب المقفل لا يفتح سؤال موافقة جديداً: نوافذ الموافقة لا تُطلَق
-      // من وراء قفل تخمين التوكن حتى لو كانت ميزانية الأسئلة تسمح —
-      // رفضه هنا غير صفري فيحوله الاستدعاءُ المقفلُ إلى 429 token_locked
-      if (!mayAskConsent) {
-        return const IntakeRejection(
-          403,
-          'origin_pending',
-          'The origin is locked; no new consent question opens for it',
-        );
-      }
-      _fireAsk(key, origin);
-      return const IntakeRejection(
-        403,
-        'origin_pending',
-        'Consent requested — retry shortly after the host answers '
-            '(see Retry-After)',
-      );
-    }
-
-    // (4) لا مدرج ولا «كل» — الرفض الصريح بلا صمت
-    if (_policy.onUnknownOrigin != null) {
-      return const IntakeRejection(
-        403,
-        'origin_unknown',
-        'Origin is not listed and cannot be confirmed — '
-            'no discovery callback is available for non-browser requests',
-      );
-    }
-    // الأصل قيمة يتحكم فيها الخصم: الرسالة ثابتة بلا استيفاء — القيمة
-    // تجري في حقل origin= المعقم وحده (الخادم يمرر الرسالة سبباً إلى
-    // noteRejection فأي قيمة خام هنا تُنسخ حرفياً إلى السجل)
-    return const IntakeRejection(
-      403,
-      'origin_not_listed',
-      'Origin is not on the allowed list',
-    );
   }
 
   /// Launch a question window or join the open one's queue - without waiting.
@@ -911,7 +3042,11 @@ class IntakeProtection {
   /// The host callback receives the normalized origin (lowercase scheme and
   /// host, the port if present) - never the raw header value: the window must
   /// read the same canonical form the keys and the list matching use.
-  void _fireAsk(String key, String origin) {
+  /// [parent] is the parent domain the projection budgeted this question
+  /// against (empty when no parent budget is armed): both its stamps land
+  /// where the global stamp lands, so a collapsing callback is charged to
+  /// its parent exactly like a live one.
+  void _fireAsk(String key, String origin, String parent) {
     if (_disposed || _pendingAsks.containsKey(key)) return;
     Future<OriginConsent> ask;
     try {
@@ -924,6 +3059,9 @@ class IntakeProtection {
       // والإطلاق نفسه يستهلك ميزانية الزمن: نداء معطوب لا يُستدعى بلا
       // نهاية فوق ميزانية الأسئلة السليمة
       _askFireStamps.addLast(_now);
+      if (parent.isNotEmpty) {
+        (_parentAskFires[parent] ??= Queue<int>()).addLast(_now);
+      }
       telemetry?.error(
         'consent callback threw synchronously',
         error: e,
@@ -958,6 +3096,9 @@ class IntakeProtection {
     // ختم الإطلاق هنا وحده: الالتحاق بنافذة حية أو رد نداء رامٍ لا
     // يستهلك ميزانية الزمن — السؤال الجديد فقط هو المحسوب
     _askFireStamps.addLast(_now);
+    if (parent.isNotEmpty) {
+      (_parentAskFires[parent] ??= Queue<int>()).addLast(_now);
+    }
     ask
         .then((answer) {
           _removeAskIfIdentical(key, ask);
@@ -981,6 +3122,14 @@ class IntakeProtection {
             _onceGrants[key] = _now + _onceGrantWindowMs;
           } else {
             _rememberConsent(key, answer);
+            // خطاف حفظ الموافقة: قرار المستخدم للجلسة، والحفظ ملك المضيف —
+            // محتوى الخطأ كما بقية الخطافات لا انهيار مسار الجواب
+            _containHook(() {
+              final hook = onConsentSave;
+              if (hook == null) return null;
+              hook(key, answer);
+              return null;
+            }, origin: key);
           }
         })
         .catchError((Object _) {
@@ -996,15 +3145,57 @@ class IntakeProtection {
   }
 
   void _removeAskIfIdentical(String key, Future<OriginConsent> ask) {
-    if (identical(_pendingAsks[key], ask)) _pendingAsks.remove(key);
+    if (identical(_pendingAsks[key], ask)) {
+      _pendingAsks.remove(key);
+      // نهاية السؤال هنا حصراً: حارس التطابق يضمن الإشارة مرة واحدة —
+      // المؤقت المتأخر بعد جواب أزال النافذة يجد مكانها فارغاً أو غيرها
+      _signalQuestionClosed(key);
+    }
+  }
+
+  /// The end-of-question signal, contained: the host's UI hook is its own
+  /// code, so a synchronous throw of its own is said once (telemetry) and
+  /// never allowed to break the answer, error, or timeout path that is
+  /// closing the window.
+  void _signalQuestionClosed(String key) {
+    final hook = onQuestionClosed;
+    if (hook == null) return;
+    try {
+      hook(key);
+    } catch (e) {
+      telemetry?.warn(
+        'consent-question closed callback threw synchronously '
+        '(origin=${originForLog(key) ?? 'none'}) — the window is closed '
+        'and the closing path continues',
+        category: BridgeCategory.security,
+      );
+    }
+  }
+
+  // التوقيع الحقيقي لمتصفح على مصافحة ترقية قناة الويب سوكيت: GET
+  // وMode بقيمة websocket — قيم ترويسات يضعها المتصفح لا الصفحة.
+  // والDest للمصافحة قيمتان شرعيتان بحسب المتصفح: websocket أو empty
+  // (المصافحة من الوجهات التي لا قيمة خاصة بها) — وأي Dest آخر مع
+  // Mode websocket رفضٌ كما أي نموذج مخفي. الطريقة هي التي تمنع
+  // انتحال الشكل: طلب POST يدّعي websocket يظل رفضاً كأي نموذج مخفي
+  static bool _isBrowserWsHandshake(
+    String? fetchMode,
+    String? fetchDest,
+    String method,
+  ) {
+    return method.toUpperCase() == 'GET' &&
+        fetchMode == 'websocket' &&
+        (fetchDest == 'websocket' || fetchDest == 'empty');
   }
 
   /// The fixed origin and send-method checks - the discovery path shares them before asking the user.
   IntakeRejection? _browserRequestBlocked(
     String? origin,
     String? fetchMode,
-    String? fetchDest,
-  ) {
+    String? fetchDest, {
+    String method = 'POST',
+    bool platformVerified = false,
+  }) {
     // أصل صالح — الطلب غير المتصفحي يستعمل طبقة التوكن
     if (origin == null || origin.isEmpty || origin == 'null') {
       return const IntakeRejection(
@@ -1035,16 +3226,24 @@ class IntakeProtection {
     // المتصفحات عن القراءة لكن إرسالها يصل؛ غياب الترويسة يمر
     // (متصفح قديم أو عميل غير متصفح — هؤلاء على التوكن أصلا)،
     // إلا حين يطلب المضيف الترويسات صراحة فيغلق باب المتصفحات
-    // القديمة على المسارين المتصفحيين
-    if (_policy.requireFetchMetadata) {
-      if (fetchMode == null || fetchMode.isEmpty || fetchMode != 'cors') {
+    // القديمة على المسارين المتصفحيين. ومصافحة القناة الحقيقية
+    // (Mode websocket على GET، وDest websocket أو empty) باب متصفحي
+    // صادق بذاته.
+    // والدرجة الموثقة من المنصة بلا ترويسات أصلا — تحقق المنصة
+    // نفسه هو البديل الصادق عنها فيُعفى غيابها من هذه البوابة
+    // حصرا، ومن يدّعي درجة الترويسة على قناة بلا ترويسات يبقى
+    // مغلقا كأي متصفح قديم
+    if (_policy.requireFetchMetadata && !platformVerified) {
+      if (!_isBrowserWsHandshake(fetchMode, fetchDest, method) &&
+          (fetchMode == null || fetchMode.isEmpty || fetchMode != 'cors')) {
         return const IntakeRejection(
           403,
           'cross_site_blocked',
           'Cross-site request blocked: Sec-Fetch-Mode must be "cors"',
         );
       }
-      if (fetchDest == null || fetchDest.isEmpty || fetchDest != 'empty') {
+      if (!_isBrowserWsHandshake(fetchMode, fetchDest, method) &&
+          (fetchDest == null || fetchDest.isEmpty || fetchDest != 'empty')) {
         return const IntakeRejection(
           403,
           'cross_site_blocked',
@@ -1053,7 +3252,7 @@ class IntakeProtection {
       }
       return null;
     }
-    return _fetchMetadataMismatch(fetchMode, fetchDest);
+    return _fetchMetadataMismatch(fetchMode, fetchDest, method);
   }
 
   /// The send-method mismatch alone: a present `Sec-Fetch-Mode` other than
@@ -1062,24 +3261,30 @@ class IntakeProtection {
   /// the check stands on its own. Absence is the caller's business: the
   /// browser paths reject it behind [OriginPolicy.requireFetchMetadata],
   /// and the listed path keeps accepting it (headerless non-browser
-  /// clients listed by the host).
+  /// clients listed by the host). The honest browser WebSocket handshake
+  /// (mode websocket over GET, with dest websocket or empty) is its own
+  /// real send method and passes as such; a claim of websocket on any
+  /// other method, or with any other dest, stays a refusal.
   IntakeRejection? _fetchMetadataMismatch(
     String? fetchMode,
-    String? fetchDest,
-  ) {
-    if (fetchMode != null && fetchMode.isNotEmpty && fetchMode != 'cors') {
-      return const IntakeRejection(
-        403,
-        'cross_site_blocked',
-        'Cross-site request blocked: Sec-Fetch-Mode must be "cors"',
-      );
-    }
-    if (fetchDest != null && fetchDest.isNotEmpty && fetchDest != 'empty') {
-      return const IntakeRejection(
-        403,
-        'cross_site_blocked',
-        'Cross-site request blocked: Sec-Fetch-Dest must be "empty"',
-      );
+    String? fetchDest, [
+    String method = 'POST',
+  ]) {
+    if (!_isBrowserWsHandshake(fetchMode, fetchDest, method)) {
+      if (fetchMode != null && fetchMode.isNotEmpty && fetchMode != 'cors') {
+        return const IntakeRejection(
+          403,
+          'cross_site_blocked',
+          'Cross-site request blocked: Sec-Fetch-Mode must be "cors"',
+        );
+      }
+      if (fetchDest != null && fetchDest.isNotEmpty && fetchDest != 'empty') {
+        return const IntakeRejection(
+          403,
+          'cross_site_blocked',
+          'Cross-site request blocked: Sec-Fetch-Dest must be "empty"',
+        );
+      }
     }
     return null;
   }
@@ -1089,11 +3294,16 @@ class IntakeProtection {
   /// counts). A rejected request's stamp is withdrawn right away, so
   /// rejections never occupy the window and the honest wait is measured
   /// from the oldest admitted request; watching passes through the same
-  /// branch, so a would-reject leaves no stamp either.
-  IntakeRejection? _originQuotaVerdict(String? origin, [int? limitOverride]) {
+  /// branch, so a would-reject leaves no stamp either. [nowOverride] lets
+  /// the settle path stamp with the projection's own clock reading.
+  IntakeRejection? _originQuotaVerdict(
+    String? origin, [
+    int? limitOverride,
+    int? nowOverride,
+  ]) {
     if (origin == null) return null;
     final key = normalize(origin);
-    final now = _now;
+    final now = nowOverride ?? _now;
     var window = _originWindows[key];
     if (window == null) {
       window = Queue<int>();
@@ -1133,6 +3343,9 @@ class IntakeProtection {
           _windowOrder.addLast(oldest);
         }
       }
+      // والكنس نفسه يخرج حالة الاقتران الميتة: جلسات وسجلات وذاكرة
+      // إعادة — لا ينتظر الموتى إدراج اقتران تالياً ليموتوا
+      _sweepPairingIdle(now);
     }
     if (window.length > (limitOverride ?? _policy.perOriginPerMinute)) {
       // الرفض لا يشغل الحصة: طابعه يُسحب فور الرفض فتبقى النافذة بطول
@@ -1163,10 +3376,18 @@ class IntakeProtection {
   /// Anyone else gets no ACAO header at all, so the browser blocks reading
   /// the reply: echoing to everyone equaled '*' and would open token
   /// guessing from any page.
-  /// Used by this package's server, not a stable host-facing interface.
+  /// Kept for hosts until the planned removal: the admission record
+  /// carries the decision as [IntakeAdmission.echoesCors] instead.
+  @Deprecated(
+    'Read IntakeAdmission.echoesCors from the record built by admit() '
+    '(removal planned in 0.3.0)',
+  )
   bool echoesCorsFor(String? origin) {
     if (origin == null || origin.isEmpty) return false;
     if (_isListed(origin)) return true;
+    // أصل الجسر المُخدم: الصفحة تحتاج قراءة ردودها فالصدى بابها نفسه،
+    // ومن سواها لا يرى شيء كالقائمة
+    if (_isBridgeServed(origin)) return true;
     // أصل الاكتشاف الصالح: الصدى ضروري له — بدونه يمنع المتصفح
     // الpreflight فلا يصل السؤال أبدا (ترويسات ما قبل الفحص كانت
     // تغلق مسار الموافقة نفسه) — والمرفوض لا يرى
@@ -1185,58 +3406,56 @@ class IntakeProtection {
         (host == 'localhost' || host == '127.0.0.1' || host == '::1');
   }
 
-  /// Detailed host messages for the trusted only - a correct token or a listed
-  /// origin; the allow-all path sees the code without the host text. One
-  /// verdict per request: while the token failure window (the origin's, or
-  /// the shared originless one) is locked, the token counts as absent here
-  /// too - this decision never compares a token whose window [check] is
-  /// refusing on, so a locked origin cannot probe the token through the
-  /// host error text.
-  /// Used by this package's server, not a stable host-facing interface.
-  bool verboseErrorsFor(String? origin, String? portalToken) {
-    if (!_tokenWindowLocked(origin) &&
-        _token.isNotEmpty &&
-        portalToken != null &&
-        portalToken.isNotEmpty &&
-        _fixedTimeEquals(portalToken, _token)) {
+  /// Detailed host messages for the trusted only - a verified token or a
+  /// listed origin; the allow-all path sees the code without the host text.
+  /// One verdict per request: the comparison ran once in the projection and
+  /// this decision reads the same outcome, so a verified sender keeps the
+  /// host text whatever the miss-window history - the window is a signal
+  /// about wrong guesses, never a refusal of the verified token.
+  /// Kept for hosts until the planned removal: the admission record
+  /// carries the decision as [IntakeAdmission.verboseErrors] - built with
+  /// the single comparison [admit] already ran - so no caller compares a
+  /// second time.
+  @Deprecated(
+    'Read IntakeAdmission.verboseErrors from the record built by admit() '
+    '(removal planned in 0.3.0)',
+  )
+  bool verboseErrorsFor(String? origin, String? bridgeToken) {
+    if (_token.isNotEmpty &&
+        bridgeToken != null &&
+        bridgeToken.isNotEmpty &&
+        _fixedTimeEquals(bridgeToken, _token)) {
       return true;
     }
-    return _isListed(origin);
-  }
-
-  /// Whether the token-guessing lock for [origin]'s window - per origin, or
-  /// the shared originless one - is engaged right now. Read-only on purpose:
-  /// the admission path in [check] owns the state, so a verdict reader adds
-  /// no stamps and creates no map entries; expired stamps simply do not count.
-  bool _tokenWindowLocked(String? origin) {
-    final now = _now;
-    final Iterable<int> stamps;
-    if (origin == null) {
-      stamps = _anonTokenMisses;
-    } else {
-      final window = _tokenMissWindows[normalize(origin)];
-      if (window == null) return false;
-      stamps = window;
-    }
-    var live = 0;
-    for (final ts in stamps) {
-      if (now - ts <= _tokenLockWindowMs) live++;
-    }
-    return live >= _tokenLockThreshold;
+    return _isListed(origin) || _isBridgeServed(origin);
   }
 
   /// A rejection from outside the protection patterns (host authorities) goes
   /// through the same counter and log path - denial is never silent.
-  /// Used by this package's server, not a stable host-facing interface.
+  /// Kept for hosts until the planned removal: the admission record counts
+  /// its own rejections on [IntakeAdmission.settle], and rejections decided
+  /// outside the protection go through
+  /// [IntakeAdmission.noteAuthorityReject].
+  @Deprecated(
+    'The admission record counts and logs its own rejections on settle(); '
+    'for rejections decided outside the protection use '
+    'IntakeAdmission.noteAuthorityReject (removal planned in 0.3.0)',
+  )
   void noteRejection(String reason, [String? origin]) {
-    _countRejection();
-    logRejection(reason, origin);
+    _noteAuthority(reason, origin);
   }
 
   /// Writes one throttled security-log line for a rejection (the counter
   /// lives in [noteRejection]): at most one line per second, with the
-  /// suppressed count folded into the next emitted line. Used by this
-  /// package's server, not a stable host-facing interface.
+  /// suppressed count folded into the next emitted line.
+  /// Kept for hosts until the planned removal: the admission record writes
+  /// its rejection line on settle, and
+  /// [IntakeAdmission.noteAuthorityReject] routes the external ones here.
+  @Deprecated(
+    'The admission record writes the rejection line on settle(); for '
+    'rejections decided outside the protection use '
+    'IntakeAdmission.noteAuthorityReject (removal planned in 0.3.0)',
+  )
   void logRejection(String? reason, String? origin) {
     // عدم الصمت مع كبح الطوفان: سطر واحد في الثانية كحد أقصى بنمط خنق
     // معرف الارتباط — كل رفض يعدّ عدّا (فوق) والسطر يخرج بما كُتم بعده
@@ -1300,7 +3519,25 @@ class IntakeProtection {
     _askTimers.clear();
     _pendingAsks.clear();
     _askSequence.clear();
+    // خرائط الاقتران الثلاث تخرج مع الكائن: جلسات وسجلات وفهرس — لا بقاء
+    // لحالة اقتران بعد الإغلاق، وذاكرة الإعادة رابعتها
+    _pairingSessions.clear();
+    _pairedRecords.clear();
+    _pairingIdIndex.clear();
+    _pairReplay.clear();
   }
+
+  /// How many constant-time token comparisons this object has run since
+  /// construction. Observability seam - the read-only counter that pins the
+  /// admission contract "a token is compared at most once per request": the
+  /// projection compares once and the record carries the outcome, so a full
+  /// server request over the admission path lands exactly one here. A test
+  /// reads deltas across requests; the wire behavior never reads it.
+  int _tokenComparisons = 0;
+
+  /// The read-only count of token comparisons so far - see
+  /// [_tokenComparisons].
+  int get tokenComparisonCount => _tokenComparisons;
 
   /// Constant-time comparison - no timing leak of length or first-diff position.
   ///
@@ -1320,6 +3557,7 @@ class IntakeProtection {
       256; // حشوة الدنيا — الحلقة تمتد لطول السر المضبوط إن زاد
 
   bool _fixedTimeEquals(String supplied, String secret) {
+    _tokenComparisons++;
     final ab = utf8.encode(supplied);
     final bb = utf8.encode(secret);
     var diff = ab.length ^ bb.length;
@@ -1335,12 +3573,142 @@ class IntakeProtection {
   }
 }
 
-/// Strong portal-token generator - 32 random bytes from Random.secure in hex
+/// Strong bridge-token generator - 32 random bytes from Random.secure in hex
 /// (64 chars): no dependencies, and it meets the recommended strength bar.
-String generatePortalToken() {
+String generateBridgeToken() {
   final rnd = Random.secure();
   return List.generate(
     32,
     (_) => rnd.nextInt(256),
   ).map((b) => b.toRadixString(16).padLeft(2, '0')).join();
+}
+
+/// The verdict of one pairing-proof verification: either the verified
+/// record with its replay key, or a named internal failure (and whether
+/// that failure is the replay shape the wire answers
+/// `pair_signature_replay` to).
+class _PairCheck {
+  _PairCheck.ok(_PairedRecord this.record, String this.replayKey)
+    : fail = null,
+      replay = false;
+
+  _PairCheck.bad(String this.fail, {this.replay = false})
+    : record = null,
+      replayKey = null;
+
+  final _PairedRecord? record;
+  final String? replayKey;
+  final String? fail;
+  final bool replay;
+
+  bool get ok => record != null;
+}
+
+/// One live pairing session - a displayed code and its expiry, plus the
+/// wrong-attempt budget it absorbs (every wrong attempt anywhere is
+/// charged here too).
+class _PairingSession {
+  _PairingSession(this.code, this.expiresAtMs);
+
+  final String code;
+  final int expiresAtMs;
+  int wrongAttempts = 0;
+}
+
+/// One armed pairing binding - the token bound to the origin it paired
+/// from, keyed by its digest in the maps. [pairingId] is derived from the
+/// token digest alone, so a host restart that restores the token restores
+/// the id with it.
+class _PairedRecord {
+  _PairedRecord({
+    required this.origin,
+    required this.token,
+    required this.digest,
+    required this.issuedAtMs,
+    required this.expiresAtMs,
+  });
+
+  final String origin;
+  final String token;
+  final String digest;
+  final int issuedAtMs;
+  final int expiresAtMs;
+
+  /// The public pairing identifier the page presents - the first 16 hex
+  /// characters of sha256(token).
+  String get pairingId => digest.substring(0, 16);
+}
+
+/// A short one-time pairing code the host displays to the user - what the
+/// page sends (with its Origin) to receive its origin-bound token.
+/// [expiresInSeconds] is the honest life of the offer.
+class PairingOffer {
+  /// Builds the offer - the protection constructs it, the host displays
+  /// [code].
+  const PairingOffer({required this.code, required this.expiresInSeconds});
+
+  /// Six decimal digits from a secure random source - readable aloud,
+  /// typeable from a screen.
+  final String code;
+
+  /// How long the offer lives, in seconds - after it the code is refused
+  /// `pair_code_expired` and its session is gone.
+  final int expiresInSeconds;
+}
+
+/// What the host is told when a page pairs - the origin that paired, the
+/// pairing id the page will present, and the honest token lifetime. The
+/// raw token itself travels through the save hook only: the host persists
+/// it (its own storage), the package never writes a file.
+class PairingInfo {
+  /// Builds the info - the protection constructs it for the onPaired
+  /// callback brought by [IntakeProtection.enablePairing].
+  const PairingInfo({
+    required this.origin,
+    required this.pairingId,
+    required this.expiresInSeconds,
+  });
+
+  /// The normalized origin the bound token is locked to.
+  final String origin;
+
+  /// The public pairing identifier the page presents in
+  /// `X-Bridge-Pairing` - derived from the token alone, so it survives a
+  /// host restart whenever the token does.
+  final String pairingId;
+
+  /// The token's full lifetime in seconds (the host can revoke or rotate
+  /// it earlier at any moment).
+  final int expiresInSeconds;
+}
+
+/// The answer of one pairing attempt - either the rejection (status, code,
+/// message on the wire) or the issued binding. Exactly one side is set.
+class PairingOutcome {
+  /// Builds a rejected attempt.
+  const PairingOutcome.rejected(this.rejection)
+    : token = null,
+      pairingId = null,
+      expiresInSeconds = null;
+
+  /// Builds a paired attempt.
+  const PairingOutcome.paired({
+    required this.token,
+    required this.pairingId,
+    required this.expiresInSeconds,
+  }) : rejection = null;
+
+  /// The pairing gate's rejection - null when the attempt paired.
+  final IntakeRejection? rejection;
+
+  /// The origin-bound token (64 hex characters) - null on a rejection. It
+  /// signs requests (never travels raw after pairing day), expires on its
+  /// own, and is revocable and rotatable by the host.
+  final String? token;
+
+  /// The public pairing identifier for the token - null on a rejection.
+  final String? pairingId;
+
+  /// The token lifetime in seconds - null on a rejection.
+  final int? expiresInSeconds;
 }

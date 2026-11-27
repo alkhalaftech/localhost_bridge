@@ -81,8 +81,8 @@ IntakeProtection _closed() {
   return pr;
 }
 
-/// اتصال مهاجم: ترويسات كاملة تعلن جسما بطول 100 ثم بايت واحد، والمقبس
-/// يبقى مفتوحا (لا FIN) — هذا هو حاجز المقعد على الكود غير المصلح.
+// اتصال مهاجم: ترويسات كاملة تعلن جسما بطول 100 ثم بايت واحد، والمقبس
+// يبقى مفتوحا (لا FIN) — هذا هو حاجز المقعد على الكود غير المصلح.
 Future<Socket> _liar(int port, String rawHeaders) async {
   final s = await Socket.connect('127.0.0.1', port);
   s.add(utf8.encode('$rawHeaders\r\nA'));
@@ -95,14 +95,14 @@ String _liarGet(int port) =>
     'Content-Length: 100\r\n'
     '\r\n';
 
-/// يراقب مقبسا ويسجل هل وصل EOF (القطع من جهة الخادم)
+// يراقب مقبسا ويسجل هل وصل EOF (القطع من جهة الخادم)
 StreamSubscription<List<int>> _watchEof(Socket s, void Function() onEof) {
   late final StreamSubscription<List<int>> sub;
   sub = s.listen((_) {}, onDone: onEof, onError: (Object _) => onEof());
   return sub;
 }
 
-/// طلب شرعي كامل عبر HttpClient — يعيد (الحالة، الجسم، هل الاتصال باق)
+// طلب شرعي كامل عبر HttpClient — يعيد (الحالة، الجسم، هل الاتصال باق)
 Future<(int, String, bool)> _post(
   int port, {
   String? origin,
@@ -116,7 +116,7 @@ Future<(int, String, bool)> _post(
   try {
     final req = await client.open(method, '127.0.0.1', port, '/');
     if (origin != null) req.headers.set('Origin', origin);
-    if (token != null) req.headers.set('X-Portal-Token', token);
+    if (token != null) req.headers.set('X-Bridge-Token', token);
     if (browserHeaders) {
       req.headers.set('Sec-Fetch-Mode', 'cors');
       req.headers.set('Sec-Fetch-Dest', 'empty');

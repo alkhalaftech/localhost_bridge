@@ -362,7 +362,7 @@ void main() {
         p,
         'POST / HTTP/1.1\r\nHost: 127.0.0.1:$p\r\n'
         'Origin: $over\r\n'
-        'X-Portal-Token: $_t64\r\n'
+        'X-Bridge-Token: $_t64\r\n'
         'Content-Type: application/json\r\nContent-Length: 2\r\n\r\n{}',
       );
       expect(r['status'], 400);

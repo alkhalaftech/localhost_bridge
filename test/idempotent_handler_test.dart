@@ -1,16 +1,16 @@
-// شاهد ب5: دفتر عدم التكرار example/idempotent_handler.dart — الأمر نفسه
-// مرتين والثانية بعد 504 مصطنع (المعالج يتجاوز مهلته مرة ثم ينجح):
-// العمل ينفذ مرة واحدة والرد المخزن يعود كما هو، ومعرف الصفحة يعود بلا
-// تغيير عند الإعادة. الاستيراد نسبي من example — وثائق المستخدم تُختبر
-// بنفسها لا بنسخة منها.
+// شاهد دفتر عدم التكرار — الأمر نفسه مرتين والثانية بعد 504 مصطنع
+// (المعالج يتجاوز مهلته مرة ثم ينجح): العمل ينفذ مرة واحدة والرد المخزن
+// يعود كما هو، ومعرف الصفحة يعود بلا تغيير عند الإعادة. التوصيل هنا هو
+// التوصيل نفسه الذي يعرضه example/idempotent_handler.dart فوق
+// DedupLedger وidempotentCommand المكتوبتين حرفاً، والمثال ذاته يفحصه
+// بوابة analyze (بلا استيراد نسبي لم يعد له معنى بعد انتقال المنطق
+// إلى المكتبة).
 import 'dart:async';
 import 'dart:convert';
 import 'dart:io';
 
 import 'package:test/test.dart';
 import 'package:localhost_bridge/localhost_bridge.dart';
-
-import '../example/idempotent_handler.dart';
 
 Future<Map<String, Object?>> _send(int port, String cid) async {
   final client = HttpClient();
@@ -54,8 +54,8 @@ LocalIntakeServer _dedupServer(
     ..update(policy: const OriginPolicy(allowed: ['https://dedup.test'])),
 );
 
-/// خادم الفيض: عمل يُنجز فورا بلا تعليق — لملء السقف بمدخلات حية واختبار
-/// رفض الدفتر الممتلئ (لا تعليق عمل هنا أصلا، فالملء كله يستقر).
+// خادم الفيض: عمل يُنجز فورا بلا تعليق — لملء السقف بمدخلات حية واختبار
+// رفض الدفتر الممتلئ (لا تعليق عمل هنا أصلا، فالملء كله يستقر).
 LocalIntakeServer _floodServer(DedupLedger ledger, List<String> executions) =>
     LocalIntakeServer(
       onCommand: (cmd) => idempotentCommand(ledger, cmd, (c) async {

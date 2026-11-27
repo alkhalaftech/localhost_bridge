@@ -1,1 +1,13 @@
 include: package:lints/recommended.yaml
+
+analyzer:
+  errors:
+    # The deprecated 0.1.x intake surface (check, normalize, ...) stays
+    # published until 0.3.0, and the package's own compatibility tests
+    # exercise it on purpose. The floor analyzer (Dart 3.8) reports every
+    # such same-package use as an info, which --fatal-infos escalates to
+    # an error, while the newer analyzers the package is developed on do
+    # not report these uses at all; silencing this one diagnostic keeps
+    # both behaviors honest. Removing the deprecated surface in 0.3.0 is
+    # a compile error either way, so nothing stays hidden.
+    deprecated_member_use_from_same_package: ignore

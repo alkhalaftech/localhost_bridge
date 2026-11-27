@@ -136,7 +136,7 @@ String _request(
   final h = StringBuffer()
     ..write('$method / HTTP/1.1\r\nHost: 127.0.0.1:$port\r\n');
   if (origin != null) h.write('Origin: $origin\r\n');
-  if (token != null) h.write('X-Portal-Token: $token\r\n');
+  if (token != null) h.write('X-Bridge-Token: $token\r\n');
   if (method == 'POST') {
     h.write('Content-Type: application/json\r\n');
     h.write('Content-Length: ${_goodBody.length}\r\n\r\n$_goodBody');
@@ -279,18 +279,34 @@ void main() {
         missStatuses.add(r['status'] as int);
       }
       expect(missStatuses, everyElement(403));
-      final locked = await _exchange(
+      // الإخفاق السادس الخاطئ فوق الميزانية: يُرد — الإخفاقات عند السقف
+      // نفسه تبقى إخفاقات تحسب، والبوابة تحرس ما هو أطول منها فقط
+      final wrongSixth = await _exchange(
         p,
-        _request(p, token: _t64, origin: 'https://boundary.example'),
+        _request(p, token: 'x' * 1024, origin: 'https://boundary.example'),
       );
       expect(
-        locked['status'],
+        wrongSixth['status'],
         429,
         reason:
             'five misses at exactly the cap formed the lockout - the '
             'gate guards only what is longer than the cap',
       );
-      expect(bodyJson(locked.cast<String, Object>())['error'], 'token_locked');
+      expect(
+        bodyJson(wrongSixth.cast<String, Object>())['error'],
+        'token_locked',
+      );
+      // والتوكن الصحيح فوق الميزانية المنفقة نفسها: يُقارن ويُقبَل —
+      // النافذة إشارة عن الخاطئ لا رافض للصحيح
+      final correct = await _exchange(
+        p,
+        _request(p, token: _t64, origin: 'https://boundary.example'),
+      );
+      expect(
+        correct['status'],
+        200,
+        reason: 'the correct token is accepted whatever the failure history',
+      );
     },
   );
 
@@ -382,14 +398,14 @@ void main() {
         final p = IntakeProtection(telemetry: rec)
           ..update(policy: const OriginPolicy(), token: secret);
         expect(
-          await p.check(origin: null, portalToken: secret),
+          await p.check(origin: null, bridgeToken: secret),
           isNull,
           reason: 'the correct secret of $len bytes passes the comparison',
         );
         final wrongFirst =
             '${secret[0] == '9' ? '0' : '9'}${secret.substring(1)}';
         expect(
-          await p.check(origin: null, portalToken: wrongFirst),
+          await p.check(origin: null, bridgeToken: wrongFirst),
           isNotNull,
           reason: 'a difference at the first byte of $len bytes is caught',
         );
@@ -397,12 +413,12 @@ void main() {
         final wrongLast =
             '${secret.substring(0, len - 1)}${last == 'z' ? 'y' : 'z'}';
         expect(
-          await p.check(origin: null, portalToken: wrongLast),
+          await p.check(origin: null, bridgeToken: wrongLast),
           isNotNull,
           reason: 'a difference at the last byte of $len bytes is caught',
         );
         expect(
-          await p.check(origin: null, portalToken: '$secret-tail'),
+          await p.check(origin: null, bridgeToken: '$secret-tail'),
           isNotNull,
           reason:
               'a longer token with a correct prefix is caught by the '
@@ -411,7 +427,7 @@ void main() {
         expect(
           await p.check(
             origin: null,
-            portalToken: secret.substring(0, len - 1),
+            bridgeToken: secret.substring(0, len - 1),
           ),
           isNotNull,
           reason:
@@ -419,34 +435,87 @@ void main() {
               'length term',
         );
         expect(
-          await p.check(origin: null, portalToken: wrongLast),
+          await p.check(origin: null, bridgeToken: wrongLast),
           isNotNull,
           reason:
               'an equal-length token differing at the tail is compared '
               'in full',
         );
       }
-      // سر متعدد البايتات: الحساب على بايتات UTF-8 لا المحارف
-      final arabic = 'س' * 20; // 20 محرفاً × 2 بايت = 40 بايتاً
+      // سر متعدد البايتات: الحساب على بايتات UTF-8 لا المحارف — عشرة
+      // محارف عربية مختلفة (كل محرف 2 بايت) فيعبر فحص التنوع ويبقى
+      // الشاهد عن البايتات لا المحارف
+      final arabic = 'سشصضطظعغفق' * 2; // 20 محرفاً × 2 بايت = 40 بايتاً
       final p = IntakeProtection(telemetry: rec)
         ..update(policy: const OriginPolicy(), token: arabic);
       expect(
-        await p.check(origin: null, portalToken: arabic),
+        await p.check(origin: null, bridgeToken: arabic),
         isNull,
         reason: 'the multi-byte secret matches byte for byte',
       );
       expect(
-        await p.check(origin: null, portalToken: '$arabicس'),
+        await p.check(origin: null, bridgeToken: '$arabicس'),
         isNotNull,
         reason: 'one more character than the multi-byte secret is caught',
       );
       // طول متطرف عبر المقارنة: البايتات فوق مدى الحلقة تسقط في
       // المُراكِم فلا مرور لطول متضخم مهما كان
       expect(
-        await p.check(origin: null, portalToken: 'a' * (1 << 20)),
+        await p.check(origin: null, bridgeToken: 'a' * (1 << 20)),
         isNotNull,
         reason: 'a megabyte token is refused by the comparison itself',
       );
     },
   );
+
+  test('update() refuses a configured token over the 1,024-byte header cap '
+      '- a correct token no request could match must not sit configured '
+      'silently', () {
+    // سقف الترويسة طرفاً بالطرفين: المقارنة الزمنية-الثابتة لا ترى
+    // الترويسة الأطول من السقف أصلاً (بوابة token_too_long تردّها قبل
+    // أي مقارنة)، فتوكن مضبوط فوق السقف يستحيل مطابقته على السلك ويظل
+    // منضبطاً بصمت — النقض العملي لـ«الصحيح لا يُرفض أبداً». الرفض
+    // وقت الإعداد برسالة تسمي الطول والبديل، بلا أثر جانبي: ما كان
+    // مضبوطاً قبله باقٍ فعالاً
+    final alphabet = 'abcdefghijklmnopqrstuvwxyz0123456789ABCDEF';
+    final overCap = List.generate(
+      1100,
+      (i) => alphabet[i % alphabet.length],
+    ).join();
+    final p = IntakeProtection()..update(token: _t64);
+    Object? caught;
+    try {
+      p.update(token: overCap);
+    } catch (e) {
+      caught = e;
+    }
+    expect(caught, isArgumentError);
+    expect(
+      '$caught',
+      contains('generateBridgeToken'),
+      reason: 'the error names the alternative the host should reach for',
+    );
+    expect(
+      '$caught',
+      contains('1024'),
+      reason: 'the error names the ceiling the wire enforces',
+    );
+    // والرمي بلا أثر جانبي: التوكن السابق السليم باقٍ يطابق
+    expect(
+      p.admit(origin: null, bridgeToken: _t64).then((a) => a.acceptedPath),
+      completion(IntakeAdmissionPath.token),
+      reason: 'the refused update leaves the previous token untouched',
+    );
+    // وعند السقف بالضبط يمر الإعداد: السقف حدٌّ أقصى مشمول لا مستثنى
+    final atCap = List.generate(
+      IntakeProtection.maxBridgeTokenHeaderBytes,
+      (i) => alphabet[i % alphabet.length],
+    ).join();
+    final at = IntakeProtection()..update(token: atCap);
+    expect(
+      at.admit(origin: null, bridgeToken: atCap).then((a) => a.acceptedPath),
+      completion(IntakeAdmissionPath.token),
+      reason: 'a token exactly at the cap configures and matches',
+    );
+  });
 }

@@ -118,7 +118,7 @@ String _post(
   final h = StringBuffer()
     ..write('POST / HTTP/1.1\r\nHost: 127.0.0.1:$port\r\n');
   if (origin != null) h.write('Origin: $origin\r\n');
-  if (token != null) h.write('X-Portal-Token: $token\r\n');
+  if (token != null) h.write('X-Bridge-Token: $token\r\n');
   h.write('Sec-Fetch-Mode: cors\r\nSec-Fetch-Dest: empty\r\n');
   if (extra != null) h.write(extra);
   h.write('Content-Type: application/json\r\n');
@@ -162,11 +162,11 @@ void main() {
                 'a3f1c52e94b7d068f5e2a9c4b1d7e8036f9a2c5e8b1d7f04a6c9e2d5f8b3a1c7',
           );
         for (var i = 0; i < 5; i++) {
-          await p.check(origin: 'https://evil.example', portalToken: 'WRONG');
+          await p.check(origin: 'https://evil.example', bridgeToken: 'WRONG');
         }
         final listed = await p.check(
           origin: 'https://portal.example',
-          portalToken: 'WRONG',
+          bridgeToken: 'WRONG',
         );
         expect(
           listed,
@@ -178,7 +178,7 @@ void main() {
     );
 
     test(
-      'unlisted origin with correct token: the guessing origin stays locked, another passes',
+      'unlisted origin with correct token: accepted whatever the guessing history, another passes',
       () async {
         final p = IntakeProtection()
           ..update(
@@ -187,24 +187,38 @@ void main() {
                 'a3f1c52e94b7d068f5e2a9c4b1d7e8036f9a2c5e8b1d7f04a6c9e2d5f8b3a1c7',
           );
         for (var i = 0; i < 5; i++) {
-          await p.check(origin: 'https://evil.example', portalToken: 'WRONG');
+          await p.check(origin: 'https://evil.example', bridgeToken: 'WRONG');
         }
-        final locked = await p.check(
+        // الخاطئ السادس فوق الميزانية يُرد — والرمز باق للتخمين الخاطئ
+        final wrongSixth = await p.check(
           origin: 'https://evil.example',
-          portalToken:
-              'a3f1c52e94b7d068f5e2a9c4b1d7e8036f9a2c5e8b1d7f04a6c9e2d5f8b3a1c7',
+          bridgeToken: 'WRONG',
         );
-        expect(locked!.status, 429);
+        expect(wrongSixth!.status, 429);
         expect(
-          locked.code,
+          wrongSixth.code,
           'token_locked',
           reason:
-              'comparison is blocked under the lock, so a correct token '
-              'does not save the guessing origin',
+              'wrong guesses above the spent budget wait - the code '
+              'stays reserved for them, never for the correct token',
+        );
+        // الصحيح من الأصل المفيض نفسه: يُقارن ويُقبل — النافذة إشارة عن
+        // الخاطئ لا رافض للصحيح
+        final accepted = await p.check(
+          origin: 'https://evil.example',
+          bridgeToken:
+              'a3f1c52e94b7d068f5e2a9c4b1d7e8036f9a2c5e8b1d7f04a6c9e2d5f8b3a1c7',
+        );
+        expect(
+          accepted,
+          isNull,
+          reason:
+              'the correct token is compared and accepted whatever the '
+              'failure history',
         );
         final other = await p.check(
           origin: 'https://x.example',
-          portalToken:
+          bridgeToken:
               'a3f1c52e94b7d068f5e2a9c4b1d7e8036f9a2c5e8b1d7f04a6c9e2d5f8b3a1c7',
         );
         expect(
@@ -230,7 +244,7 @@ void main() {
         for (var i = 1; i <= 5; i++) {
           final r = await p.check(
             origin: 'https://a.example',
-            portalToken: 'W',
+            bridgeToken: 'W',
           );
           expect(
             r!.code,
@@ -240,7 +254,7 @@ void main() {
         }
         final sixth = await p.check(
           origin: 'https://a.example',
-          portalToken: 'W',
+          bridgeToken: 'W',
         );
         expect(
           sixth!.code,
@@ -250,7 +264,7 @@ void main() {
         fakeNow = 60_001;
         final after = await p.check(
           origin: 'https://a.example',
-          portalToken: 'W',
+          bridgeToken: 'W',
         );
         expect(
           after!.code,
@@ -268,32 +282,38 @@ void main() {
               'a3f1c52e94b7d068f5e2a9c4b1d7e8036f9a2c5e8b1d7f04a6c9e2d5f8b3a1c7',
         );
       for (var i = 0; i < 5; i++) {
-        await p.check(origin: null, portalToken: 'W');
+        await p.check(origin: null, bridgeToken: 'W');
       }
       expect(
-        (await p.check(origin: 'https://a.example', portalToken: 'W'))!.code,
+        (await p.check(origin: 'https://a.example', bridgeToken: 'W'))!.code,
         isNot('token_locked'),
-        reason: 'an originless lock does not touch web origins',
+        reason: 'an originless budget does not touch web origins',
       );
       for (var i = 0; i < 5; i++) {
-        await p.check(origin: 'https://b.example', portalToken: 'W');
+        await p.check(origin: 'https://b.example', bridgeToken: 'W');
       }
-      // نافذة بلا-أصل ما زالت مقفولة بلا إخفاقات ويب إضافية
+      // نافذة بلا-أصل ما زالت منفقة الميزانية بلا إخفاقات ويب إضافية:
+      // الخاطئ يُرد والصحيح يُقارن ويُقبَل
       expect(
-        (await p.check(
-          origin: null,
-          portalToken:
-              'a3f1c52e94b7d068f5e2a9c4b1d7e8036f9a2c5e8b1d7f04a6c9e2d5f8b3a1c7',
-        ))!.status,
+        (await p.check(origin: null, bridgeToken: 'W'))!.status,
         429,
         reason: 'the originless window is separate from the web one',
+      );
+      expect(
+        await p.check(
+          origin: null,
+          bridgeToken:
+              'a3f1c52e94b7d068f5e2a9c4b1d7e8036f9a2c5e8b1d7f04a6c9e2d5f8b3a1c7',
+        ),
+        isNull,
+        reason: 'the shared window never refuses the correct token',
       );
     });
   });
 
   group('one token verdict per request — the failing-handler message', () {
     test(
-      'a locked origin with the correct token gets the error code without the host message',
+      'a wrong token never earns the host message even over a spent budget; the verified token does',
       () async {
         const t64 =
             'a3f1c52e94b7d068f5e2a9c4b1d7e8036f9a2c5e8b1d7f04a6c9e2d5f8b3a1c7';
@@ -326,25 +346,42 @@ void main() {
             reason: 'a wrong token is not a trusted one',
           );
         }
-        // السادس بالتوكن الصحيح: نافذة القفل تجعل التوكن غائباً عن قرار
-        // النص التفصيلي كما هو غائب عن قرار القبول — الطلب يعبر (سياسة
-        // «الكل») والمعالج يفشل فيأخذ الرد الرمز وحده بلا نص المضيف
-        final locked = await _talk(
+        // السادس بالتوكن الخاطئ فوق الميزانية المنفقة: يُقبل بقرار سياسة
+        // «الكل» كما الخمسة — فيفشل المعالج ويأخذ الرد الرمز وحده بلا نص
+        // المضيف، فالميزانية لا تمنح الخاطئ ما لا يملكه
+        final spentWrong = await _talk(
+          port,
+          _post(port, 'https://guess.example', token: 'WRONG'),
+        );
+        expect(
+          spentWrong['status'],
+          500,
+          reason: 'admission follows the origin policy, not the budget',
+        );
+        expect(bodyJson(spentWrong)['error'], 'bridge_boom');
+        expect(
+          bodyJson(spentWrong).containsKey('message'),
+          isFalse,
+          reason: 'a spent budget never grants the host text to a wrong token',
+        );
+        // والتوكن الصحيح فوق الميزانية نفسها: يُقارن ويُقبل موثوقاً —
+        // نص المضيف يسافر معه لأن المقارنة المسجلة هي الدليل
+        final verified = await _talk(
           port,
           _post(port, 'https://guess.example', token: t64),
         );
         expect(
-          locked['status'],
+          verified['status'],
           500,
-          reason: 'admission follows the origin policy, not the lock',
+          reason: 'admission follows the origin policy, not the budget',
         );
-        expect(bodyJson(locked)['error'], 'bridge_boom');
+        expect(bodyJson(verified)['error'], 'bridge_boom');
         expect(
-          bodyJson(locked).containsKey('message'),
-          isFalse,
+          bodyJson(verified)['message'],
+          'host-side failure detail',
           reason:
-              'a locked miss window makes the token absent for the verbose '
-              'decision - the host text must not travel',
+              'a verified token keeps the host message whatever the '
+              'miss-window history',
         );
       },
     );
@@ -980,7 +1017,7 @@ void main() {
         );
         final token = await p.check(
           origin: null,
-          portalToken:
+          bridgeToken:
               'a3f1c52e94b7d068f5e2a9c4b1d7e8036f9a2c5e8b1d7f04a6c9e2d5f8b3a1c7',
         );
         expect(
@@ -1094,7 +1131,7 @@ void main() {
           final p = IntakeProtection()
             ..update(policy: const OriginPolicy(), token: token);
           expect(
-            await p.check(origin: null, portalToken: token),
+            await p.check(origin: null, bridgeToken: token),
             isNull,
             reason:
                 'a correct token of length $len passes through the comparison pad',
@@ -1102,7 +1139,7 @@ void main() {
           // الفرق داخل نافذة المقارنة (البايت الأول) — يرفض دائما
           final wrong = (token[0] == '9' ? '0' : '9') + token.substring(1);
           expect(
-            await p.check(origin: 'https://w.example', portalToken: wrong),
+            await p.check(origin: 'https://w.example', bridgeToken: wrong),
             isNotNull,
             reason:
                 'a wrong token of length $len is rejected (a difference inside the pad)',
@@ -1112,17 +1149,19 @@ void main() {
           if (len > 256) {
             final beyond = '${token.substring(0, 256)}z';
             expect(
-              await p.check(origin: null, portalToken: beyond),
+              await p.check(origin: null, bridgeToken: beyond),
               isNotNull,
               reason:
                   'a difference past 256 is compared - a correct-prefix token is rejected',
             );
           }
         }
-        // المحارف متعددة البايت: بايتاتها هي التي تُحسب
-        final arabic = 'س' * 40; // 40 محرفا × 2 بايت
+        // المحارف متعددة البايت: بايتاتها هي التي تُحسب — عشرة محارف
+        // عربية مختلفة (كل محرف 2 بايت) فيعبر فحص التنوع ويبقى الشاهد
+        // عن البايتات لا المحارف
+        final arabic = 'سشصضطظعغفق' * 4; // 40 محرفاً × 2 بايت
         final p = IntakeProtection()..update(token: arabic);
-        expect(await p.check(origin: null, portalToken: arabic), isNull);
+        expect(await p.check(origin: null, bridgeToken: arabic), isNull);
       },
     );
 
@@ -1135,7 +1174,7 @@ void main() {
       expect(
         await p.check(
           origin: null,
-          portalToken:
+          bridgeToken:
               'a3f1c52e94b7d068f5e2a9c4b1d7e8036f9a2c5e8b1d7f04a6c9e2d5f8b3a1c7',
         ),
         isNull,
@@ -1144,7 +1183,7 @@ void main() {
       expect(
         await p.check(
           origin: 'https://w.example',
-          portalToken:
+          bridgeToken:
               ' a3f1c52e94b7d068f5e2a9c4b1d7e8036f9a2c5e8b1d7f04a6c9e2d5f8b3a1c7',
         ),
         isNotNull,
@@ -1159,7 +1198,7 @@ void main() {
       expect(
         await q.check(
           origin: 'https://w.example',
-          portalToken:
+          bridgeToken:
               'a3f1c52e94b7d068f5e2a9c4b1d7e8036f9a2c5e8b1d7f04a6c9e2d5f8b3a1c7 ',
         ),
         isNotNull,
@@ -1173,7 +1212,7 @@ void main() {
         final p = IntakeProtection()..update(token: '');
         // لا نافذة قفل ولا مطابقة — الترويسة غائبة المعنى
         expect(
-          await p.check(origin: null, portalToken: 'ANY'),
+          await p.check(origin: null, bridgeToken: 'ANY'),
           isNotNull,
           reason: 'no token layer - evaluation falls to the policy',
         );

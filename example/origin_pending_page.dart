@@ -8,6 +8,7 @@
 // كي ترى المنحة والرفض حيّين في الطرفية.
 //
 // شغّله من جذر الحزمة: dart run example/origin_pending_page.dart
+// أو بلا مستخدم: dart run example/origin_pending_page.dart --self-check
 import 'dart:async';
 import 'dart:convert';
 import 'dart:io';
@@ -18,6 +19,9 @@ import 'package:localhost_bridge/localhost_bridge.dart';
 // الأول بعد مهلة قصيرة ويرفض كل سؤال بعدها، وكل أصل آخر يُرفض من أول
 // سؤال. حتمي كي تعرض الجولة المسارين: منحة ثم رفض.
 const _humanAnswerDelay = Duration(milliseconds: 1100);
+// نافذة السؤال (askTimeout) بمقاس هذا الإنسان التجريبي: أوسع من مهلة
+// إجابته بحاشية، وأضيق بكثير من الافتراضي الذي يليق مضيفاً حياً
+const _humanAskWindow = Duration(seconds: 3);
 final _answersPerOrigin = <String, int>{};
 
 Future<OriginConsent> _simulateHuman(String origin) async {
@@ -37,15 +41,27 @@ void _state(String state, String detail) {
   stdout.writeln('[$at] $state — $detail');
 }
 
-/// جولة واحدة من الآلة على السلك: ترسل من أصل متصفح تجريبي وتقرأ الحالة
-/// والرمز وRetry-After كما تقرأهما الصفحة، وتعيد المحاولة مرة واحدة بعد
-/// الانتظار المعلن بالضبط.
-Future<void> _runFlow(
+// جولة واحدة من الآلة على السلك: ترسل من أصل متصفح تجريبي وتقرأ الحالة
+// والرمز وRetry-After كما تقرأهما الصفحة، وتعيد المحاولة مرة واحدة بعد
+// الانتظار المعلن بالضبط. تعيد ما سرت فيه الحالات وحكمها الأخير وثانية
+// الانتظار المعلن على السلك — بلا مطبوعات فقط يقرأها المستخدم.
+Future<
+  (List<String> states, String verdict, int waitSeconds, String retryAfterRaw)
+>
+_runFlow(
   HttpClient client,
   int port,
   String origin,
   String correlationId,
 ) async {
+  final states = <String>[];
+  // الحالة تُطبع كما كانت وتُجمع معاً: الطرفية يقرأها الإنسان والقائمة
+  // يقرأها الفحص الذاتي — رواية واحدة لا اثنتان
+  void mark(String state, String detail) {
+    states.add(state);
+    _state(state, detail);
+  }
+
   Future<HttpClientResponse> send() async {
     final request = await client.openUrl(
       'POST',
@@ -60,44 +76,47 @@ Future<void> _runFlow(
     return request.close();
   }
 
-  _state('SENDING', 'POST ["DEMO-PENDING"] from $origin');
+  mark('SENDING', 'POST ["DEMO-PENDING"] from $origin');
   final HttpClientResponse first;
   try {
     first = await send().timeout(const Duration(seconds: 5));
   } on Exception {
-    _state('NO-VERDICT', 'the sender never got an answer — treat as down');
-    return;
+    mark('NO-VERDICT', 'the sender never got an answer — treat as down');
+    return (states, states.last, 0, '');
   }
   final firstBody = await utf8.decoder.bind(first).join();
   final firstJson = jsonDecode(firstBody) as Map<String, dynamic>;
   if (first.statusCode == 200) {
-    _state('GRANTED', 'admitted outright — not the consent path');
-    return;
+    mark('GRANTED', 'admitted outright — not the consent path');
+    return (states, states.last, 0, '');
   }
   if (first.statusCode != 403 || firstJson['error'] != 'origin_pending') {
-    _state('REFUSED', '${first.statusCode} ${firstJson['error']}');
-    return;
+    mark('REFUSED', '${first.statusCode} ${firstJson['error']}');
+    return (states, states.last, 0, '');
   }
-  final waitSeconds =
-      int.tryParse(first.headers.value('retry-after') ?? '') ?? 2;
-  _state('PENDING', 'consent question open — Retry-After: $waitSeconds s');
-  _state('WAITING', 'honoring Retry-After — no hammering');
+  // الترويسة الخام تُحفظ كما قرأها السلك: الفحص يرفض غيابها قبل أي
+  // تحليل — والاحتياط 2 ثانية للانتظار لا يجوز أن يتظاهر بأنه قراءة
+  final retryAfterRaw = first.headers.value('retry-after') ?? '';
+  final waitSeconds = int.tryParse(retryAfterRaw) ?? 2;
+  mark('PENDING', 'consent question open — Retry-After: $waitSeconds s');
+  mark('WAITING', 'honoring Retry-After — no hammering');
   await Future<void>.delayed(Duration(seconds: waitSeconds));
-  _state('RETRYING', 'one respectful retry, same X-Correlation-Id');
+  mark('RETRYING', 'one respectful retry, same X-Correlation-Id');
   final HttpClientResponse second;
   try {
     second = await send().timeout(const Duration(seconds: 5));
   } on Exception {
-    _state('NO-VERDICT', 'the sender never got an answer — treat as down');
-    return;
+    mark('NO-VERDICT', 'the sender never got an answer — treat as down');
+    return (states, states.last, waitSeconds, retryAfterRaw);
   }
   final secondBody = await utf8.decoder.bind(second).join();
   final secondJson = jsonDecode(secondBody) as Map<String, dynamic>;
   if (second.statusCode == 200) {
-    _state('GRANTED', 'the allowOnce answer let the retry cross');
+    mark('GRANTED', 'the allowOnce answer let the retry cross');
   } else {
-    _state('REFUSED', '${second.statusCode} ${secondJson['error']}');
+    mark('REFUSED', '${second.statusCode} ${secondJson['error']}');
   }
+  return (states, states.last, waitSeconds, retryAfterRaw);
 }
 
 /// The consent state-machine page. In production this lives on your https
@@ -203,14 +222,135 @@ enter('IDLE', 'press the button; the simulated host grants the demo portal '
 </html>
 ''';
 
-Future<void> main() async {
+// الفحص الذاتي (--self-check): يعمل بلا مستخدم على منفذين مؤقتين، ويجري
+// فحوصاً حقيقية من طرف عميل على السلك — الصفحة تُخدَم وتُقرأ بطلب GET
+// فعلي، والجولتان تسيرانه من أصلين تجريبيين ويُقرأ حكمهما من الردود لا
+// من داخل المعالج.
+Future<bool> _runSelfCheck() async {
+  var passed = 0;
+  var failed = 0;
+  void check(String name, bool ok, [String detail = '']) {
+    if (ok) {
+      passed++;
+      stdout.writeln('PASS: $name');
+    } else {
+      failed++;
+      stdout.writeln('FAIL: $name${detail.isEmpty ? '' : ' — $detail'}');
+    }
+  }
+
   final bridge = LocalIntakeServer(
     onCommand: (_) async => const CommandOutcome(ok: true),
     telemetry: const SilentTelemetry(),
     correlationIdGenerator: () =>
         DateTime.now().microsecondsSinceEpoch.toRadixString(36),
     protection: IntakeProtection(telemetry: const SilentTelemetry())
-      ..update(policy: OriginPolicy(onUnknownOrigin: _simulateHuman)),
+      ..update(
+        // نافذة السؤال بمقاس الإنسان التجريبي الذي يجيب بعد 1.1 ثانية:
+        // الافتراضي 60 ثانية يليق مضيفاً حياً لا عملاً يجب أن يخرج،
+        // ومؤقّت السؤال الحي حتى نفاذه يُبقي العملية بعد الفحص حتماً
+        policy: OriginPolicy(
+          onUnknownOrigin: _simulateHuman,
+          askTimeout: _humanAskWindow,
+        ),
+      ),
+  );
+  final bridgePort = await bridge.start(preferredPort: 0);
+
+  final page = await HttpServer.bind(InternetAddress.loopbackIPv4, 0);
+  page.listen((request) async {
+    request.response.headers.contentType = ContentType.html;
+    request.response.write(_pendingPage(bridgePort));
+    await request.response.close();
+  });
+
+  final client = HttpClient();
+  try {
+    final pageRequest = await client.getUrl(
+      Uri.parse('http://127.0.0.1:${page.port}/'),
+    );
+    final pageReply = await pageRequest.close().timeout(
+      const Duration(seconds: 5),
+    );
+    final pageBody = await utf8.decoder.bind(pageReply).join();
+    check(
+      'the consent page serves over http with the state machine in it',
+      pageReply.statusCode == 200 &&
+          pageBody.contains('origin_pending state machine'),
+      'GET answered ${pageReply.statusCode}',
+    );
+
+    final grant = await _runFlow(
+      client,
+      bridgePort,
+      _grantedDemoOrigin,
+      'self-check-grant-1',
+    );
+    check(
+      'the granted origin walks the machine over the wire: pending, '
+          'honoring Retry-After, one retry, granted',
+      grant.$1.contains('PENDING') &&
+          grant.$1.contains('WAITING') &&
+          grant.$1.contains('RETRYING') &&
+          grant.$2 == 'GRANTED',
+      'walked ${grant.$1.join(' -> ')}',
+    );
+    check(
+      'the consent question carried an honest Retry-After header on '
+          'the wire',
+      grant.$4.isNotEmpty && grant.$3 >= 1,
+      'Retry-After header ${grant.$4.isEmpty ? '<absent>' : grant.$4}, '
+          'parsed ${grant.$3} s',
+    );
+
+    final refuse = await _runFlow(
+      client,
+      bridgePort,
+      _refusedDemoOrigin,
+      'self-check-refuse-1',
+    );
+    check(
+      'the stranger origin is refused without any grant',
+      refuse.$2 == 'REFUSED',
+      'walked ${refuse.$1.join(' -> ')}',
+    );
+  } finally {
+    client.close(force: true);
+    await page.close(force: true);
+    await bridge.stop();
+  }
+
+  stdout.writeln(
+    failed == 0
+        ? 'SELF-CHECK PASSED ($passed checks)'
+        : 'SELF-CHECK FAILED ($failed of ${passed + failed} checks failed)',
+  );
+  return failed == 0;
+}
+
+Future<void> main(List<String> args) async {
+  // وضع الفحص الذاتي: بلا مستخدم ولا منافذ ثابتة — سطر لكل فحص ورمز
+  // خروج 0 عند نجاحها وغير صفر عند فشل أي منها
+  if (args.contains('--self-check')) {
+    exitCode = await _runSelfCheck() ? 0 : 1;
+    return;
+  }
+
+  final bridge = LocalIntakeServer(
+    onCommand: (_) async => const CommandOutcome(ok: true),
+    telemetry: const SilentTelemetry(),
+    correlationIdGenerator: () =>
+        DateTime.now().microsecondsSinceEpoch.toRadixString(36),
+    protection: IntakeProtection(telemetry: const SilentTelemetry())
+      ..update(
+        // نافذة السؤال بمقاس الإنسان التجريبي الذي يجيب بعد 1.1 ثانية:
+        // الافتراضي 60 ثانية يليق مضيفاً حياً لا عملاً يجب أن يخرج،
+        // ومؤقّت السؤال الحي حتى نفاذه يُبقي العملية بعد الفحص حتماً
+        policy: OriginPolicy(
+          onUnknownOrigin: _simulateHuman,
+          askTimeout: _humanAskWindow,
+        ),
+      ),
   );
   final bridgePort = await bridge.start(preferredPort: 9300);
 
