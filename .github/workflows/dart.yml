@@ -323,6 +323,7 @@ jobs:
           echo "Safari bundle version: $(defaults read /Applications/Safari.app/Contents/Info.plist CFBundleShortVersionString)"
 
       - name: enable Safari automation
+        timeout-minutes: 2
         run: sudo safaridriver --enable
 
       - name: resolve packages
@@ -333,6 +334,7 @@ jobs:
       # original search list rides along so the removal restores exactly
       # what was there.
       - name: loopback TLS certificate in a temporary keychain
+        timeout-minutes: 3
         shell: bash
         run: |
           set -euo pipefail
@@ -365,6 +367,7 @@ jobs:
       # The expanded reporter plus the annotation grep, as in the browser
       # lab step: a red lab names its failing scene.
       - name: safari lab
+        timeout-minutes: 20
         shell: bash
         run: |
           status=0
