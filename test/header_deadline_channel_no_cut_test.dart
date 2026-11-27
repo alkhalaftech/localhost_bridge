@@ -41,6 +41,16 @@ Future<LocalIntakeServer> _start() async {
 }
 
 void main() {
+  // على SDK لا يعرف dart:io معلمة سقف النقل (تحت 3.13) لا تُسلَّح القناة
+  // فترمي عند البناء — ولا قناة تعيش فوق مهلة الترويسات أصلاً. تخطٍّ
+  // صادق مسمّى كما في شهود القناة القائمة، والشاهد الكامل فوق 3.13 أدناه
+  if (!LocalIntakeServer.wsTransportCeilingSupported) {
+    test('below Dart 3.13 the channel never arms, so nothing can outlive '
+        'the header deadline on it - an honest skip here', () {
+      expect(LocalIntakeServer.wsTransportCeilingSupported, isFalse);
+    });
+    return;
+  }
   test('an approved channel outlives the header deadline on frames that '
       'carry no empty line, and still serves its commands', () async {
     final srv = await _start();
