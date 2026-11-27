@@ -90,8 +90,11 @@ List<String> _entryBlocks(String section) {
 }
 
 void main() {
-  final changelog = File(_changelogPath).readAsStringSync();
-  final migration = File(_migrationPath).readAsStringSync();
+  // نمط قارئ readme_parity_test.dart: readAsLinesSync يسقط نهايات
+  // الأسطر أياً كانت (LF/CRLF/CR) — فقرص ويندوزي بإعداد autocrlf لا
+  // يعلق \r على الأسطر ويكسر مطابقة العناوين الحرفية
+  final changelog = File(_changelogPath).readAsLinesSync().join('\n');
+  final migration = File(_migrationPath).readAsLinesSync().join('\n');
   final blocks = _entryBlocks(_zeroSection(changelog));
   final migrationTitles = _migrationHeading
       .allMatches(migration)
