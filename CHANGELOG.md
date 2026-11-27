@@ -1,33 +1,5 @@
 ## 0.2.0
 
-- Behavior: the header deadline never switches off. Every shape the
-  acceptance scanner cannot make sense of keeps its deadline clock - a
-  header line longer than the scanner's cap, a lone `Upgrade` header,
-  a chunked request body, and a three-hundred-line header block are
-  served or bounded exactly like the plain shapes, and a request whose
-  headers never complete is cut on the wire at the deadline with no
-  reply on every listener. One request can no longer disarm the
-  deadline for the connection that follows it.
-- Behavior: on the TLS transport the deadline rides inside the
-  delivered socket itself, which keeps its `SecureSocket` shape - a
-  handler reads `requestedUri.scheme` as `https` and the certificate
-  getter answers while `headerTimeout` is armed, exactly as with it
-  off.
-- Security: a stalled request header no longer costs per-byte growth
-  for the connection that holds it - the scanner tracks each line by
-  its length and copies only a bounded candidate buffer, so holding a
-  candidate line costs no more than holding a non-candidate line of
-  the same length, and a connection past the scanner's line cap stops
-  buffering entirely while its deadline keeps running.
-- Compatibility: `Transfer-Encoding` whose last non-empty comma piece
-  is `chunked` - a single trailing comma included - is served as a
-  chunked request on Dart 3.13 and later, exactly as the parser's
-  tokenizer reads it; on Dart 3.8.0 the parser compares the value
-  whole, refuses such a request, and closes the connection. `Upgrade:
-  h2c` without `Connection: upgrade` stays a plain served request on
-  every supported SDK - the parser upgrades on the Connection token
-  alone - and the stalled header that follows it is still cut at the
-  deadline, with the next request on a fresh connection served.
 - **Breaking: one sender can no longer monopolize the seats** -
   `BridgeConfig.maxSeatsPerOrigin` (default 4 of the 16) bounds the
   seats a single origin holds at once; requests without an `Origin`
@@ -98,7 +70,16 @@
   request timeout down. An explicit value must be positive and no
   longer than `requestTimeout`, else `ArgumentError` at server
   construction, and the deadline in force reads as
-  `server.effectiveHeaderTimeout`.
+  `server.effectiveHeaderTimeout`. Every request shape keeps its
+  clock until its headers end - a header line past the scanner's cap,
+  a lone `Upgrade` header, a chunked body, a long header block - so a
+  request never disarms the deadline for the one after it, and a
+  stalled header holds a bounded buffer that does not grow per byte.
+  On the TLS transport the deadline rides inside the delivered socket,
+  which stays a `SecureSocket`: a handler reads `requestedUri.scheme`
+  as `https`. On Dart 3.8.0 the parser refuses a `Transfer-Encoding`
+  whose value is not exactly `chunked` and closes the connection; on
+  Dart 3.13 and later it reads the value's last comma piece.
 - Added: `BridgeConfig.maxOpenConnections` - an optional hard ceiling
   on open connections (`dart:io` never bounds them): a request arriving
   while more sockets than the cap are open answers `503`, and once the
