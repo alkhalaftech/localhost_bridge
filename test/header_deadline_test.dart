@@ -262,7 +262,7 @@ Future<void> _witnessChunkedThenPlainAlive({
     false,
     reason:
         'both served and the connection alive past the header deadline - '
-        'the tracker watches without false cuts (guards mutation M22)',
+        'the tracker watches without false cuts',
   );
   link.send(
     utf8.encode(

@@ -295,7 +295,7 @@ class HeaderTracker {
     _candLen += n;
   }
 
-  /// Bytes currently reserved for the candidate request-line buffer -
+  /// Bytes currently reserved for the tracked header-line buffer -
   /// the allocated capacity of the buffer, not the filled length. For
   /// tests only: the deterministic memory witness reads it to pin the
   /// reservation under the scanner's cap. The class is not exported, so
@@ -737,7 +737,7 @@ class HeaderDeadlineSocket implements Socket {
     _scanner.stopClock();
   }
 
-  /// Reserved bytes of the wrapped tracker's candidate request-line
+  /// Reserved bytes of the wrapped tracker's tracked header-line
   /// buffer - for tests only: the deterministic memory witness reads it
   /// through this wrapper, the exact object the plain door builds.
   // التغليفة أقصر طريق من الشاهد إلى نسخة الفاحص على الباب العادي:
