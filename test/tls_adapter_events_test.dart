@@ -191,11 +191,12 @@ void main() {
       }
       expect(
         writes,
-        hasLength(4),
+        hasLength(5),
         reason:
-            'the adapter writes to its delivered stream in four places '
-            'alone - data, an error, the end of the raw stream, and the '
-            "peer's close - and every one of them is guarded",
+            'the adapter writes to its delivered stream in five places '
+            'alone - data, an error, the end of the raw stream, the '
+            "peer's close, and the header-deadline cut - and every one "
+            'of them is guarded',
       );
     },
   );

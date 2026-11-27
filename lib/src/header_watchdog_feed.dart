@@ -173,6 +173,9 @@ class HeaderTracker {
 
   // ── مُفرِّص الترويسات: أسطر الطلب، وعدّ الجسم المعلن، والتسريح ──
   static const int _maxLineBytes = 16384;
+  // سقف مخزن السطر المرشّح: قيم الترويسات الأربع المتتبعة قصيرة، فلا
+  // يحجز اتصالٌ معلّق بسطر مرشّح أكثر من هذا مهما طال سطره
+  static const int _maxCandidateBytes = 256;
   static const int _phaseHeaders = 0;
   static const int _phaseBody = 1;
   static const int _phaseRetired = 2;
@@ -327,13 +330,13 @@ class HeaderTracker {
           if (j > i) {
             if (_lineLen == 0) _lineStart(chunk[i]);
             if (_lineCand) {
-              if (_candLen + (j - i) <= _maxLineBytes) {
+              if (_candLen + (j - i) <= _maxCandidateBytes) {
                 _candAdd(chunk, i, j);
               } else {
-                // سطر تأطير أطول من السقف: لا يُفهم فلا يُسرَّح والساعة
-                // باقية — والعقدة المغلقة من dart:io نفسه: ما لم يُفهم
-                // هنا يرفضه ويغلق الاتصال فلا اتصال يعاد استعماله ليُقطع
-                // خطأً (البرهان بمصدر SDK في تعليق _noteCandidate)
+                // سطر مرشّح أطول من سقف مخزنه: لا يُفهم فلا يُسرَّح والساعة
+                // باقية. وقد يقبله dart:io إن كانت قيمته مبطّنة بمسافات،
+                // فيُخطئ الفاحص حدود ذلك الطلب، وأسوأ الأثر قطعُ اتصاله
+                // المُبقى عند الموعد بدل مهلة الخمول، لا تعطيل المهلة
                 _lineCand = false;
                 _candLen = 0;
               }
