@@ -2,9 +2,15 @@
 
 Every breaking change in 0.2.0 has exactly one section here, in the
 CHANGELOG's order: what was, what is now, and what you change in your
-code, each with a short example. Everything else in 0.2.0 is additive
-or off by default - a host that configures only what it configured in
-0.1.x keeps its wire letter, inside the five changes below.
+code, each with a short example. What sits outside these five is
+either additive, off by default, or a default-on change the CHANGELOG
+documents in its own entries - the token failure window is one such
+default-on change: the previous release checked the lock before the
+comparison, so a correct token inside a locked window was never
+compared - it crossed only where the origin policy admitted it
+tokenless, and read `429 token_locked` everywhere else - while 0.2.0
+compares first and the correct token crosses immediately whatever the
+window.
 
 ## One sender can no longer monopolize the seats
 
