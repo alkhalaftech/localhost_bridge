@@ -462,11 +462,13 @@ class _RawSecureAdapter implements SecureSocket {
       },
     );
     // الساعة المشتركة تُولد مع المحوّل حصراً حين تُضبط المهلة: الولادة
-    // هنا هي لحظة التسليم — المصافحة قبلها ساعة handshakeTimeout كما هي
-    _tracker = headerTimeout == null
+    // هنا هي لحظة التسليم — المصافحة قبلها ساعة handshakeTimeout كما هي.
+    // والنسخة المحلية لأن الحقل العام لا يضيق نوعه بفحص null
+    final deadline = headerTimeout;
+    _tracker = deadline == null
         ? null
         : HeaderTracker(
-            deadline: headerTimeout,
+            deadline: deadline,
             onCut: () {
               // القطع الهادئ: إغلاق الخام يبلغ النظير على السلك — لا
               // بايت ولا رد ولا رمز جديد، وتعليم الموت يمنع تمرير ما
