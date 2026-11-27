@@ -430,9 +430,7 @@ class _PreArm {
 /// above: a wrapper would hide the `SecureSocket` shape from
 /// `HttpServer.listenOn`'s `is SecureSocket` reads.
 class _RawSecureAdapter implements SecureSocket {
-  _RawSecureAdapter(this.raw, {Duration? headerTimeout})
-    : _rp = raw.remotePort,
-      headerTimeout = headerTimeout {
+  _RawSecureAdapter(this.raw, {this.headerTimeout}) : _rp = raw.remotePort {
     _out = StreamController<Uint8List>(
       sync: true,
       onListen: () {
