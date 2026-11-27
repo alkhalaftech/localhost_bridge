@@ -136,7 +136,7 @@ jobs:
             done || true
             awk '/\[E\]/{c=7} c&&c-- {printf "::error::%s\n", substr($0,1,200)}' "$RUNNER_TEMP/test_out.txt" | head -40 || true
           fi
-          tail -n 3 "$RUNNER_TEMP/test_out.txt" || true
+          tail -n 25 "$RUNNER_TEMP/test_out.txt" || true
           exit "$status"
 
       # Every browser run of the lab prints one LAB-RUN line naming its
