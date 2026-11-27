@@ -1,6 +1,6 @@
 ## 0.2.0
 
-- **Breaking: one sender can no longer monopolize the seats** -
+- **Breaking (Behavior): one sender can no longer monopolize the seats** -
   `BridgeConfig.maxSeatsPerOrigin` (default 4 of the 16) bounds the
   seats a single origin holds at once; requests without an `Origin`
   header share one originless bucket under the same cap, and an
@@ -11,8 +11,9 @@
   every other sender `503`. The gate lives inside the global seats
   (the full server still answers `server_busy` first, a value at or
   above `maxConcurrentRequests` never binds, and one origin filling
-  its share never deducts from another origin's).
-- **Breaking: listed origins ship with a rate budget** -
+  its share never deducts from another origin's). See
+  MIGRATION-0.2.0.md.
+- **Breaking (Behavior): listed origins ship with a rate budget** -
   `OriginPolicy.listedPerOriginPerMinute` defaults to 120/minute
   instead of unquotaed, so a compromised listed origin cannot flood
   the shared seats faster than two sustained commands a second; over
@@ -20,6 +21,40 @@
   `Retry-After`. `0` remains the explicit documented opt-out keeping
   listed origins unquotaed. See MIGRATION-0.2.0.md for both default
   changes.
+- **Breaking (Behavior): the handler budget is on by default** -
+  `handlerTimeout` left at null no longer means "no deadline"; it
+  selects the configured default budget (`BridgeConfig.handlerTimeout`,
+  30 seconds shipped). A handler running past the budget is answered
+  `504 handler_timeout`, its seat is freed, and the still-running work
+  becomes a counted orphan; `stop()` awaits orphans up to the same
+  budget and retires whatever remains at its return. To ask for no
+  handler deadline at all, pass the named constant
+  `LocalIntakeServer.noHandlerTimeout` (its value is `Duration.zero`,
+  which is no longer an error - a negative budget still throws
+  `ArgumentError` at construction). See MIGRATION-0.2.0.md.
+- **Breaking (API): the three intake names are renamed, the old ones
+  removed with no deprecation window** - the token header
+  `X-Portal-Token` becomes `X-Bridge-Token`, the generator
+  `generatePortalToken()` becomes `generateBridgeToken()`, and the
+  originless command source marker `'unknown-portal'` becomes
+  `'unknown-origin'`. A request carrying `X-Portal-Token` is treated
+  as a request without a token (the bridge writes one muted warning
+  per second naming `X-Bridge-Token`, so the developer sees why the
+  token did not authenticate), the allowed CORS headers list carries
+  `X-Bridge-Token` alone, and the token length cap (`400
+  token_too_long`) and the single-value header gate now guard the new
+  name. See MIGRATION-0.2.0.md for the three renames and the
+  migration paths.
+- **Breaking (Compatibility): the WebSocket channel refuses to arm
+  below Dart 3.13** - `WebSocketTransformer.upgrade` carries the
+  `maxPayloadLength` transport ceiling from Dart 3.13 onward, and the
+  channel never runs without it: arming `BridgeConfig.wsPath` on an
+  older SDK throws `ArgumentError` at server construction with the
+  reason named (the package's declared 3.8 floor still compiles, and
+  every non-channel path works unchanged there - the message says
+  so). On Dart 3.13+ the channel works exactly as before, with the
+  ceiling enforced at the upgrade and no fallback upgrade without a
+  memory limit. See MIGRATION-0.2.0.md.
 - Security: a WebSocket channel holds no command seat before its
   credential. Credential-less channels wait in a small internal pool -
   8 channels in total, `maxSeatsPerOrigin` (default 4) per origin - and
@@ -80,19 +115,19 @@
   as `https`. On Dart 3.8.0 the parser refuses a `Transfer-Encoding`
   whose value is not exactly `chunked` and closes the connection; on
   Dart 3.13 and later it reads the value's last comma piece.
-- Added: `BridgeConfig.maxOpenConnections` - an optional hard ceiling
-  on open connections (`dart:io` never bounds them): a request arriving
-  while more sockets than the cap are open answers `503`, and once the
-  count drops the next request is served. `0` - the default - keeps it
-  off, and the wire never refuses for open sockets alone.
-- Added: `CommandOutcome.data` - optional JSON-encodable data the page
+- Behavior: `BridgeConfig.maxOpenConnections` - an optional hard
+  ceiling on open connections (`dart:io` never bounds them): a request
+  arriving while more sockets than the cap are open answers `503`, and
+  once the count drops the next request is served. `0` - the default -
+  keeps it off, and the wire never refuses for open sockets alone.
+- API: `CommandOutcome.data` - optional JSON-encodable data the page
   reads back on success, sent as the `data` field of the success reply.
   Data over the internal page cap (64 KiB after JSON encoding) refuses
   the whole result with `413 reply_data_too_large` - never truncated,
   and the command stays executed; a failed reply carries the error
   contract and never data. Without `data` the success reply is
   byte-identical to previous releases.
-- Added: the correlation-id dedup helper as package surface -
+- API: the correlation-id dedup helper as package surface -
   `DedupLedger` and `idempotentCommand` (moved out of
   `example/idempotent_handler.dart`, which is now a wiring demo on top
   of them). The ledger registers a command under its correlation id
@@ -104,13 +139,13 @@
   non-positive `ttl` or `maxEntries` throws `ArgumentError` at
   construction - release builds included - and the default clock is
   monotonic, so a wall-clock jump never ends an entry before its ttl.
-- Added: an optional `::1` listener - `BridgeConfig.listenIPv6Loopback`
-  (default off) binds a second loopback-IPv6 listener (`::1`, IPv6-only)
-  at the same port, and the local host authorities widen in the same
-  start with the `[::1]:port` and bare `::1` spellings; a host that
-  cannot bind `::1` warns once and stays on `127.0.0.1` alone. Off, the
-  authority set keeps exactly its IPv4 loopback forms.
-- Added: an optional unix-socket listener - `BridgeConfig.unixSocketPath`
+- API: an optional `::1` listener - `BridgeConfig.listenIPv6Loopback`
+  (default off) binds a second loopback-IPv6 listener (`::1`,
+  IPv6-only) at the same port, and the local host authorities widen in
+  the same start with the `[::1]:port` and bare `::1` spellings; a host
+  that cannot bind `::1` warns once and stays on `127.0.0.1` alone.
+  Off, the authority set keeps exactly its IPv4 loopback forms.
+- API: an optional unix-socket listener - `BridgeConfig.unixSocketPath`
   (default off; Linux and macOS) also serves HTTP on the named
   filesystem path for local CLI clients. The socket file's owner-only
   permissions (mode 0600, enforced by the system `/bin/chmod` at its
@@ -131,7 +166,7 @@
   and when its bind fails the guard - so a restart on the same path
   rebinds cleanly. The open-connection cap
   counts this listener too.
-- Added: an optional TLS transport - `BridgeConfig.securityContext`
+- API: an optional TLS transport - `BridgeConfig.securityContext`
   (default off) binds the bridge's TCP listeners as plain sockets fed
   through the package's TLS handshake gate with a ready
   `SecurityContext` the host
@@ -143,7 +178,7 @@
   the certificate. Off by default the wire stays letter identical plain
   HTTP; setting `securityContext` together with `unixSocketPath` throws
   `ArgumentError` at construction.
-- Added: the mobile lifecycle pair - `pause()` closes every bound
+- API: the mobile lifecycle pair - `pause()` closes every bound
   listener under the same graceful drain `stop()` runs and remembers the
   bound port; `resume()` rebinds on that exact port with no fallbacks,
   and when another process took the port meanwhile it refuses with
@@ -155,7 +190,7 @@
   and the `protocolVersion` wire-contract constant
   (`BridgeInstanceInfo.bridgeProtocolVersion`). `start()` while paused
   supersedes the pause.
-- Added: the health page - `BridgeConfig.healthPath` (default off) arms
+- API: the health page - `BridgeConfig.healthPath` (default off) arms
   a `GET` route that passes the standing gate (origin and Host gates,
   seat caps, the one admission step with its settle) and answers the
   accepted origin alone with literally `{"ok":true}` - no version
@@ -163,73 +198,42 @@
   fingerprint the host; a non-accepted origin reads the standing
   refusal with no CORS echo. The page answers on the bridge's own
   listener only; disarmed, the path keeps its standing `405`.
-- **Breaking: the handler budget is on by default** - `handlerTimeout`
-  left at null no longer means "no deadline"; it selects the configured
-  default budget (`BridgeConfig.handlerTimeout`, 30 seconds shipped). A
-  handler running past the budget is answered `504 handler_timeout`, its
-  seat is freed, and the still-running work becomes a counted orphan;
-  `stop()` awaits orphans up to the same budget and retires whatever
-  remains at its return. To ask for no handler deadline at all, pass the
-  named constant `LocalIntakeServer.noHandlerTimeout` (its value is
-  `Duration.zero`, which is no longer an error - a negative budget still
-  throws `ArgumentError` at construction). See MIGRATION-0.2.0.md.
-- Added: a bounded stop - `stop({Duration? timeout})` returns a
+- API: a bounded stop - `stop({Duration? timeout})` returns a
   `BridgeStopReport` (seats and orphan handlers still running at the
-  return); with a timeout the whole drain - the graceful close, the seat
-  wait, the orphan grace - is bounded by it, and a listener that misses
-  the graceful close inside the deadline is force-closed. The live
-  WebSocket channels close in parallel, each bounded by the deadline's
-  remainder: a channel that misses its close inside the deadline never
-  stretches the stop past it and is announced by count at the return.
-  Every
+  return); with a timeout the whole drain - the graceful close, the
+  seat wait, the orphan grace - is bounded by it, and a listener that
+  misses the graceful close inside the deadline is force-closed. The
+  live WebSocket channels close in parallel, each bounded by the
+  deadline's remainder: a channel that misses its close inside the
+  deadline never stretches the stop past it and is announced by count
+  at the return. Every
   still-working orphan is retired at the stop's return: a restart never
   inherits the previous generation's orphans into its live-work budget,
   and they stay visible in the orphan counter until they settle.
-- Added: read-only counters - `LocalIntakeServer.counters` answers a
+- API: read-only counters - `LocalIntakeServer.counters` answers a
   `BridgeCounters` snapshot: active seats, working orphans across
   generations with the retired ones named, every rejection by wire code
   (counted at the single reply exit), and two overlapping tallies -
   protocol-shape rejections (the pre-admission gates the protection
-  counter never sees) and pairing rejections (the pairing route plus the
-  pairing-family codes off it).
-- Added: `onOrphanSettled` on the server - fired once per orphaned
+  counter never sees) and pairing rejections (the pairing route plus
+  the pairing-family codes off it).
+- API: `onOrphanSettled` on the server - fired once per orphaned
   handler settlement, current-generation or retired alike; a throwing
   callback is contained with one telemetry error line and never breaks
   the wire or the drain.
-- Added: the cooperative cancel signal - `TrustedCommand.cancellation`
+- API: the cooperative cancel signal - `TrustedCommand.cancellation`
   carries a per-command `CommandCancelSignal` the handler may read; the
   intake fires it at the handler-budget expiry (the 504 moment) and at
   stop. A command built outside the intake carries the const
   never-cancelled instance. No client-disconnect detection is wired.
-- Changed: the periodic idle sweeps cover the three pairing maps -
+- Behavior: the periodic idle sweeps cover the three pairing maps -
   expired sessions, paired records (their id-index mirror leaving with
   them), and replay-cache entries leave on ordinary request traffic, at
   most once a second. A session swept by idleness answers
-  `pair_code_invalid` for its code instead of `pair_code_expired` (both
-  403, both telling the page to pair again); records and replay are
-  wire-invisible.
-- **Breaking: the three intake names are renamed, the old ones removed
-  with no deprecation window** - the token header `X-Portal-Token`
-  becomes `X-Bridge-Token`, the generator `generatePortalToken()`
-  becomes `generateBridgeToken()`, and the originless command source
-  marker `'unknown-portal'` becomes `'unknown-origin'`. A request
-  carrying `X-Portal-Token` is treated as a request without a token
-  (the bridge writes one muted warning per second naming
-  `X-Bridge-Token`, so the developer sees why the token did not
-  authenticate), the allowed CORS headers list carries `X-Bridge-Token`
-  alone, and the token length cap (`400 token_too_long`) and the
-  single-value header gate now guard the new name. See
-  MIGRATION-0.2.0.md for the three renames and the migration paths.
-- **Breaking: the WebSocket channel refuses to arm below Dart 3.13** -
-  `WebSocketTransformer.upgrade` carries the `maxPayloadLength`
-  transport ceiling from Dart 3.13 onward, and the channel never runs
-  without it: arming `BridgeConfig.wsPath` on an older SDK throws
-  `ArgumentError` at server construction with the reason named (the
-  package's declared 3.8 floor still compiles, and every non-channel
-  path works unchanged there - the message says so). On Dart 3.13+ the
-  channel works exactly as before, with the ceiling enforced at the
-  upgrade and no fallback upgrade without a memory limit.
-- Changed: the token failure window is a signal about wrong guesses,
+  `pair_code_invalid` for its code, while `pair_code_expired` stays the
+  answer for a code past its 120-second life (both 403, both telling
+  the page to pair again); records and replay are wire-invisible.
+- Behavior: the token failure window is a signal about wrong guesses,
   never a refusal of the verified sender - the correct token is compared
   and accepted whatever the failure history, from any sender, with or
   without an `Origin` header, and a match clears the window. The
@@ -239,7 +243,7 @@
   stamp nothing, and write one muted security line per second carrying
   the attempt count. `token_locked` is never produced for the correct
   token.
-- Changed: `update()` additionally refuses a configured token below the
+- API: `update()` refuses a configured token below the
   character-diversity floor (fewer than 8 distinct characters - a
   repeated-character token is guessable at a glance);
   `generateBridgeToken()` output always passes.
@@ -247,26 +251,26 @@
   and stays active at startup with one rotation warning -
   `updateFromSaved` refuses no legitimate saved state at upgrade; the
   refusal lives in `update()` at set time alone.
-- Added: a single admission step - `IntakeProtection.admit` answers one
+- API: a single admission step - `IntakeProtection.admit` answers one
   request with one `IntakeAdmission` record that carries the accepted
   route, the CORS echo decision, and the verbose-error decision,
   `TrustedCommand.admission` delivers that record to the host, and
   `intakeRejectionRegistry` is the single table behind every rejection
   code on the wire.
-- Changed: a `413` over an unread body now writes the reply and flushes
+- Behavior: a `413` over an unread body writes the reply and flushes
   before the write side closes - the sender reads the code even when it
   never stops sending, the seat frees at the reply, and the remaining
   body drains in the background within the existing discard limits.
-- Changed: `update()` refuses a configured token longer than the wire's
-  header cap (a request carrying it could never pass `token_too_long`),
-  and a saved token over the cap boots the token layer inert with one
-  loud rotation warning instead of silently never matching.
-- Changed: a `HEAD` response carries headers only - no JSON body on the
-  wire.
-- Documentation: the allowlist port semantics are stated and pinned by a
-  witness - an entry with an explicit port matches that port alone; a
-  bare or wildcard entry matches the host on any port.
-- Added: the pairing route - `POST /pair` (only while pairing is armed)
+- API: `update()` refuses a configured token longer than the wire's
+  header cap (a request carrying it could never pass `token_too_long`).
+- Compatibility: a saved token over the cap boots the token layer inert
+  with one loud rotation warning instead of silently never matching.
+- Behavior: a `HEAD` response carries headers only - no JSON body on
+  the wire.
+- API: the allowlist port semantics are stated and pinned by a witness
+  - an entry with an explicit port matches that port alone; a bare or
+  wildcard entry matches the host on any port.
+- API: the pairing route - `POST /pair` (only while pairing is armed)
   exchanges the displayed one-time code for the origin-bound token; its
   replies always echo CORS (the code is the gate, not the origin), and
   disarmed the path rides the ordinary non-root behavior, wire letter
@@ -274,14 +278,14 @@
   `X-Bridge-Pairing` only while pairing is armed, and the single-value
   gate and the 256-byte length gate guard it there (`400
   duplicate_header`, `400 pairing_too_long`).
-- Added: the real-browser lab pairs a page end to end - a desktop
+- API: the real-browser lab pairs a page end to end - a desktop
   Chrome/Chromium headlessly pairs with the displayed code, signs its
   command with WebCrypto (the same HMAC construction the server
   verifies), reads the reply, and sees the replay and the proofless
   page refused; `dart run tool/emulator_pairing_lab.dart` runs the same
   story against an emulator's browser over adb reverse, reading the
   verdicts from the page's report collector.
-- Added: proof-of-possession for paired pages - under
+- Security: proof-of-possession for paired pages - under
   `requireOriginWithToken`, a page signs every request with HMAC-SHA-256
   (the package's internal digest primitives) over the pairing id, a
   millisecond wall-clock stamp, the method, the path, and the
@@ -293,19 +297,17 @@
   verification compares constant-time, the
   origin binding is checked before any token verdict, and an unqualified
   origin never learns whether its proof was valid.
-- Changed: the pairing entrances refuse a disposed protection -
-  `startPairing` and `pair` throw `StateError` after `dispose` (matching
-  the admission path's `protection_disposed` refusal) instead of minting
-  a code or judging one against a disposed object; and
-  `restorePairedOrigin` throws `ArgumentError` for a remainder above the
-  paired-token age (24 hours) - a pairing never outlives the token age
-  it was issued with, so a bigger remainder is a corrupt host timestamp
-  rather than a binding; the exact age still restores.
-- Deprecated: the per-question protection probes (`check`,
+- API: the pairing entrances refuse a disposed protection -
+  `startPairing` and `pair` throw `StateError` after `dispose`, and
+  `restorePairedOrigin` throws `ArgumentError` for a remainder above
+  the paired-token age (24 hours) - a pairing never outlives the token
+  age it was issued with, so a bigger remainder is a corrupt host
+  timestamp rather than a binding; the exact age still restores.
+- Compatibility: the per-question protection probes (`check`,
   `echoesCorsFor`, `verboseErrorsFor`, `noteRejection`, `logRejection`,
-  and `normalize`) in favor of the admission record; removal is planned
-  for 0.3.0.
-- Added: `OriginPolicy.requireOriginWithToken` (off by default - the
+  and `normalize`) are deprecated in favor of the admission record;
+  removal is planned for 0.3.0.
+- Security: `OriginPolicy.requireOriginWithToken` (off by default - the
   default wire is unchanged) requires an admitted origin AND a token
   bound to it: a qualified origin without a valid token answers `403
   token_required`, and the token alone never admits - from an
@@ -317,26 +319,25 @@
   parent domain's new questions - the parent is the host's last two
   labels - beside the global 10-per-10-minutes
   ceiling, its suppressed questions fire nothing and spend nothing from
-  the global budget, so an unrelated origin keeps its question; and at
-  the 1,000-decision cap the oldest remembered deny is now evicted
-  before any always-allow decision, so a session full of denied origins
-  no longer washes out the pages the user approved (a cap with no deny
-  still evicts the oldest entry).
-- Changed: the parent-budget-suppressed question reads its own code now
-  - `429 origin_parent_rate_limited` with the honest `Retry-After`
-  (the remainder of the parent's window) - instead of the generic
-  `origin_pending`, so a page can tell "your site asked too much" from
-  "a consent window is open"; the global ceiling still answers
-  `origin_pending`, and with the option off (the default) the wire is
-  unchanged. The new code sits in `intakeRejectionRegistry` and the
-  README wire tables, walked on the live wire like every other code.
-- Added: `IntakeProtection.onQuestionClosed` - fired exactly once when a
+  the global budget, so an unrelated origin keeps its question. A
+  parent-budget-suppressed question reads its own code - `429
+  origin_parent_rate_limited` with the honest `Retry-After` (the
+  remainder of the parent's window) - so a page can tell "your site
+  asked too much" from "a consent window is open"; the global ceiling
+  still answers `origin_pending`, and with the option off (the default)
+  the wire is unchanged. The code sits in `intakeRejectionRegistry` and
+  the README wire tables, walked on the live wire like every other
+  code. And at the 1,000-decision cap the oldest remembered deny is
+  evicted before any always-allow decision, so a session full of denied
+  origins never washes out the pages the user approved (a cap with no
+  deny still evicts the oldest entry).
+- API: `IntakeProtection.onQuestionClosed` - fired exactly once when a
   consent question window ends (the answer arrived, the host future
   threw, or the ask timeout closed it) with the normalized origin, so
   the host dialog closes without racing `askTimeout`;
   `onUnknownOrigin`'s signature is unchanged, budget-suppressed
   questions never signal, and `dispose()` closes the rest silently.
-- Added: the payload-contract options - seven `BridgeConfig` switches,
+- API: the payload-contract options - seven `BridgeConfig` switches,
   **every one off by default, so the default wire is byte-identical to
   previous releases**; each carries enabled and disabled witnesses:
   - `strictPayloadItems` - a JSON command list (top-level or under a
@@ -380,14 +381,14 @@
     commands); below the ceiling a named file (image or PDF) travels
     with its command. Off, the type refuses `415` and the header list
     never offers `X-Command`.
-- The four new refusal codes (`invalid_payload_item`,
+- API: the four refusal codes (`invalid_payload_item`,
   `malformed_json_shape`, `invalid_json`, `non_json_body`) sit in
   `intakeRejectionRegistry` and the README wire tables, walked on the
   live wire like every other code; the handler-refusal statuses are
   handler-chosen outcomes and stay outside the registry by its contract,
   and `command_required` (the unnamed binary body) joins the same
   registry and tables with its own walk.
-- Added: the streaming reply - `BridgeConfig.allowStreamingReplies`
+- API: the streaming reply - `BridgeConfig.allowStreamingReplies`
   (off by default) plus the request header `X-Bridge-Stream: events`
   turn one command into a `text/event-stream` reply: every handler
   progress report travels as one `event: progress` frame the page
@@ -402,8 +403,11 @@
   cancel signal, and turns the sink inert. The page closing mid-stream
   reaches the handler as cancellation and leaves no seat nor socket.
   The header joins the CORS allowed-header list only while the option
-  is on; the disarmed wire is letter identical to previous releases.
-- Added: the WebSocket channel - `BridgeConfig.wsPath` (null, off by
+  is on; the disarmed wire is letter identical to previous releases. A
+  streamed command carries the same admission record the single-reply
+  path delivers - `TrustedCommand.admission` on a streaming handler
+  names the accepted route and the origin trust grade.
+- API: the WebSocket channel - `BridgeConfig.wsPath` (null, off by
   default) opens a `dart:io` WebSocket on the host-chosen path. The
   handshake passes the same single admission step every request
   passes: origin, fetch metadata (the accepted shape is the browser's
@@ -431,8 +435,10 @@
   (`ws_auth_timeout`, `ws_auth_invalid`, `ws_message_too_large`,
   `ws_idle_timeout`) and `progress_data_too_large` sit in
   `intakeRejectionRegistry` and both README wire tables, walked on
-  their own wire like every other code.
-- Added: the host feed - `LocalIntakeServer.acceptHostFeed(...)` hands
+  their own wire like every other code. Every channel refusal counts
+  exactly once in the per-code counters - the payload-shape paths and
+  `server_busy` alike - the same contract the HTTP replies have.
+- API: the host feed - `LocalIntakeServer.acceptHostFeed(...)` hands
   a message from a non-HTTP channel (an Android `WebMessageListener`
   callback, an iOS `WKScriptMessage`, a native client) to the same
   single admission step and the same payload checks, and returns an
@@ -449,7 +455,7 @@
   layer, body limit, payload checks, the live-work budget - applies
   unchanged, and every rejection counts through the same rejection
   counter. The HTTP wire is letter identical to previous releases.
-- Added: `tool/native_messaging_adapter.dart` - a dependency-free
+- API: `tool/native_messaging_adapter.dart` - a dependency-free
   reference native-messaging host for browser extensions: four
   little-endian length bytes then JSON on stdin, and the standing
   reply contract framed the same way on stdout. The extension origin
@@ -457,7 +463,7 @@
   and feeds the same admission step as a platform-verified origin; a
   frame declaring a length over the body cap is refused from the
   header alone and its body is never read.
-- Added: `LocalIntakeServer.handleHostRequest(request, hostPort: ...)`
+- API: `LocalIntakeServer.handleHostRequest(request, hostPort: ...)`
   - the mount on an existing `dart:io` server: the host keeps its own
   `HttpServer` and its routing and forwards the requests the bridge
   owns to this entry, which processes each one through the full
@@ -492,7 +498,7 @@
   code is shown through the host's own channel (its screen, or its
   terminal), and the local-page documentation and example serve a
   status page, never a pairing-code page.
-- Added: `BridgeConfig.localPages` - the local pages, an optional
+- API: `BridgeConfig.localPages` - the local pages, an optional
   page from memory for the host without a UI (a CLI tool, a service
   showing a status readout or its settings): pass the pages (a path,
   the content, the content type) and a `GET` on exactly those paths
@@ -515,7 +521,7 @@
   browser send-method checks, listed quota, and seat caps as a
   listed origin, while any other loopback origin (another port
   included) stays refused exactly as before.
-- Added: the four protection presets - `BridgePresets.closed()`,
+- API: the four protection presets - `BridgePresets.closed()`,
   `allowList(origins:)`, `tokenOnly(token:)`, and
   `mobile(token:, origins:)` (the paired-host shape: the token plus
   `requireOriginWithToken` and pairing armed with the host's
@@ -524,14 +530,14 @@
   allow-all and none arms discovery, and the standing token validation
   runs at build time - a preset never arms a token the wire would
   refuse.
-- Added: `LocalIntakeServer.telemetry` and
+- API: `LocalIntakeServer.telemetry` and
   `LocalIntakeServer.correlationIdGenerator` are optional - the host
   passes nothing to get sensible defaults. Telemetry defaults to the
   line-writing `PrintTelemetry` (security warnings reach stderr;
   pass `SilentTelemetry` to hide them), and correlation ids default to
   an internal secure-random generator; an incoming `X-Correlation-Id`
   is still honored verbatim and never passes through the generator.
-- Added: `bin/bridge_demo.dart` - a token-only bridge a host can try
+- API: `bin/bridge_demo.dart` - a token-only bridge a host can try
   from the command line in a minute (`dart bin/bridge_demo.dart`, or
   `dart run localhost_bridge:bridge_demo` from a depending project).
   It generates and prints its own token with the bound port, a ready
@@ -539,42 +545,30 @@
   commands with that token and refuses every argument beyond
   `--port <n>` loudly before anything binds - an allow-all or
   discovery opener cannot be passed to it.
-- Deprecated: `IntakeProtection.updateFromSaved` - build the
-  `OriginPolicy` from your own saved settings and call
+- Compatibility: `IntakeProtection.updateFromSaved` is deprecated -
+  build the `OriginPolicy` from your own saved settings and call
   `update(policy:, token:)`, which validates at set time instead of
   landing an unknown mode string on the closed default in silence; and
-  `IntakeProtection.onRejected` - refresh from the admission records
-  you settle (a record with a non-null `rejection` is a rejection; the
-  outside ones ride `IntakeAdmission.noteAuthorityReject`), or read
-  the `rejectedCount` getter. Both keep working unchanged; removal is
-  planned for 0.3.0.
-- Changed: `ArrivalGuard` settles as an experimental host-side tool -
+  `IntakeProtection.onRejected` is deprecated - refresh from the
+  admission records you settle (a record with a non-null `rejection` is
+  a rejection; the outside ones ride `IntakeAdmission.noteAuthorityReject`),
+  or read the `rejectedCount` getter. Both keep working unchanged;
+  removal is planned for 0.3.0.
+- API: `ArrivalGuard` settles as an experimental host-side tool -
   it stays in the public API as a standalone meter you record arrival
   facts into and stays deliberately unwired from the server's admission
   path (the intake never calls it; the wire enforces its per-origin
   budgets without it).
-- Changed: channel rejections count exactly once per refusal in the
-  per-code counters - the five channel refusal paths
-  (`unsupported_payload_shape`, `invalid_payload_item`, `invalid_json`,
-  `non_json_body` from the JSON path, and `server_busy`) used to rise
-  by two per refusal; every channel refusal now reads one increment,
-  the same contract the HTTP replies always had.
-- Changed: a streamed command carries the same admission record the
-  single-reply path delivers - `TrustedCommand.admission` on a
-  streaming command used to be the unrecorded placeholder, so a
-  streaming handler read no accepted route and no origin trust grade.
 - Security: the settle step re-checks the consumable admission facts on
   the live state - a one-time grant still present, a pairing proof's
   replay key still unused, the per-origin quota window and the token
   guess budget not yet full. A request admitted and then held before
   its acceptance gate (the host-owned telemetry measure is such a
-  holder) no longer rides a fact a concurrent request already
-  consumed: its record settles into the standing refusal for the live
-  state (`origin_pending`, `pair_signature_replay`,
-  `origin_rate_limited`, or `token_locked`), so one allow-once grant
-  accepts one request and one pairing proof passes once, whatever the
-  concurrency. Records whose facts are unchanged settle exactly as
-  before.
+  holder) settles into the standing refusal for the live state
+  (`origin_pending`, `pair_signature_replay`, `origin_rate_limited`,
+  or `token_locked`), so one allow-once grant accepts one request and
+  one pairing proof passes once, whatever the concurrency. Records
+  whose facts are unchanged settle exactly as before.
 - Security: the TLS handshake window is closed at both ends - the
   whole handshake from accept to delivery is bounded by the transport
   deadline, so a client that completes its first record and then goes
