@@ -1,56 +1,114 @@
 # Migrating to localhost_bridge 0.2.0
 
-0.2.0 renames the three intake names and removes the old ones with no
-deprecation window: the old header name is not accepted, the old
-generator does not exist, and the originless command source marker
-carries the new value. This guide names the three renames and the path
-for each; later 0.2.0 items extend this guide as they land. It also
-changes two defaults on purpose - the per-origin seat share and the
-listed-origin rate budget - both documented below.
+Every breaking change in 0.2.0 has exactly one section here, in the
+CHANGELOG's order: what was, what is now, and what you change in your
+code, each with a short example. Everything else in 0.2.0 is additive
+or off by default - a host that configures only what it configured in
+0.1.x keeps its wire letter, inside the five changes below.
 
-## The per-origin seat share is bounded by default
+## One sender can no longer monopolize the seats
 
-0.1.x let one origin hold all sixteen concurrency seats; 0.2.0 bounds
-each origin's share to `BridgeConfig.maxSeatsPerOrigin` (default 4).
-A monopolizing origin past its share now reads `503 origin_seat_limit`
-instead of pushing every other sender into `503 server_busy`.
+**What was:** 0.1.x let one origin hold all sixteen concurrency seats:
+a listed page - or one allow-all page - firing slow requests answered
+every other sender `503 server_busy`.
 
-- A page that legitimately holds more than four concurrent commands
-  (a dashboard firing batches) raises the value: `BridgeConfig(
-  maxSeatsPerOrigin: 8)` - a value at or above `maxConcurrentRequests`
-  never binds, which restores the 0.1.x shape exactly.
-- Requests without an `Origin` header (the token layer's clients) share
-  one originless bucket under the same cap; split heavy integrations
-  across distinct tokens if one bucket is too small for them.
-- Nothing else moves: the global seats, the pairing layer, and the
-  quotas keep their contracts, and one origin filling its share never
-  deducts from another origin's.
+**What is now:** each origin's share is bounded by
+`BridgeConfig.maxSeatsPerOrigin` (default 4 of the 16). Past its share
+the sender reads `503 origin_seat_limit` while the server still has
+room for others. Requests without an `Origin` header (the token
+layer's clients) share one originless bucket under the same cap, and
+an `OPTIONS` preflight counts into its origin's share exactly like a
+command. The gate lives inside the global seats: the full server
+still answers `server_busy` first, a value at or above
+`maxConcurrentRequests` never binds, and one origin filling its share
+never deducts from another origin's.
+
+**What you change:** nothing, if no sender legitimately holds more
+than four concurrent commands. A dashboard firing batches raises the
+share - and a value at or above `maxConcurrentRequests` restores the
+0.1.x shape exactly:
+
+```dart
+import 'package:localhost_bridge/localhost_bridge.dart';
+
+const config = BridgeConfig(
+  // A dashboard that legitimately holds eight concurrent commands.
+  // A value at or above maxConcurrentRequests never binds, which is
+  // the 0.1.x shape.
+  maxSeatsPerOrigin: 8,
+);
+```
 
 ## Listed origins ship with a rate budget
 
-0.1.x left listed origins unquotaed (`listedPerOriginPerMinute` was 0);
-0.2.0 defaults it to 120 requests/minute per listed origin. Over the
-budget the page reads `429 origin_rate_limited` with the honest
-`Retry-After` - it already handles that code on the allow-all path.
+**What was:** 0.1.x left listed origins unquotaed
+(`listedPerOriginPerMinute` was 0), so one compromised listed page
+could flood the shared seats without a budget.
 
-- A listed page that can legitimately burst past 120 commands a minute
-  raises the value, or writes `listedPerOriginPerMinute: 0` explicitly
-  to restore the 0.1.x unquotaed shape.
-- Nothing else moves: the same code, the same honest `Retry-After`, and
-  watch mode (`reportOnly`) still covers the quota before you commit to
-  it.
+**What is now:** it defaults to 120 requests/minute per listed origin.
+Over the budget the page reads `429 origin_rate_limited` with the
+honest `Retry-After` - the code the allow-all path already answers, so
+a page that handles it there handles it here. Watch mode
+(`reportOnly`) still covers the quota before you commit to it.
 
-## The three renames
+**What you change:** nothing, unless a listed page legitimately bursts
+past 120 commands a minute. Raise the value, or write `0` explicitly
+to restore the 0.1.x unquotaed shape:
+
+```dart
+import 'package:localhost_bridge/localhost_bridge.dart';
+
+const policy = OriginPolicy(
+  // The explicit documented opt-out: listed origins stay unquotaed,
+  // as in 0.1.x.
+  listedPerOriginPerMinute: 0,
+);
+```
+
+## The handler budget is on by default
+
+**What was:** in 0.1.x `handlerTimeout` was null by default and null
+meant "no deadline": a stuck handler held its seat forever, `stop()`
+waited for it without a bound, and orphaned handlers kept counting
+across a restart - after sixteen of them, every command was answered
+`503 server_busy`.
+
+**What is now:** leaving `handlerTimeout` at null selects the
+configured default budget: `BridgeConfig.handlerTimeout`, 30 seconds
+shipped. A handler running past the budget is answered `504
+handler_timeout` (the reply and the "outcome unknown" contract are
+unchanged), its seat is freed, and the still-running work becomes a
+counted orphan; `stop()` awaits orphans up to the same budget and
+retires whatever remains at its return.
+
+**What you change:** nothing, if 30 seconds suits every handler. To
+keep the old unbounded behavior, pass the named constant - its value
+is `Duration.zero`, which used to throw `ArgumentError` and is now the
+constant's value; a negative duration still throws at construction:
+
+```dart
+import 'package:localhost_bridge/localhost_bridge.dart';
+
+final server = LocalIntakeServer(
+  onCommand: (command) async => const CommandOutcome(ok: true),
+  // The 0.1.x unbounded behavior: Duration.zero, no deadline at all.
+  handlerTimeout: LocalIntakeServer.noHandlerTimeout,
+);
+```
+
+## The three intake names are renamed, the old ones removed with no deprecation window
 
 | 0.1.x | 0.2.0 | Where it shows |
 |---|---|---|
 | `X-Portal-Token` | `X-Bridge-Token` | the token header a client sends |
-| `generatePortalToken()` | `generateBridgeToken()` | the token generator (`IntakeProtection`'s library export) |
+| `generatePortalToken()` | `generateBridgeToken()` | the token generator (a library export of the package) |
 | `'unknown-portal'` | `'unknown-origin'` | the value of `TrustedCommand.source` when the request carried no `Origin` header |
 
-## Migrating the header
+**What you change:** send and compare the new names only - the old
+header is not accepted, the old generator does not exist, and the
+marker carries the new value.
 
-Send the token in `X-Bridge-Token`:
+The header: send the token in `X-Bridge-Token`:
 
 ```bash
 curl -X POST http://127.0.0.1:9100/ \
@@ -61,136 +119,62 @@ curl -X POST http://127.0.0.1:9100/ \
 
 A request that still carries `X-Portal-Token` is treated as a request
 without a token: the token layer ignores the value entirely, so a
-closed or unqualified origin policy answers the same rejection it would
-answer a tokenless request. The bridge writes one muted security
+closed or unqualified origin policy answers the same rejection it
+would answer a tokenless request. The bridge writes one muted security
 warning per second naming `X-Bridge-Token`, so the log tells the
 developer why the token did not authenticate; a flood of legacy-header
 requests produces one line per second with the suppressed count on the
-next line, never a log flood.
+next line, never a log flood. If both headers travel in one request,
+the new header is the token and the warning still fires while the
+legacy header remains. Browser pages see the new name in the
+preflight: the `Access-Control-Allow-Headers` list carries
+`X-Bridge-Token` alone, so a page still sending the old name gets a
+preflight that does not allow it and the request never leaves the
+browser. The token length cap answers `400 token_too_long` over an
+`X-Bridge-Token` header longer than 1,024 UTF-8 bytes (the message
+names the new header), and the single-value header gate refuses a
+duplicated `X-Bridge-Token` with `400 duplicate_header`.
 
-If both headers travel in one request, the new header is the token: the
-legacy value is ignored and the warning still fires while the legacy
-header remains.
-
-Browser pages see the new name in the preflight: the
-`Access-Control-Allow-Headers` list carries `X-Bridge-Token` alone, so
-a page still sending the old name gets a preflight that does not allow
-it and the request never leaves the browser.
-
-## Migrating the generator
+The generator and the source marker:
 
 ```dart
-// 0.1.x
-final token = generatePortalToken();
-// 0.2.0
-final token = generateBridgeToken();
+import 'package:localhost_bridge/localhost_bridge.dart';
+
+void main() {
+  // 0.1.x called generatePortalToken(); 0.2.0:
+  final token = generateBridgeToken();
+  assert(token.length == 64);
+  // A host that branches on the command source compares
+  // 'unknown-origin' (was 'unknown-portal'):
+  //   if (command.source == 'unknown-origin') { ... }
+}
 ```
 
-The shape is unchanged: 64 hex characters from a secure random source.
+The generator's shape is unchanged: 64 hex characters from a secure
+random source.
 
-## Migrating the source marker
+## The WebSocket channel refuses to arm below Dart 3.13
 
-Hosts that branch on `TrustedCommand.source` compare against
-`'unknown-origin'` instead of `'unknown-portal'`. The value appears
-only when the request carried no `Origin` header (local command-line
-clients and similar).
+**What was:** 0.1.x had no channel, and 0.2.0's channel has a hard SDK
+floor: `WebSocketTransformer.upgrade` carries the `maxPayloadLength`
+transport ceiling from Dart 3.13 onward, and the channel never runs
+without a frame memory limit.
 
-## The wire surfaces that changed with the names
+**What is now:** arming `BridgeConfig.wsPath` on an older SDK throws
+`ArgumentError` at server construction with the reason named. The
+package's declared 3.8 floor still compiles, and every non-channel
+path works unchanged there - the message says so. On Dart 3.13+ the
+channel works exactly as documented, with the ceiling enforced at the
+upgrade and no fallback upgrade without a memory limit.
 
-- The token length cap answers `400 token_too_long` over an
-  `X-Bridge-Token` header longer than 1,024 UTF-8 bytes; the message
-  names the new header.
-- The single-value header gate refuses a duplicated `X-Bridge-Token`
-  with `400 duplicate_header`.
-- The `Access-Control-Allow-Headers` list is
-  `Content-Type, X-Bridge-Token, X-Correlation-Id`.
+**What you change:** arm the channel only where the host runs Dart
+3.13 or newer; on an older host, leave `wsPath` unset and every other
+path keeps working:
 
-## The origin+token requirement and pairing (new in 0.2.0)
+```dart
+import 'package:localhost_bridge/localhost_bridge.dart';
 
-Everything below is **off by default** - a host that configures only
-what it configured in 0.1.x sees today's wire letter by letter.
-
-### Requiring the origin and the token together
-
-Set `OriginPolicy.requireOriginWithToken: true` when your page must be
-admitted while other local programs must not. The mode closes the two
-one-legged doors:
-
-- a qualified origin without a valid token answers `403 token_required`
-  (readable for the qualified origin, so its page can retry with a
-  proof);
-- the token alone - correct or not - never admits from an unqualified
-  origin or with no Origin at all: the origin rejection answers it, and
-  a sender learns nothing about its token.
-
-Headerless native clients have **no door** in this mode: run them on a
-separate listener (or leave the requirement off there). Wrong shared
-tokens still feed the wrong-guess budget (`429 token_locked` above it),
-and `token_required` is a registry row in the wire tables.
-
-### Pairing a browser page
-
-Arms through `protection.enablePairing(...)`: the host displays a
-six-digit code from `startPairing()` (120-second life), the page sends
-`{"pairingCode": "..."}` to `POST /pair` with its origin, and receives
-`{"ok": true, "token": ..., "pairingId": ..., "expiresInSeconds": 86400}`
-- a token bound to that origin, expiring after 24 hours. The host is
-told through `onPaired`; `revokePairedOrigin(origin)` kills the
-bindings at once and `rotatePairedOrigin(origin)` revokes and offers a
-fresh code. The save hooks (`onPairedSave`, `onPairedRevoke`,
-`onConsentSave`) hand persistence to the host - the package writes no
-file - and `restorePairedOrigin` / `restoreSavedConsent` re-arm what
-the host persisted after a restart.
-
-Pairing adds one wire surface while armed: the `X-Bridge-Pairing`
-header joins the allowed CORS list, and `POST /pair` answers the
-pairing codes (`pair_code_invalid`, `pair_code_expired`,
-`pair_budget_exceeded`). Disarmed, `/pair` is no path at all - the
-ordinary non-root behavior rides, wire letter unchanged.
-
-### Proving possession instead of sending the token
-
-The paired page never sends its token raw: it signs every request -
-HMAC-SHA-256 over the canonical string
-`v1\n<pairingId>\n<stampMs>\n<METHOD>\n<path>\n<correlationId>`, keyed
-by the token's 32 decoded bytes - and presents
-`X-Bridge-Pairing: <pairingId>.<stampMs>.<signature>`. The stamp is the
-page's `Date.now()`; keep it unique (never sign twice within one
-millisecond) and within one minute of the server's clock. A reused or
-stale signature reads `403 pair_signature_replay` - sign a fresh
-request. The page-side reference in README.md shows the whole WebCrypto
-helper, and `dart run tool/emulator_pairing_lab.dart` drives the same
-story against an emulator's browser.
-
-## The handler budget default
-
-In 0.1.x, `handlerTimeout` was null by default and null meant "no
-deadline": a stuck handler held its seat forever, `stop()` waited for it
-without a bound, and orphaned handlers kept counting across a restart -
-after sixteen of them, every command was answered `503 server_busy`.
-
-In 0.2.0:
-
-- Leaving `handlerTimeout` at null selects the configured default
-  budget: `BridgeConfig.handlerTimeout`, 30 seconds shipped. A handler
-  running past the budget is answered `504 handler_timeout` (the reply
-  and the "outcome unknown" contract are unchanged), its seat is freed,
-  and the still-running work becomes a counted orphan.
-- To keep the old unbounded behavior, pass the named constant:
-  `handlerTimeout: LocalIntakeServer.noHandlerTimeout`. Its value is
-  `Duration.zero` - which used to throw `ArgumentError` and is now the
-  constant's value; a negative duration still throws at construction.
-- `stop({Duration? timeout})` returns a `BridgeStopReport`. With a
-  timeout the whole drain is bounded and the report names what still
-  runs; without one the full drain is waited out, as before. At every
-  stop's return the still-working orphans are retired: the next `start()`
-  serves from a clean live-work budget while the retired orphans stay
-  visible in `server.counters` until they settle.
-- New reads and hooks need no migration: `server.counters` (seats,
-  orphans across generations, rejections by code, and the protocol-shape
-  and pairing tallies), `onOrphanSettled`, and
-  `TrustedCommand.cancellation` are additive; commands built by hand
-  carry the const never-cancelled signal and keep compiling.
-- The pairing layer's idle sweeps are wire-compatible: only a session
-  swept by idleness answers `pair_code_invalid` for its code instead of
-  `pair_code_expired` (both 403, both telling the page to pair again).
+// Throws ArgumentError at server construction on a dart:io older
+// than 3.13; arms the channel on 3.13+.
+final config = BridgeConfig(wsPath: '/bridge');
+```

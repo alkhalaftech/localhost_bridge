@@ -1316,6 +1316,10 @@ bridge mounted on a host's own server, routes intact), and
 no secret) - and the consent page example above.
 `dart test test/examples_run_test.dart` runs every self-check.
 
+Upgrading from 0.1.x: `MIGRATION-0.2.0.md` walks every breaking
+change in 0.2.0 — one section per breaking CHANGELOG entry, each with
+what was, what is now, and the code you change, with a short example.
+
 API docs ship with the package. An Arabic guide lives in
 `README.ar.md`.
 
