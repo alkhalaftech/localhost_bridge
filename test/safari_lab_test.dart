@@ -197,10 +197,23 @@ const TOKEN = '$token';
 const results = document.getElementById('lab-results');
 function mark(line) { results.textContent += line + '\\n'; }
 
+// حد إحباط كل جلب في الصفحة: نداء لا يستقر أبداً كان يجمد المشهد كله
+// ويهدم كل علامة بعده — يُجهض بحدّ قصير، والإحباط نفسه يكتب علامته
+// المسمّاة في السجل (FETCH-ABORTED:) فلا انتظار صامت بجزء سجل
+const FETCH_LIMIT_MS = 5000;
+async function boundedFetch(url, init) {
+  const controller = new AbortController();
+  const timer = setTimeout(function () { controller.abort(); }, FETCH_LIMIT_MS);
+  try {
+    return await fetch(url, Object.assign({}, init, {signal: controller.signal}));
+  } finally {
+    clearTimeout(timer);
+  }
+}
 async function postJson(bridge, extraHeaders) {
   const headers = Object.assign({'Content-Type': 'application/json'},
                                 extraHeaders);
-  return fetch(bridge, {method: 'POST', headers, body: '["BROWSER-SAFARI"]'});
+  return boundedFetch(bridge, {method: 'POST', headers, body: '["BROWSER-SAFARI"]'});
 }
 
 (async () => {
@@ -217,7 +230,11 @@ async function postJson(bridge, extraHeaders) {
          (body && body.ok === true ? 'true' : 'false') + ':' +
          (body && body.error ? body.error : 'no-error'));
   } catch (browserError) {
-    mark('LAB-SAFARI-TOKENED:THREW');
+    if (browserError && browserError.name === 'AbortError') {
+      mark('LAB-SAFARI-TOKENED:FETCH-ABORTED:' + FETCH_LIMIT_MS + 'ms');
+    } else {
+      mark('LAB-SAFARI-TOKENED:THREW');
+    }
   }
   // الضابط: التوكن الخاطئ — الرفض الحرفي المقروء يثبت أن الفحص يرى
   // الرفض لا القبول وحده
@@ -230,14 +247,22 @@ async function postJson(bridge, extraHeaders) {
     mark('LAB-SAFARI-BADTOKEN:' + res.status + ':' +
          (body && body.error ? body.error : 'no-error'));
   } catch (browserError) {
-    mark('LAB-SAFARI-BADTOKEN:THREW');
+    if (browserError && browserError.name === 'AbortError') {
+      mark('LAB-SAFARI-BADTOKEN:FETCH-ABORTED:' + FETCH_LIMIT_MS + 'ms');
+    } else {
+      mark('LAB-SAFARI-BADTOKEN:THREW');
+    }
   }
   // الـpreflight الصريح على الباب المقبول
   try {
-    const res = await fetch(ADMITTED, {method: 'OPTIONS', mode: 'cors'});
+    const res = await boundedFetch(ADMITTED, {method: 'OPTIONS', mode: 'cors'});
     mark('LAB-SAFARI-PREFLIGHT:' + res.status + ':' + res.type);
   } catch (browserError) {
-    mark('LAB-SAFARI-PREFLIGHT:THREW');
+    if (browserError && browserError.name === 'AbortError') {
+      mark('LAB-SAFARI-PREFLIGHT:FETCH-ABORTED:' + FETCH_LIMIT_MS + 'ms');
+    } else {
+      mark('LAB-SAFARI-PREFLIGHT:THREW');
+    }
   }
   // الضابط الثاني: أصل الجسر غير المدرج — لا صدى على السلك فيحجب
   // المتصفح الإرسال نفسه، ولا حكم يُقرأ
@@ -245,7 +270,11 @@ async function postJson(bridge, extraHeaders) {
     const res = await postJson(STRANGER, {});
     mark('LAB-SAFARI-STRANGER:' + res.status);
   } catch (browserError) {
-    mark('LAB-SAFARI-STRANGER:BLOCKED');
+    if (browserError && browserError.name === 'AbortError') {
+      mark('LAB-SAFARI-STRANGER:FETCH-ABORTED:' + FETCH_LIMIT_MS + 'ms');
+    } else {
+      mark('LAB-SAFARI-STRANGER:BLOCKED');
+    }
   }
   mark('LAB-SAFARI-DONE');
 })();

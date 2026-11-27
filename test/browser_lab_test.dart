@@ -285,10 +285,24 @@ const results = document.getElementById('lab-results');
 const marks = [];
 function mark(line) { marks.push(line); results.textContent += line + '\\n'; }
 
+// حد إحباط كل جلب في الصفحة: نداء لا يستقر أبداً (اتصال معلّق أو
+// preflight لن يعود) كان يجمد السيناريو كله ويهدم كل علامة بعده —
+// يُجهض الآن بحدّ قصير، والإحباط نفسه يكتب علامته المسمّاة في السجل
+// (FETCH-ABORTED:) فلا انتظار صامت بجزء سجل من طرف الصفحة
+const FETCH_LIMIT_MS = 5000;
+async function boundedFetch(url, init) {
+  const controller = new AbortController();
+  const timer = setTimeout(function () { controller.abort(); }, FETCH_LIMIT_MS);
+  try {
+    return await fetch(url, Object.assign({}, init, {signal: controller.signal}));
+  } finally {
+    clearTimeout(timer);
+  }
+}
 async function postJson(bridge, extraHeaders) {
   const headers = Object.assign({'Content-Type': 'application/json'},
                                 extraHeaders);
-  return fetch(bridge, {method: 'POST', headers, body: '["BROWSER-LAB"]'});
+  return boundedFetch(bridge, {method: 'POST', headers, body: '["BROWSER-LAB"]'});
 }
 
 // توقيع الصفحة بنفس طريقة التصميم حرفا: HMAC-SHA-256 عبر WebCrypto فوق
@@ -324,16 +338,24 @@ async function signProof(tokenHex, pairingId, method, path, correlationId) {
          (body && body.ok === true ? 'true' : 'false') + ':' +
          (body && body.error ? body.error : 'no-error'));
   } catch (browserError) {
-    mark('LAB-TOKENED:THREW');
+    if (browserError && browserError.name === 'AbortError') {
+      mark('LAB-TOKENED:FETCH-ABORTED:' + FETCH_LIMIT_MS + 'ms');
+    } else {
+      mark('LAB-TOKENED:THREW');
+    }
   }
   // Scenario 3, browser side: the preflight endpoint itself answers an
   // OPTIONS round trip from the page origin.
   try {
-    const res = await fetch(ADMITTED_BRIDGE,
-                            {method: 'OPTIONS', mode: 'cors'});
+    const res = await boundedFetch(ADMITTED_BRIDGE,
+                                   {method: 'OPTIONS', mode: 'cors'});
     mark('LAB-OPTIONS:' + res.status + ':' + res.type);
   } catch (browserError) {
-    mark('LAB-OPTIONS:THREW');
+    if (browserError && browserError.name === 'AbortError') {
+      mark('LAB-OPTIONS:FETCH-ABORTED:' + FETCH_LIMIT_MS + 'ms');
+    } else {
+      mark('LAB-OPTIONS:THREW');
+    }
   }
   // Scenario 3, negative control: a request header the bridge never
   // allows must make the browser itself fail the preflighted call - if
@@ -343,7 +365,11 @@ async function signProof(tokenHex, pairingId, method, path, correlationId) {
     const res = await postJson(ADMITTED_BRIDGE, {'X-Lab-NotAllowed': '1'});
     mark('LAB-NOPREFLIGHT:' + res.status);
   } catch (browserError) {
-    mark('LAB-NOPREFLIGHT:BLOCKED-BY-PREFLIGHT');
+    if (browserError && browserError.name === 'AbortError') {
+      mark('LAB-NOPREFLIGHT:FETCH-ABORTED:' + FETCH_LIMIT_MS + 'ms');
+    } else {
+      mark('LAB-NOPREFLIGHT:BLOCKED-BY-PREFLIGHT');
+    }
   }
   // Scenario 2, browser side: the unpaired page against the default
   // bridge. The refusal carries no CORS echo, so the browser shows no
@@ -356,14 +382,18 @@ async function signProof(tokenHex, pairingId, method, path, correlationId) {
     mark('LAB-UNPAIRED:READ:' + res.status + ':' +
          (body && body.error ? body.error : 'unreadable'));
   } catch (browserError) {
-    mark('LAB-UNPAIRED:BLOCKED-NO-VERDICT');
+    if (browserError && browserError.name === 'AbortError') {
+      mark('LAB-UNPAIRED:FETCH-ABORTED:' + FETCH_LIMIT_MS + 'ms');
+    } else {
+      mark('LAB-UNPAIRED:BLOCKED-NO-VERDICT');
+    }
   }
   // Scenario 5 (pairing): الصفحة المقترنة كاملة الدورة — الاقتران بالرمز
   // المعروض، ثم التوقيع، ثم الأمر الموقَّع، ثم إعادة التوقيع نفسه، ثم
   // الصفحة بلا إثبات. يشتغل حين يحمل الجسر رمز عرض فقط
   if (PAIRING_CODE !== '') {
     try {
-      const pairRes = await fetch(ADMITTED_BRIDGE + '/pair', {
+      const pairRes = await boundedFetch(ADMITTED_BRIDGE + '/pair', {
         method: 'POST',
         headers: {'Content-Type': 'application/json'},
         body: JSON.stringify({pairingCode: PAIRING_CODE}),
@@ -401,21 +431,29 @@ async function signProof(tokenHex, pairingId, method, path, correlationId) {
              (pairBody && pairBody.error ? pairBody.error : 'unreadable'));
       }
     } catch (browserError) {
-      mark('LAB-PAIRED:THREW');
+      if (browserError && browserError.name === 'AbortError') {
+        mark('LAB-PAIRED:FETCH-ABORTED:' + FETCH_LIMIT_MS + 'ms');
+      } else {
+        mark('LAB-PAIRED:THREW');
+      }
     }
   }
   // وضع التقرير: العلامات كلها تعود إلى مجمع المختبر على أصل الصفحة —
   // آخر نداء في الصفحة كي تجمع كل ما سبقها
   if (REPORT) {
     try {
-      await fetch('/lab-report', {
+      await boundedFetch('/lab-report', {
         method: 'POST',
         headers: {'Content-Type': 'application/json'},
         body: JSON.stringify({marks: marks}),
       });
       mark('LAB-REPORTED');
     } catch (browserError) {
-      mark('LAB-REPORT:THREW');
+      if (browserError && browserError.name === 'AbortError') {
+        mark('LAB-REPORTED:FETCH-ABORTED:' + FETCH_LIMIT_MS + 'ms');
+      } else {
+        mark('LAB-REPORT:THREW');
+      }
     }
   }
 })();
@@ -456,9 +494,23 @@ function streamed(text) {
     start(controller) { controller.enqueue(bytes); controller.close(); }
   });
 }
-async function attempt(label, init) {
+// حد إحباط الجلب نفسه كما في صفحة المختبر الرئيسة: محاولة معلقة تُجهض
+// بحدّ قصير وتقرأ علامتها THREW:AbortError بدل تجميد المشهد كله
+const FETCH_LIMIT_MS = 5000;
+async function boundedFetch(url, init) {
+  const controller = new AbortController();
+  const timer = setTimeout(function () { controller.abort(); }, FETCH_LIMIT_MS);
   try {
-    const res = await fetch(BRIDGE, init);
+    return await fetch(url, Object.assign({}, init, {signal: controller.signal}));
+  } finally {
+    clearTimeout(timer);
+  }
+}
+async function attempt(label, init) {
+  const controller = new AbortController();
+  const timer = setTimeout(function () { controller.abort(); }, FETCH_LIMIT_MS);
+  try {
+    const res = await fetch(BRIDGE, Object.assign({}, init, {signal: controller.signal}));
     let body = null;
     try { body = await res.json(); } catch (e) {}
     mark('LAB-STREAMBODY-' + label + ':READ:' + res.status + ':' +
@@ -467,6 +519,8 @@ async function attempt(label, init) {
   } catch (browserError) {
     mark('LAB-STREAMBODY-' + label + ':THREW:' +
          (browserError && browserError.name ? browserError.name : 'unknown'));
+  } finally {
+    clearTimeout(timer);
   }
 }
 (async () => {
@@ -494,14 +548,15 @@ async function attempt(label, init) {
   });
   if (REPORT) {
     try {
-      await fetch('/lab-report', {
+      await boundedFetch('/lab-report', {
         method: 'POST',
         headers: {'Content-Type': 'application/json'},
         body: JSON.stringify({marks: marks}),
       });
       mark('LAB-REPORTED');
     } catch (browserError) {
-      mark('LAB-REPORT:THREW');
+      mark('LAB-REPORT:THREW:' +
+           (browserError && browserError.name ? browserError.name : 'unknown'));
     }
   }
 })();
