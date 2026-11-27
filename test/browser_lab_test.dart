@@ -28,6 +28,7 @@ import 'package:localhost_bridge/localhost_bridge.dart';
 import 'package:test/test.dart';
 
 import 'support/tls_cert.dart' show captureClientHello;
+import 'support/webdriver_client.dart';
 
 final (String?, String?, int?) _labBrowser = _discoverBrowser();
 
@@ -48,6 +49,122 @@ final String? _skipReason =
 // Access لا يُشغَّل تحت الإصدار 146 حتى يُثبت تشغيله دونه (اسم العلم
 // موجود في ثنائيي محركي 134 و145، فالحدُّ حدُّ إثباتٍ لا حدُّ وجود)
 final int? _browserMajor = _labBrowser.$3;
+
+// مختبر Firefox على عميل WebDriver نفسه: geckodriver هو المشغّل،
+// وFirefox بلا واجهة ب Moz:firefoxOptions، والاكتشاف نفسه الذي لكروم
+// (تجاوز بالبيئة، ثم PATH، ثم المواضع القياسية) وبلا مشغّل تخطٍّ صادق
+// مسمّى — والمشغّل الوحيد الذي يثبته المشغّل الأخضر هو ما على صورة
+// المهمة. ونسخة Firefox تُقرأ من firefox --version لكوابح الجسم
+// المتدفق (من 161 فأعلى)، وتُطبع أيضاً من قدرات الجلسة في كل جولة
+final (String?, String?, int?) _firefoxLab = _discoverFirefox();
+final String? _geckoDriverPath = _firefoxLab.$1;
+final String? _firefoxSkipReason = _firefoxLab.$2;
+final int? _firefoxMajor = _firefoxLab.$3;
+
+// تخطي مشهدَي القناة الفايرفوكسيين فوق سقف نقل القناة: على SDK لا تعرف
+// dart:io معلمة سقف النقل لا تُسلَّح القناة أصلاً (الرفض عند البناء)
+final String? _firefoxChannelSkip =
+    LocalIntakeServer.wsTransportCeilingSupported
+    ? null
+    : 'the channel refuses to arm without a transport ceiling below '
+          'Dart 3.13 - the firefox channel scenes ride the channel';
+
+/// Locates geckodriver and reads the Firefox major version for the
+/// streamed-body floor: the BRIDGE_GECKODRIVER override first, then
+/// PATH, then the standard locations; the version comes from
+/// `firefox --version` (the BRIDGE_FIREFOX override first). Returns the
+/// driver path, the honest skip reason when the pair is unusable, and
+/// the major version when it can be read.
+(String?, String?, int?) _discoverFirefox() {
+  String? driverPath;
+  final driverOverride = Platform.environment['BRIDGE_GECKODRIVER']?.trim();
+  if (driverOverride != null && driverOverride.isNotEmpty) {
+    if (File(driverOverride).existsSync()) driverPath = driverOverride;
+  } else {
+    final exe = Platform.isWindows ? 'geckodriver.exe' : 'geckodriver';
+    final pathEnv = Platform.environment['PATH'] ?? '';
+    for (final dir in pathEnv.split(Platform.isWindows ? ';' : ':')) {
+      if (dir.trim().isEmpty) continue;
+      final candidate = '$dir${Platform.pathSeparator}$exe';
+      if (File(candidate).existsSync()) {
+        driverPath = candidate;
+        break;
+      }
+    }
+    if (driverPath == null) {
+      for (final candidate in <String>[
+        if (Platform.isMacOS) '/usr/local/bin/geckodriver',
+        '/usr/bin/geckodriver',
+        '/usr/local/bin/geckodriver',
+      ]) {
+        if (File(candidate).existsSync()) {
+          driverPath = candidate;
+          break;
+        }
+      }
+    }
+  }
+  if (driverPath == null) {
+    return (
+      null,
+      'no geckodriver on this host (searched BRIDGE_GECKODRIVER, PATH '
+          'and the standard locations; set BRIDGE_GECKODRIVER to the '
+          'driver path to run here) - the firefox scenes run where the '
+          'driver exists, such as the CI browser-lab job',
+      null,
+    );
+  }
+  // نسخة Firefox من المتصفح نفسه: التجاوز بالبيئة ثم الاسم المعتاد
+  final binaryOverride = Platform.environment['BRIDGE_FIREFOX']?.trim();
+  final names = Platform.isWindows
+      ? <String>['firefox.exe']
+      : <String>[
+          'firefox',
+          if (Platform.isMacOS)
+            '/Applications/Firefox.app/Contents/MacOS/firefox',
+        ];
+  int? major;
+  void tryVersion(String path) {
+    if (major != null) return;
+    try {
+      final out = Process.runSync(path, const ['--version']);
+      major = int.tryParse(
+        RegExp(r'(\d+)\.').firstMatch(out.stdout as String)?.group(1) ?? '',
+      );
+    } on Object {
+      // متصفح لا يجيب --version: لا كوابح نسخة، فالمشهد المحدود بالنسخة يتخطى
+    }
+  }
+
+  if (binaryOverride != null && binaryOverride.isNotEmpty) {
+    if (File(binaryOverride).existsSync()) tryVersion(binaryOverride);
+  } else {
+    final pathEnv = Platform.environment['PATH'] ?? '';
+    for (final dir in pathEnv.split(Platform.isWindows ? ';' : ':')) {
+      if (dir.trim().isEmpty) continue;
+      for (final name in names) {
+        final candidate = '$dir${Platform.pathSeparator}$name';
+        if (File(candidate).existsSync()) tryVersion(candidate);
+      }
+    }
+    for (final candidate in names) {
+      if (candidate.contains(Platform.pathSeparator) &&
+          File(candidate).existsSync()) {
+        tryVersion(candidate);
+      }
+    }
+  }
+  if (major == null) {
+    return (
+      driverPath,
+      'firefox is expected at the usual places but its version could not '
+          'be read (firefox --version) - the firefox scenes need a real '
+          'Firefox to prove anything',
+      null,
+    );
+  }
+  return (driverPath, null, major);
+}
 
 /// Locates a real Chrome/Chromium for the lab: the BRIDGE_BROWSER override
 /// first, then PATH, then the standard install locations. Returns the
@@ -1656,6 +1773,478 @@ function wsScenario() {
               'browser version 146 until a run below it is proven: no '
               'usable browser, or one below the proven floor'
         : null,
+  );
+
+  // مختبر Firefox على عميل WebDriver نفسه: المشاهد التي يجريها كروم
+  // بـ--dump-dom تجري هنا على Firefox بلا واجهة عبر geckodriver،
+  // والسجل المقروء هو سجل الصفحة نفسها (pre#lab-results) — لا dump-dom
+  // في فايرفوكس. وما لا ينطبق على فايرفوكس يتخطى بسبب مسمّى: محاكاة
+  // إذن الشبكة المحلية علم كرومي لا نظير له هنا.
+  // باب المشهد الفايرفوكسي: التخطي الافتراضي سببه هو غياب الثنائي
+  // الفايرفوكسي (سلوك الجهاز المحلي الصادق)، وصورة المهمة تحمل
+  // المتصفحين فلا تخطي فيها
+  void firefoxScene(
+    String name,
+    Future<void> Function() body, {
+    String? skip,
+  }) =>
+      test(name, body, skip: skip ?? _firefoxSkipReason, timeout: _sceneBudget);
+
+  // جولة WebDriver واحدة لكل مشهد فايرفوكس: geckodriver ثم جلسة بلا
+  // واجهة، والنسخة تُطبع من قدرات الجلسة فيسمّي كل سطر تشغيل فايرفوكس
+  // الذي جرى عليه
+  Future<WebDriverClient> firefoxDriver() async {
+    final client = await WebDriverClient.spawn(executable: _geckoDriverPath!);
+    addTearDown(client.shutdown);
+    final session = await client.newSession(<String, Object?>{
+      'browserName': 'firefox',
+      'moz:firefoxOptions': <String, Object?>{
+        'args': <String>['-headless'],
+      },
+    });
+    print(
+      'LAB-FIREFOX-SESSION: ${session.browserName} '
+      '${session.browserVersion}',
+    );
+    return client;
+  }
+
+  // جولة الصفحة الفايرفوكسية: تنقّل، وانتظار سجل الصفحة حتى علامته
+  // المنتهية، ثم قراءته كامل الدليل — سجل المتصفح الوحد بين المشغّلين
+  Future<String> driveLog(
+    WebDriverClient client,
+    String url,
+    String evidenceFile, {
+    required String untilContains,
+  }) async {
+    final stopwatch = Stopwatch()..start();
+    await client.setTimeouts();
+    await client.navigate(url);
+    final log = await client.waitForElementText(
+      '#lab-results',
+      untilContains: untilContains,
+    );
+    print('LAB-RUN: $evidenceFile ${stopwatch.elapsed.inMilliseconds} ms');
+    final dir = Platform.environment['BRIDGE_LAB_EVIDENCE_DIR'];
+    if (dir != null && dir.trim().isNotEmpty) {
+      Directory(dir).createSync(recursive: true);
+      File('$dir/$evidenceFile').writeAsStringSync(log);
+    }
+    return log;
+  }
+
+  firefoxScene('on Firefox the token-only bridge keeps the token as the '
+      'only wire door: the browser page cannot cross it (nothing is '
+      'echoed)', () async {
+    final (pageServer, admitted, _, pagePort, admittedPort, _, token) =
+        await lab(tokenOnlyAdmitted: true);
+    addTearDown(pageServer.close);
+    addTearDown(admitted.stop);
+    final client = await firefoxDriver();
+    final log = _flat(
+      await driveLog(
+        client,
+        'http://127.0.0.1:$pagePort/',
+        'ff-token-only-log.txt',
+        untilContains: 'LAB-UNPAIRED:',
+      ),
+    );
+    expect(
+      log,
+      contains('LAB-TOKENED:THREW\n'),
+      reason:
+          'a token-only bridge echoes nothing, so the Firefox page blocks '
+          'the tokened call - the token stays a non-browser path here '
+          'exactly as the contract states',
+    );
+    // السلك من طرف الاختبار: التوكن هو الباب الوحيد — به يعبر، وبغيره
+    // أو بخاطئ يُرد عدم الإدراج
+    final (status, body, _) = await _send(
+      admittedPort,
+      origin: 'http://127.0.0.1:$pagePort',
+      headers: {'X-Bridge-Token': token},
+    );
+    expect(status, 200, reason: 'the correct token is the only door');
+    expect(body, contains('"ok":true'));
+    final (noTokenStatus, noTokenBody, _) = await _send(
+      admittedPort,
+      origin: 'http://127.0.0.1:$pagePort',
+    );
+    expect(noTokenStatus, 403, reason: 'without the token there is no door');
+    expect(noTokenBody, contains('"error":"origin_not_listed"'));
+    final (wrongStatus, wrongBody, _) = await _send(
+      admittedPort,
+      origin: 'http://127.0.0.1:$pagePort',
+      headers: {'X-Bridge-Token': 'wrong-token-value-wrong-token-value12'},
+    );
+    expect(wrongStatus, 403, reason: 'a wrong token opens no door');
+    expect(wrongBody, contains('"error":"origin_not_listed"'));
+  });
+
+  firefoxScene('on Firefox the unpaired page is refused: the browser sees '
+      'no verdict while the wire carries the literal code', () async {
+    final (pageServer, _, defaultBridge, pagePort, _, defaultPort, _) =
+        await lab();
+    addTearDown(pageServer.close);
+    addTearDown(defaultBridge.stop);
+    final client = await firefoxDriver();
+    final log = _flat(
+      await driveLog(
+        client,
+        'http://127.0.0.1:$pagePort/',
+        'ff-unpaired-log.txt',
+        untilContains: 'LAB-UNPAIRED:',
+      ),
+    );
+    final unpairedLines = RegExp(
+      '^LAB-UNPAIRED:.*\$',
+      multiLine: true,
+    ).allMatches(log).map((m) => m.group(0)!).toList();
+    expect(
+      unpairedLines,
+      ['LAB-UNPAIRED:BLOCKED-NO-VERDICT'],
+      reason:
+          'the blocked verdict is the ONLY line carrying the prefix - a '
+          'readable refusal for an unpaired origin would be a recon '
+          'channel the protection must never open',
+    );
+    final (status, body, headers) = await _send(
+      defaultPort,
+      origin: 'http://127.0.0.1:$pagePort',
+    );
+    expect(status, 403);
+    expect(body, contains('"error":"origin_not_listed"'));
+    expect(
+      headers['access-control-allow-origin'],
+      isNull,
+      reason:
+          'the refusal carries no CORS echo - that is why the '
+          'browser shows no verdict',
+    );
+  });
+
+  firefoxScene('on Firefox the preflight round trip announces the token '
+      'header and the echo carries the new name alone', () async {
+    final (pageServer, admitted, _, pagePort, admittedPort, _, _) = await lab();
+    addTearDown(pageServer.close);
+    addTearDown(admitted.stop);
+    final client = await firefoxDriver();
+    final log = _flat(
+      await driveLog(
+        client,
+        'http://127.0.0.1:$pagePort/',
+        'ff-preflight-log.txt',
+        untilContains: 'LAB-UNPAIRED:',
+      ),
+    );
+    expect(
+      log,
+      contains('LAB-OPTIONS:204:cors\n'),
+      reason: 'the preflight endpoint answers the page origin on Firefox',
+    );
+    expect(
+      log,
+      contains('LAB-NOPREFLIGHT:BLOCKED-BY-PREFLIGHT\n'),
+      reason:
+          'a header the bridge never allows is stopped by the '
+          'browser itself - the preflight is really consulted',
+    );
+    expect(
+      log,
+      isNot(contains('LAB-NOPREFLIGHT:2')),
+      reason: 'the not-allowed-header call never crossed',
+    );
+    final (status, _, headers) = await _send(
+      admittedPort,
+      method: 'OPTIONS',
+      origin: 'http://127.0.0.1:$pagePort',
+      headers: {
+        'Access-Control-Request-Method': 'POST',
+        'Access-Control-Request-Headers': 'content-type, x-bridge-token',
+      },
+    );
+    expect(status, 204);
+    expect(
+      headers['access-control-allow-origin'],
+      'http://127.0.0.1:$pagePort',
+    );
+    expect(
+      headers['access-control-allow-headers'],
+      'Content-Type, X-Bridge-Token, X-Correlation-Id',
+      reason: 'the allowed-header list carries the standing names alone',
+    );
+    // وأصل غير مدرج: بلا صدى أصلاً، فالمتصفح يحجب حكماً له
+    final (strangerStatus, _, strangerHeaders) = await _send(
+      admittedPort,
+      method: 'OPTIONS',
+      origin: 'https://stranger.example',
+      headers: {'Access-Control-Request-Method': 'POST'},
+    );
+    expect(strangerStatus, 204);
+    expect(strangerHeaders['access-control-allow-origin'], isNull);
+  });
+
+  firefoxScene('on Firefox the paired page pairs with the displayed code, '
+      'signs its command, and reads the reply; the replay and the '
+      'proofless page are refused', () async {
+    final (pageServer, admitted, _, pagePort, admittedPort, _, token) =
+        await lab(pairedAdmitted: true);
+    addTearDown(pageServer.close);
+    addTearDown(admitted.stop);
+    final client = await firefoxDriver();
+    final log = _flat(
+      await driveLog(
+        client,
+        'http://127.0.0.1:$pagePort/',
+        'ff-paired-log.txt',
+        untilContains: 'LAB-STRICT-BARE:',
+      ),
+    );
+    expect(
+      log,
+      contains('LAB-PAIRED:200:true\n'),
+      reason:
+          'the Firefox page pairs with the displayed code, signs with '
+          'WebCrypto, and reads its command reply',
+    );
+    expect(
+      log,
+      contains('LAB-PAIRED-REPLAY:403:pair_signature_replay\n'),
+      reason: 'the same signature never proves twice, read by the browser',
+    );
+    expect(
+      log,
+      contains('LAB-STRICT-BARE:403:token_required\n'),
+      reason:
+          'the same page without its proof reads the honest strict '
+          'refusal and retries from it',
+    );
+    final (forgedStatus, forgedBody, forgedHeaders) = await _send(
+      admittedPort,
+      origin: 'http://127.0.0.1:$pagePort',
+    );
+    expect(forgedStatus, 403);
+    expect(forgedBody, contains('"error":"token_required"'));
+    expect(
+      forgedHeaders['access-control-allow-origin'],
+      'http://127.0.0.1:$pagePort',
+      reason: 'the qualified origin reads its refusal to retry with a proof',
+    );
+    final (sharedStatus, sharedBody, _) = await _send(
+      admittedPort,
+      origin: 'http://127.0.0.1:$pagePort',
+      headers: {'X-Bridge-Token': token},
+    );
+    expect(sharedStatus, 200, reason: 'the shared token stays a valid proof');
+    expect(sharedBody, contains('"ok":true'));
+  });
+
+  firefoxScene('on Firefox the paired page reports its verdicts through '
+      'the collector: the channel the emulator witness reads, on a '
+      'second engine', () async {
+    final collected = <Map<String, Object?>>[];
+    final (pageServer, admitted, _, pagePort, _, _, _) = await lab(
+      pairedAdmitted: true,
+      collectedReports: collected,
+    );
+    addTearDown(pageServer.close);
+    addTearDown(admitted.stop);
+    final client = await firefoxDriver();
+    await driveLog(
+      client,
+      'http://127.0.0.1:$pagePort/?report=1',
+      'ff-paired-report-log.txt',
+      untilContains: 'LAB-REPORTED',
+    );
+    for (var i = 0; i < 20 && collected.isEmpty; i++) {
+      await Future<void>.delayed(const Duration(milliseconds: 100));
+    }
+    expect(collected, hasLength(1), reason: 'the page reported exactly once');
+    final marks = (collected.single['marks'] as List).cast<String>();
+    expect(
+      marks,
+      contains('LAB-PAIRED:200:true'),
+      reason: 'the collector received the whole paired story',
+    );
+    expect(marks, contains('LAB-PAIRED-REPLAY:403:pair_signature_replay'));
+    expect(marks, contains('LAB-STRICT-BARE:403:token_required'));
+  });
+
+  firefoxScene('on Firefox the streaming reply runs: three progress frames '
+      'then the result frame, in the arrival order the page reads', () async {
+    final (pageServer, bridge, protection, pagePort, _, _) = await channelLab();
+    addTearDown(pageServer.close);
+    addTearDown(bridge.stop);
+    addTearDown(protection.dispose);
+    final client = await firefoxDriver();
+    final log = _flat(
+      await driveLog(
+        client,
+        'http://127.0.0.1:$pagePort/',
+        'ff-stream-log.txt',
+        untilContains: 'LAB-CHANNEL-END',
+      ),
+    );
+    expect(
+      log,
+      contains('LAB-STREAM-CTYPE:text/event-stream'),
+      reason: 'the opted-in command reads the streaming media type',
+    );
+    expect(
+      log,
+      contains('LAB-STREAM-ORDER:progress,progress,progress,result'),
+      reason: 'three progress frames then the result, in order',
+    );
+    expect(
+      log,
+      contains('LAB-STREAM-FRAME:0:progress|{"step":1}'),
+      reason: 'the first progress frame crossed intact',
+    );
+    expect(
+      log,
+      contains('LAB-STREAM-FRAME:3:result|{"ok":true,"data":{"echo":true}}'),
+      reason: 'the final frame carries the standing reply contract',
+    );
+    expect(
+      log,
+      isNot(contains('LAB-STREAM:THREW\n')),
+      reason:
+          'the streaming fetch never threw (the newline anchors the '
+          'verdict line, not the page source)',
+    );
+  }, skip: _firefoxSkipReason ?? _firefoxChannelSkip);
+
+  firefoxScene('on Firefox ws://127.0.0.1 from a real page: the handshake '
+      'upgrades through the origin gates and the channel refusal frame '
+      'crosses with its policy close', () async {
+    final (pageServer, bridge, protection, pagePort, _, _) = await channelLab();
+    addTearDown(pageServer.close);
+    addTearDown(bridge.stop);
+    addTearDown(protection.dispose);
+    final client = await firefoxDriver();
+    final log = _flat(
+      await driveLog(
+        client,
+        'http://127.0.0.1:$pagePort/',
+        'ff-ws-log.txt',
+        untilContains: 'LAB-CHANNEL-END',
+      ),
+    );
+    expect(
+      log,
+      contains('LAB-WS-OPEN\n'),
+      reason:
+          'the Firefox page opened the loopback WebSocket over the '
+          'origin-gated handshake',
+    );
+    expect(
+      log,
+      contains('LAB-WS-FRAME:{"ok":false,"error":"ws_auth_timeout"'),
+      reason:
+          'the channel refusal frame crossed to the page and was '
+          'read by its onmessage - the literal code rides the frame',
+    );
+    expect(
+      log,
+      contains('LAB-WS-CLOSE:1008:ws_auth_timeout\n'),
+      reason:
+          'the close carries the policy code and the literal code '
+          'as its reason',
+    );
+    expect(log, contains('LAB-WS-DONE\n'));
+    expect(
+      log,
+      isNot(contains('LAB-WS-ERROR\n')),
+      reason: 'the channel never errored',
+    );
+    expect(
+      log,
+      isNot(contains('LAB-WS-TIMEOUT\n')),
+      reason: 'the exchange crossed without exhausting the wait',
+    );
+  }, skip: _firefoxSkipReason ?? _firefoxChannelSkip);
+
+  firefoxScene(
+    'on Firefox the page cannot stream a request body below the '
+    'engine floor: observed and printed, the control crossing on the '
+    'same browser',
+    () async {
+      // الملاحظة 4.5: الجسم المتدفق سلوك محرك لا قانون — كروم يرفضه على
+      // HTTP/1.x (شاهد كروم أعلاه)، وفايرفوكس من 161 فأعلى هو المدى
+      // الذي تُرى فيه محاولة الإرسال الفعلية. المشهد هنا مُشغِّل ومطبِع:
+      // حكم كل محاولة يُطبع في السجل (FIREFOX-STREAMBODY) ليُقرأ من خرج
+      // المهمة ويُكتب حيث يُوثَّق، والشاهد الموجب الوحيد المشروط هو
+      // الشاهد الموجب (الجسم العادي يعبر) ودخول أمرٍ إلى المعالج
+      var entered = 0;
+      final (pageServer, admitted, _, pagePort, _, _, _) = await lab(
+        onCommand: () => entered++,
+      );
+      addTearDown(pageServer.close);
+      addTearDown(admitted.stop);
+      final client = await firefoxDriver();
+      final log = _flat(
+        await driveLog(
+          client,
+          'http://127.0.0.1:$pagePort/stream-body',
+          'ff-stream-body-log.txt',
+          untilContains: 'LAB-STREAMBODY-SIMPLE:',
+        ),
+      );
+      final verdicts = RegExp(
+        r'^LAB-STREAMBODY-(PREFLIGHT|SIMPLE):.*$',
+        multiLine: true,
+      ).allMatches(log).map((m) => m.group(0)!).toList()..sort();
+      expect(verdicts, hasLength(2), reason: 'both attempts report a verdict');
+      for (final verdict in verdicts) {
+        print('FIREFOX-STREAMBODY: $verdict');
+      }
+      print('FIREFOX-STREAMBODY-HANDLER-ENTRIES: $entered');
+      expect(
+        log,
+        contains('LAB-STREAMBODY-CONTROL:READ:200:ok\n'),
+        reason:
+            'the control must cross on this browser - without it the two '
+            'streaming verdicts would prove nothing',
+      );
+      expect(
+        entered,
+        greaterThanOrEqualTo(1),
+        reason: 'the control command reached the handler on the wire',
+      );
+    },
+    skip:
+        _firefoxSkipReason ??
+        ((_firefoxMajor ?? 0) >= 161
+            ? null
+            : 'the streamed request body scene runs on Firefox from engine '
+                  'version 161 - below it the browser ships no streamed '
+                  'request body at all, and the rows below stay for the '
+                  'emulator runs'),
+  );
+
+  firefoxScene(
+    'on Firefox a page Chrome maps to public cannot reach the loopback '
+    'bridge without the Local Network Access permission',
+    () async {
+      fail('this scene never runs: it exists to carry its named skip');
+    },
+    skip:
+        'the Local Network Access pair simulates the Chrome-only '
+        'address-space override flag (--ip-address-space-overrides); '
+        'Firefox carries no such flag, so the pair stays a Chrome scene '
+        'here',
+  );
+
+  firefoxScene(
+    'on Firefox ws://127.0.0.1 from an https page without the Local '
+    'Network Access permission',
+    () async {
+      fail('this scene never runs: it exists to carry its named skip');
+    },
+    skip:
+        'the https Local Network Access story is the same Chrome-only '
+        'simulation - Firefox carries no equivalent flag, so it stays a '
+        'Chrome scene here',
   );
 
   // قطع النظير داخل مصافحة TLS مع خادم الصفحة الآمن: المتصفح الهامشي
