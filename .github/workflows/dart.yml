@@ -212,13 +212,15 @@ jobs:
         with:
           sdk: stable
 
-      # Name the browser the lab ran on: the discovery order of the test
-      # itself, echoed here so a green run records which engine proved it.
-      # No green without a browser: this job exists to prove the lab on a
-      # real one, so a missing engine fails the job instead of warning -
-      # the honest skip stays a local-run behavior of the test itself
-      # (BRIDGE_BROWSER), while a CI image that lost its browsers is an
-      # environment drift this job must surface as red.
+      # Name the browsers the lab ran on: the discovery order of the test
+      # itself, echoed here so a green run records which engines proved
+      # it. No green without a browser: this job exists to prove the lab
+      # on real ones, so a missing engine fails the job instead of
+      # warning - the honest skip stays a local-run behavior of the test
+      # itself (BRIDGE_BROWSER / BRIDGE_GECKODRIVER), while a CI image
+      # that lost its browsers is an environment drift this job must
+      # surface as red. The Firefox scenes ride geckodriver over the same
+      # WebDriver client, so the pair must be present the same way.
       - name: browsers on the runner image
         shell: bash
         run: |
@@ -231,6 +233,20 @@ jobs:
           done
           if [ -z "$found" ]; then
             echo "::error::no system Chrome/Chromium on the runner image - the browser lab cannot prove anything without a real browser (the image is expected to ship one; treating that as green would fake the proof)."
+            exit 1
+          fi
+          firefox_found=""
+          if command -v firefox >/dev/null 2>&1; then
+            echo "firefox: $(firefox --version 2>/dev/null || echo 'present')"
+            firefox_found="firefox"
+          fi
+          gecko_found=""
+          if command -v geckodriver >/dev/null 2>&1; then
+            echo "geckodriver: $(geckodriver --version 2>/dev/null | head -n 1)"
+            gecko_found="geckodriver"
+          fi
+          if [ -z "$firefox_found" ] || [ -z "$gecko_found" ]; then
+            echo "::error::no Firefox+geckodriver pair on the runner image - the firefox scenes cannot prove anything without the real pair (the image is expected to ship both; treating that as green would fake the proof)."
             exit 1
           fi
 
@@ -250,14 +266,15 @@ jobs:
           tail -n 3 "$RUNNER_TEMP/lab_out.txt" || true
           exit "$status"
 
-      # The lab's own run durations, as notice annotations - the same
-      # lines the matrix job repeats after its suite, over two steps for
-      # the ten-notice limit of one step.
+      # The lab's own run durations and the Firefox session line (the
+      # engine version the scenes ran on), as notice annotations - the
+      # same lines the matrix job repeats after its suite, over two steps
+      # for the ten-notice limit of one step.
       - name: browser run durations
         shell: bash
         if: always()
         run: |
-          (grep -E "^(LAB-RUN|IDLE-BOUNDS):" "$RUNNER_TEMP/lab_out.txt" || true) > "$RUNNER_TEMP/lab_runs_only.txt"
+          (grep -E "^(LAB-RUN|LAB-FIREFOX-SESSION|IDLE-BOUNDS):" "$RUNNER_TEMP/lab_out.txt" || true) > "$RUNNER_TEMP/lab_runs_only.txt"
           sed -n '1,10p' "$RUNNER_TEMP/lab_runs_only.txt" | while IFS= read -r line; do
             echo "::notice title=lab timing::${line:0,200}"
           done
@@ -269,6 +286,135 @@ jobs:
           (sed -n '11,60p' "$RUNNER_TEMP/lab_runs_only.txt" || true) | while IFS= read -r line; do
             echo "::notice title=lab timing::${line:0,200}"
           done
+
+  safari-lab:
+    # The real-Safari lab (test/safari_lab_test.dart): safaridriver drives
+    # the runner's own Safari over the W3C WebDriver protocol with the
+    # dart:io-only client in test/support/webdriver_client.dart - zero
+    # packages added. The macOS image ships safaridriver, but Safari
+    # automation must be enabled once per system (sudo safaridriver
+    # --enable) - and a missing driver fails the job instead of earning a
+    # green with nothing proved.
+    #
+    # The lab page and every bridge ride real TLS on loopback, so the job
+    # generates its own short-lived test certificate (the SAN names
+    # 127.0.0.1, ::1 and localhost, and the SAN is verified before
+    # anything trusts it), documents it in a temporary keychain added to
+    # the user's keychain search list, and removes that keychain and the
+    # trust it granted in an always() cleanup step: the certificate lives
+    # for the job alone, and a failed lab still tears the keychain down.
+    runs-on: macos-latest
+    timeout-minutes: 30
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+
+      - uses: dart-lang/setup-dart@6afc89df92d6eb3834022f73cd65adc8cdfcb92d # v1.8.1
+        with:
+          sdk: stable
+
+      - name: environment versions (Safari and its driver)
+        shell: bash
+        run: |
+          if ! command -v safaridriver >/dev/null 2>&1; then
+            echo "::error::no safaridriver on the runner image - the safari lab cannot prove anything without the real driver."
+            exit 1
+          fi
+          safaridriver --version 2>&1
+          echo "Safari bundle version: $(defaults read /Applications/Safari.app/Contents/Info.plist CFBundleShortVersionString)"
+
+      - name: enable Safari automation
+        run: sudo safaridriver --enable
+
+      - name: resolve packages
+        run: dart pub get
+
+      # The temporary keychain: created, filled with the generated pair,
+      # trusted for the job, and recorded for the always() cleanup - the
+      # original search list rides along so the removal restores exactly
+      # what was there.
+      - name: loopback TLS certificate in a temporary keychain
+        shell: bash
+        run: |
+          set -euo pipefail
+          workdir="$(mktemp -d "$RUNNER_TEMP/safari-lab-cert.XXXXXX")"
+          cert="$workdir/bridge-lab.pem"
+          key="$workdir/bridge-lab-key.pem"
+          openssl req -x509 -newkey rsa:2048 -sha256 -nodes -days 2 \
+            -subj "/CN=bridge-lab-loopback" \
+            -addext "subjectAltName=IP:127.0.0.1,IP:::1,DNS:localhost" \
+            -keyout "$key" -out "$cert"
+          openssl x509 -in "$cert" -noout -ext subjectAltName | grep -q "IP Address:127.0.0.1"
+          openssl x509 -in "$cert" -noout -ext subjectAltName | grep -q "DNS:localhost"
+          keychain="$workdir/bridge-lab.keychain-db"
+          keychain_pass="$(openssl rand -hex 16)"
+          security create-keychain -p "$keychain_pass" "$keychain"
+          search_before="$(security list-keychains -d user | sed -e 's/^[[:space:]]*//' -e 's/^"//;s/"$//' | tr '\n' ' ' | sed -e 's/[[:space:]]*$//')"
+          security list-keychains -d user -s "$keychain" $search_before
+          security import "$cert" -k "$keychain" -P "$keychain_pass"
+          security import "$key" -k "$keychain" -P "$keychain_pass"
+          security add-trusted-cert -r trustRoot -k "$keychain" "$cert"
+          {
+            echo "BRIDGE_SAFARI_TLS_CERT=$cert"
+            echo "BRIDGE_SAFARI_TLS_KEY=$key"
+            echo "BRIDGE_SAFARI_KEYCHAIN=$keychain"
+            echo "BRIDGE_SAFARI_SEARCH_BEFORE=$search_before"
+          } >> "$GITHUB_ENV"
+          echo "certificate: $(openssl x509 -in "$cert" -noout -subject -enddate)"
+          echo "temporary keychain: $keychain"
+
+      # The expanded reporter plus the annotation grep, as in the browser
+      # lab step: a red lab names its failing scene.
+      - name: safari lab
+        shell: bash
+        run: |
+          status=0
+          dart test -j 1 test/safari_lab_test.dart --reporter=expanded > "$RUNNER_TEMP/safari_out.txt" 2>&1 || status=$?
+          if [ "$status" -ne 0 ]; then
+            awk '/\[E\]/{c=8} c&&c-- {printf "::error::%s\n", substr($0,1,200)}' "$RUNNER_TEMP/safari_out.txt" | head -30 || true
+          fi
+          tail -n 3 "$RUNNER_TEMP/safari_out.txt" || true
+          exit "$status"
+
+      # The scenes' wall times and the driver-reported Safari version, as
+      # notice annotations - the versions a green run ran on read from
+      # the public API, not only from the admin-gated job log.
+      - name: safari run durations
+        shell: bash
+        if: always()
+        run: |
+          (grep -E "^(LAB-RUN|LAB-SAFARI-SESSION):" "$RUNNER_TEMP/safari_out.txt" || true) | while IFS= read -r line; do
+            echo "::notice title=safari lab::${line:0:200}"
+          done
+
+      # The temporary keychain and the trust it granted die with the job
+      # whatever the lab's verdict was: restore the original search list,
+      # untrust the certificate, delete the keychain, and prove the file
+      # is gone - a surviving keychain is a red job, not a warning.
+      - name: remove the temporary keychain (always)
+        shell: bash
+        if: always()
+        run: |
+          set -uo pipefail
+          status=0
+          keychain="${BRIDGE_SAFARI_KEYCHAIN:-}"
+          cert="${BRIDGE_SAFARI_TLS_CERT:-}"
+          before="${BRIDGE_SAFARI_SEARCH_BEFORE:-}"
+          if [ -n "$before" ]; then
+            # shellcheck disable=SC2086
+            security list-keychains -d user -s $before || status=$?
+          fi
+          if [ -n "$cert" ] && [ -f "$cert" ]; then
+            security remove-trusted-cert "$cert" || status=$?
+            rm -f "$cert" "${BRIDGE_SAFARI_TLS_KEY:-}" || true
+          fi
+          if [ -n "$keychain" ]; then
+            security delete-keychain "$keychain" || status=$?
+          fi
+          if [ -n "$keychain" ] && [ -e "$keychain" ]; then
+            echo "::error::the temporary keychain survived its cleanup step - the job stays red."
+            exit 1
+          fi
+          exit "$status"
 
   release-doc-gate:
     runs-on: ubuntu-latest
