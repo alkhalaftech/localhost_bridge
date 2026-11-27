@@ -354,7 +354,11 @@ jobs:
           security list-keychains -d user -s "$keychain" $search_before
           security import "$cert" -k "$keychain" -P "$keychain_pass"
           security import "$key" -k "$keychain" -P "$keychain_pass"
-          security add-trusted-cert -r trustRoot -k "$keychain" "$cert"
+          # Trust in the admin (system) domain with -d: the per-user trust
+          # prompt has no GUI session on the headless runner and hangs the
+          # step until its limit, while the system domain writes its trust
+          # record outright.
+          sudo security add-trusted-cert -d -r trustRoot -k /Library/Keychains/System.keychain "$cert"
           {
             echo "BRIDGE_SAFARI_TLS_CERT=$cert"
             echo "BRIDGE_SAFARI_TLS_KEY=$key"
@@ -408,6 +412,7 @@ jobs:
           fi
           if [ -n "$cert" ] && [ -f "$cert" ]; then
             security remove-trusted-cert "$cert" || status=$?
+            sudo security remove-trusted-cert -d "$cert" || status=$?
             rm -f "$cert" "${BRIDGE_SAFARI_TLS_KEY:-}" || true
           fi
           if [ -n "$keychain" ]; then
