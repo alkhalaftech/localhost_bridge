@@ -750,10 +750,20 @@ Future<_Exchange> _send(
 }) async {
   final client = HttpClient();
   try {
-    final request = await client.openUrl(
-      method,
-      Uri.parse('http://127.0.0.1:$port/'),
-    );
+    // كل مرحلة من مراحل النداء السلكي محدودة ومسماة: فتح الاتصال ونهاية
+    // الجسم كلاهما قد يعلقان على جسر حي — انقضاء الحد يرمي الفشل المسمّى
+    // فلا انتظار بلا مهلة ولا تعليق صامت في المختبر
+    const wireBound = Duration(seconds: 8);
+    final request = await client
+        .openUrl(method, Uri.parse('http://127.0.0.1:$port/'))
+        .timeout(
+          wireBound,
+          onTimeout: () => throw WebDriverWaitTimeout(
+            'lab wire call $method 127.0.0.1:$port (connect)',
+            wireBound,
+            'the bridge answers',
+          ),
+        );
     if (origin != null) request.headers.set('Origin', origin);
     headers.forEach(request.headers.set);
     if (method == 'POST') {
@@ -762,8 +772,25 @@ Future<_Exchange> _send(
       request.headers.set('Sec-Fetch-Dest', 'empty');
       request.add(utf8.encode(body));
     }
-    final response = await request.close().timeout(const Duration(seconds: 8));
-    final text = await utf8.decoder.bind(response).join();
+    final response = await request.close().timeout(
+      wireBound,
+      onTimeout: () => throw WebDriverWaitTimeout(
+        'lab wire call $method 127.0.0.1:$port (response)',
+        wireBound,
+        'the response headers arrive',
+      ),
+    );
+    final text = await utf8.decoder
+        .bind(response)
+        .join()
+        .timeout(
+          wireBound,
+          onTimeout: () => throw WebDriverWaitTimeout(
+            'lab wire call $method 127.0.0.1:$port (body)',
+            wireBound,
+            'the response body ends',
+          ),
+        );
     final flat = <String, String>{};
     response.headers.forEach((name, values) {
       flat[name.toLowerCase()] = values.join(', ');

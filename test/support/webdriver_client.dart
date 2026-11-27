@@ -38,6 +38,56 @@ final class WebDriverFailure implements Exception {
   String toString() => 'WebDriverFailure($error, http=$httpStatus): $message';
 }
 
+/// A named wait inside the driver client expired. Every wait in this
+/// client is bounded by a short named duration, and no expiry rides a
+/// bare TimeoutException and no wait ever ends silent on a partial
+/// reading: the message names the wait, its bound, what it wanted, the
+/// part of the page log accumulated up to that moment, and the driver's
+/// own log tail - so a red scene names its cause and its evidence in
+/// one place.
+final class WebDriverWaitTimeout implements Exception {
+  /// The wait that expired, named by its operation (for example
+  /// `element text of "#lab-results"` or `driver call POST session
+  /// (connect)`).
+  final String wait;
+
+  /// The bound that ran out.
+  final Duration bound;
+
+  /// What the wait wanted to see before its bound ran out.
+  final String wanted;
+
+  /// The part of the accumulated page log read up to the moment of
+  /// expiry, when the wait was reading one (null when the wait never
+  /// touched the page).
+  final String? logPart;
+
+  /// The driver's own last log lines at the moment of expiry.
+  final List<String> driverTail;
+
+  const WebDriverWaitTimeout(
+    this.wait,
+    this.bound,
+    this.wanted, {
+    this.logPart,
+    this.driverTail = const <String>[],
+  });
+
+  @override
+  String toString() {
+    final tail = driverTail.isEmpty
+        ? ''
+        : '; driver tail: ${driverTail.take(8).join(' | ')}';
+    final log = logPart;
+    final logText = log == null
+        ? ''
+        : '; page log so far: '
+              '${log.length > 2000 ? log.substring(0, 2000) : log}';
+    return 'WebDriverWaitTimeout($wait exceeded its ${bound.inSeconds}s '
+        'bound; wanted: $wanted$logText$tail)';
+  }
+}
+
 /// One live W3C session: the id plus the capabilities the driver reported
 /// (browser name and version read from here, never guessed).
 final class WebDriverSessionInfo {
@@ -146,21 +196,45 @@ final class WebDriverClient {
     if (_driverLines.length > 40) _driverLines.removeAt(0);
   }
 
+  /// One driver HTTP stage, bounded and named: expiry throws the loud
+  /// named wait failure carrying the driver's own log tail, never a
+  /// bare TimeoutException with no context.
+  Future<T> _stage<T>(Future<T> stage, String stageName, Duration timeout) =>
+      stage.timeout(
+        timeout,
+        onTimeout: () => throw WebDriverWaitTimeout(
+          'driver call $stageName',
+          timeout,
+          'the driver answers',
+          driverTail: driverLogTail,
+        ),
+      );
+
   Future<Map<String, Object?>> _send(
     String method,
     String path, {
     Object? body,
     Duration timeout = const Duration(seconds: 30),
   }) async {
-    final request = await _http
-        .openUrl(method, _base.resolve(path))
-        .timeout(timeout);
+    final request = await _stage(
+      _http.openUrl(method, _base.resolve(path)),
+      '$method $path (connect)',
+      timeout,
+    );
     request.headers.contentType = ContentType.json;
     if (body != null) {
       request.add(utf8.encode(jsonEncode(body)));
     }
-    final response = await request.close().timeout(timeout);
-    final text = await utf8.decoder.bind(response).join().timeout(timeout);
+    final response = await _stage(
+      request.close(),
+      '$method $path (response)',
+      timeout,
+    );
+    final text = await _stage(
+      utf8.decoder.bind(response).join(),
+      '$method $path (body)',
+      timeout,
+    );
     if (response.statusCode < 200 || response.statusCode > 299) {
       var error = 'unknown-error';
       var message = text;
@@ -285,7 +359,10 @@ final class WebDriverClient {
   /// log the lab page wrote into its own DOM. Without [untilContains] it
   /// waits for a stable reading (two identical polls past a short floor)
   /// and returns that. The final reading rides out even on failure, so a
-  /// red scene names the last log the browser actually wrote.
+  /// red scene names the last log the browser actually wrote. The wait
+  /// is bounded by [timeout] (short, never minutes); expiry throws
+  /// [WebDriverWaitTimeout] naming the wait, the wanted reading, the
+  /// accumulated log up to that moment, and the driver's log tail.
   Future<String> waitForElementText(
     String css, {
     String? untilContains,
@@ -316,11 +393,14 @@ final class WebDriverClient {
         lastText = text;
       }
       if (DateTime.now().isAfter(deadline)) {
-        throw TimeoutException(
-          'the element "$css" never reached the wanted reading within '
-          '${timeout.inSeconds}s'
-          '${untilContains == null ? '' : ' (wanted: "$untilContains")'}; '
-          'last text: ${lastText.length > 600 ? lastText.substring(0, 600) : lastText}',
+        throw WebDriverWaitTimeout(
+          'element text of "$css"',
+          timeout,
+          untilContains == null
+              ? 'two identical stable readings past the one-second floor'
+              : 'a reading containing "$untilContains"',
+          logPart: lastText,
+          driverTail: driverLogTail,
         );
       }
       await Future<void>.delayed(interval);
